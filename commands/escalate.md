@@ -5,7 +5,7 @@ argument-hint: "[task-slug]"
 
 Escalate `$ARGUMENTS` by one tier. If the argument is empty, escalate the task the conversation is already on.
 
-Order is fixed: Haiku (`cc-tiers:worker`) to Sonnet (`cc-tiers:implementer`) to Opus (the orchestrator implements it). Opus is the last tier. If the task is already on Opus, stop and report the notes instead of delegating.
+Order is fixed: Haiku (`cc-tiers:worker`) to Sonnet (`cc-tiers:implementer`) to Opus (the orchestrator implements it; from the light-mode `cc-tiers:dispatcher`, `cc-tiers:architect` does). Opus is the last tier. If the task is already on Opus, stop and report the notes instead of delegating.
 
 The attempt limit is ${user_config.max_attempts} (default 2). Escalating early is allowed when the user asks for it. Say that the user asked, and still carry the failure notes. A conserve line from budget routing does not block this escalation: Opus is the ceiling.
 
@@ -16,7 +16,7 @@ Start the prompt with:
 ```
 CC_TIERS_TASK: <slug>
 CC_TIERS_TIER: <new tier>
-CC_TIERS_ROLE: worker|implementer
+CC_TIERS_ROLE: worker|implementer|architect
 ```
 
-Delegating to the higher tier moves the stored counter up with the notes carried; the hook says so. Do not pass a `model` argument. Run the agent in the foreground. If the new tier is Opus and this session is already `cc-tiers:orchestrator`, do the work here. If it is not, delegate to `cc-tiers:orchestrator` with the failure notes in the prompt.
+Delegating to the higher tier moves the stored counter up with the notes carried; the hook says so. Do not pass a `model` argument. Run the agent in the foreground. If the new tier is Opus and this session is already `cc-tiers:orchestrator`, do the work here. If it is not, delegate to `cc-tiers:architect` with the failure notes in the prompt. The new tier starts at the first level of its effort ladder; the hook sets it.

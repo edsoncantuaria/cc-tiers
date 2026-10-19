@@ -49,5 +49,13 @@
         "billing"
       ]
     }
+  },
+  "effort": {
+    "sonnet": [
+      "medium",
+      "high",
+      "max"
+    ],
+    "conserveCap": "high"
   }
 }

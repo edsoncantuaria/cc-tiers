@@ -1,7 +1,7 @@
 {
   "name": "cc-tiers",
-  "version": "0.3.0",
-  "description": "Tiered Opus, Sonnet, and Haiku workflow with cheaper review, budget routing, and cc-cost spend",
+  "version": "0.4.0",
+  "description": "Tiered Opus, Sonnet, and Haiku workflow with an effort ladder, a Haiku classifier, a light mode, cheaper review, budget routing, and cc-cost spend",
   "author": {
     "name": "edsoncantuaria",
     "url": "https://github.com/edsoncantuaria"
@@ -9,7 +9,7 @@
   "homepage": "https://github.com/edsoncantuaria/cc-tiers",
   "repository": "https://github.com/edsoncantuaria/cc-tiers",
   "license": "MIT",
-  "keywords": ["workflow", "subagents", "opus", "sonnet", "haiku", "models"],
+  "keywords": ["workflow", "subagents", "opus", "sonnet", "haiku", "models", "effort"],
   "userConfig": {
     "max_attempts": {
       "type": "number",
@@ -60,6 +60,27 @@
       "title": "Extra review phrases",
       "description": "Comma-separated phrases that also require an Opus review, added to the built-in risky phrases. Built-in keywords already cover auth, payments, migrations, schemas, security, and concurrency. Example: terraform, billing.",
       "default": ""
+    },
+    "effort_ladder": {
+      "type": "string",
+      "title": "Effort ladder",
+      "description": "on: a retry at the same tier runs one effort level higher before the task changes model (Haiku low to medium, Sonnet medium to high to xhigh, Opus high to xhigh), and cc-tiers sets that effort on the Agent call. off: each agent keeps the effort its file pins.",
+      "default": "on",
+      "options": ["on", "off"]
+    },
+    "classifier": {
+      "type": "string",
+      "title": "Haiku classifier",
+      "description": "haiku: before a cc-tiers:worker call runs, a quick Haiku pass checks that the task is really trivial and sends it to Sonnet when it is not. local: only the keyword lists and the complexity score decide; the orchestrator marks worker prompts CC_TIERS_CLASSIFY: skip.",
+      "default": "haiku",
+      "options": ["haiku", "local"]
+    },
+    "light_path": {
+      "type": "string",
+      "title": "Light path",
+      "description": "on: when a request is one trivial task, cc-tiers tells the orchestrator to skip the written plan and delegate it in one call, with no checker pass for a lookup. off: every request is planned the usual way.",
+      "default": "on",
+      "options": ["on", "off"]
     }
   }
 }

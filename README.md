@@ -10,7 +10,7 @@ A Claude Code plugin that keeps each task on the cheapest tier that can finish i
 
 **English** · [Português](README.pt-BR.md)
 
-⚡ Haiku, Sonnet, and Opus  •  🔁 two failures, then escalate  •  💸 cc-cost when it is installed
+⚡ Haiku, Sonnet, and Opus  •  🪜 more effort before a bigger model  •  🔁 two failures, then escalate  •  💸 cc-cost when it is installed
 
 ---
 
@@ -43,6 +43,9 @@ claude --plugin-dir /path/to/cc-tiers
 | Trivial | `cc-tiers:worker` | Haiku | Renames, typos, formatting, lookups, simple searches, ~15-line edits |
 | Check | `cc-tiers:checker` | Sonnet | A fresh pass over Haiku's output. Does not edit |
 | Review | `cc-tiers:reviewer` | Opus | A fresh pass over risky or non-trivial work. Does not edit |
+| Light mode | `cc-tiers:dispatcher` | Sonnet | Optional session agent that routes on Sonnet and calls Opus only when needed |
+| Light plan | `cc-tiers:planner` | Opus | Plans a multi-task request for the dispatcher. Does not edit |
+| Light ceiling | `cc-tiers:architect` | Opus | Implements the ceiling for the dispatcher |
 
 While the plugin is enabled, `settings.json` sets the session agent to `orchestrator`. Your own `agent` in `~/.claude/settings.json` still wins. If you override it, `/cc-tiers:tiers` runs the same workflow.
 
@@ -81,6 +84,43 @@ The hooks enforce what the prompts ask for:
 - **Background agents** are counted too. The launch records the agent id, and SubagentStop counts the report when it finishes. The note reaches the orchestrator on its next delegation, or at the end of the turn.
 - **The Opus ceiling** has no Agent call, so the orchestrator marks its own attempt with a `CC_TIERS_TASK` / `CC_TIERS_TIER: opus` / `CC_TIERS_ROLE: orchestrator` header and closes it with `CC_TIERS_STATUS`. The hook counts that trailer like any other report.
 - Parallel agents share one counter file per session, behind a lock, written atomically.
+- **API and network errors** (overloaded, rate limit, 5xx) are not failures. The hook says so and the same tier runs again, so an outage does not push work up to Opus.
+
+---
+
+## 🪜 Effort
+
+Each tier also has an effort ladder. A retry at the same tier runs one effort level higher before the task changes model, because more thinking on Sonnet is cheaper than a jump to Opus:
+
+| Tier | Attempt 1 | Attempt 2 | Attempt 3+ |
+| --- | --- | --- | --- |
+| Haiku | `low` | `medium` | `medium` |
+| Sonnet | `medium` | `high` | `xhigh` |
+| Opus (`cc-tiers:architect`) | `high` | `xhigh` | `xhigh` |
+
+The PreToolUse hook sets `effort` on the Agent call (Claude Code's per-call `effort`, 2.1.292+), so the orchestrator cannot forget it. It may ask for a higher level, never a lower one, and never above the top of the ladder. A Sonnet task that matches a review keyword starts at `high`. While budget routing is conserving, effort stops at `high`. When the Opus orchestrator implements the ceiling itself, it keeps its own session effort. `CLAUDE_CODE_EFFORT_LEVEL`, when set, wins over all of this.
+
+`effort_ladder: off` leaves each agent at the effort its file pins. A project can replace a ladder in `.claude/cc-tiers.json` with `effort.haiku`, `effort.sonnet`, `effort.opus`, and `effort.conserveCap`.
+
+---
+
+## 🧪 Classifier
+
+The keyword lists are a first guess. Two checks stand behind them before a task reaches Haiku:
+
+- **Complexity score**, local and free. Several steps (bullets, "and then", "e depois"), three or more files, design or investigation wording (refactor, architecture, debug, flaky, memory leak), or a long brief add points. At 2 points a trivial-looking task starts on Sonnet. `/cc-tiers:route` prints the score and its signals.
+- **Haiku classifier**, a `prompt` hook that runs only on `cc-tiers:worker` calls. A quick Haiku pass reads the task, and when it is not really trivial the call is refused with the reason, and the orchestrator sends the same slug to Sonnet. That is a routing correction, not a failure. `classifier: local` turns it off: the orchestrator then marks worker prompts `CC_TIERS_CLASSIFY: skip`, which the command hook only accepts in that mode.
+
+---
+
+## 🪶 Light mode
+
+The Opus orchestrator reads every request, even a typo fix. Two things cut that cost:
+
+- **Light path** (`light_path: on`, the default). When a request is one trivial task, the UserPromptSubmit hook tells the orchestrator so: no written plan, one delegation, and no checker pass for a lookup that changes no files. Opus still reads the request, but writes much less.
+- **Light mode**, the `cc-tiers:dispatcher` session agent on Sonnet. It routes and delegates like the orchestrator, and calls Opus only for three things: `cc-tiers:planner` for a request with more than one task or a design decision, `cc-tiers:architect` for a task that used its attempts on Sonnet, and `cc-tiers:reviewer` for risky work. A single ordinary task never touches Opus.
+
+Turn on light mode for one session with `claude --agent cc-tiers:dispatcher`, or for good with `"agent": "cc-tiers:dispatcher"` in `~/.claude/settings.json`. The planner starts in a fresh context, so for a long conversation that keeps building on earlier turns, the orchestrator is the better fit.
 
 ---
 
@@ -102,9 +142,9 @@ A window whose reset time is already past counts as 0, the same way cc-cost draw
 
 ---
 
-## 🧠 Learning from Haiku
+## 🧠 Learning from Haiku and Sonnet
 
-With `learn` set to `on` (the default), a Haiku failure is appended to `.claude/cc-tiers-history.json` in the project. The next task with the same slug, or enough of the same words, starts on Sonnet instead of Haiku. Words are compared without accents, so `migração` and `migracao` match. `off` writes nothing and ignores the file.
+With `learn` set to `on` (the default), a Haiku failure is appended to `.claude/cc-tiers-history.json` in the project. The next task with the same slug, or enough of the same words, starts on Sonnet instead of Haiku. A task that used its attempts on Sonnet is recorded too, and a similar task later starts on Sonnet at the top of its effort ladder (`xhigh`) instead of climbing it again. Opus still never starts a task. Words are compared without accents, so `migração` and `migracao` match. `off` writes nothing and ignores the file.
 
 The first write adds the file to `.git/info/exclude` when the project is a git checkout (worktrees included), so it stays out of git without touching your tracked `.gitignore`. The plugin repo ignores that path too.
 
@@ -128,7 +168,7 @@ You: "Rename `fetchUser` to `loadUser` in `api.ts`, and add pagination to `GET /
 
 1. The Opus orchestrator splits it into `rename-fetch-user` (Haiku) and `users-pagination` (Sonnet).
 2. Haiku renames the symbol and the check passes. The policy is `cheap`, so `cc-tiers:checker` on Sonnet reads the one-file rename and approves it. Opus is not asked.
-3. Sonnet adds pagination. The cursor test fails. That is failure 1, so Sonnet retries with the traceback in the prompt. The tests pass. Ordinary Sonnet work is not sent to Opus.
+3. Sonnet adds pagination at effort `medium`. The cursor test fails. That is failure 1, so Sonnet retries at `high` with the traceback in the prompt. The tests pass. Ordinary Sonnet work is not sent to Opus.
 4. The route is a public API, so the Opus reviewer reads the diff and rejects it: the cursor is not validated. That is failure 2 on Sonnet.
 5. The limit is 2, so the task escalates to Opus with both notes — the traceback and the review. Opus fixes the validation. The reviewer approves on the next pass.
 6. The orchestrator reports both slugs, the tier that finished each one, who reviewed them, and that pagination escalated. When cc-cost is installed, each slug also carries its fresh-token line.
@@ -150,10 +190,13 @@ Open `/config` and set the cc-tiers rows. They apply on the next session (the Se
 | `budget_7d` | `80` | Percent of the `seven_day` window that starts conserving. 1–100 |
 | `trivial_extra` | empty | Comma-separated phrases added to the Haiku list |
 | `risky_extra` | empty | Comma-separated phrases added to the Opus review list |
+| `effort_ladder` | `on` | Raise effort on a retry before changing model. `off` keeps each agent's own effort |
+| `classifier` | `haiku` | `haiku` adds the Haiku check on worker calls. `local` uses only keywords and the complexity score |
+| `light_path` | `on` | Tell the orchestrator when a request is one trivial task. `off` plans every request |
 
 `cheap` sends Haiku output to the Sonnet checker and sends Opus review only for a review phrase or the ceiling. `risky` is the 0.1.0 behavior: Opus reviews non-trivial work and skips a trivial Haiku pass. `always` reviews every pass (Haiku on Sonnet, the rest on Opus). `never` skips review. While a budget window is conserving, Opus review is reserved for critical work even under `risky` or `always`.
 
-Routing matches two kinds of lists. **Phrases** (`when`, `reviewWhen`, and the `_extra` options) match when the whole phrase appears in the task. **Keywords** (`haiku.keywords`, `opus.reviewKeywords`) match at the start of a word, case- and accent-insensitive: `migra` finds "migration" and "migração", `authent` finds "authentication" but not "author". The built-in keywords cover renames, typos, formatting and lookups for Haiku, and auth, payments, migrations, schemas, public APIs, security, and concurrency for Opus review, in English and Portuguese. A task that looks trivial but hits a review keyword starts on Sonnet.
+Routing matches two kinds of lists. **Phrases** (`when`, `reviewWhen`, and the `_extra` options) match when the whole phrase appears in the task. **Keywords** (`haiku.keywords`, `opus.reviewKeywords`) match at the start of a word, case- and accent-insensitive: `migra` finds "migration" and "migração", `authent` finds "authentication" but not "author". The built-in keywords cover renames, typos, formatting and lookups for Haiku, and auth, payments, migrations, schemas, public APIs, security, and concurrency for Opus review, in English and Portuguese. A task that looks trivial but hits a review keyword, or scores 2 on complexity (`sonnet.complexKeywords` is one of its signals), starts on Sonnet.
 
 To replace a whole list, add `.claude/cc-tiers.json` to the project. A list you include replaces that list; lists you omit stay at the default. The same file may set `learn`, `budget5h`, and `budget7d` when `/config` leaves them empty. `/config` still wins when both are set. See `config/cc-tiers.example.json`.
 
@@ -166,17 +209,18 @@ To replace a whole list, add `.claude/cc-tiers.json` to the project. A list you 
   "tiers": {
     "haiku": { "when": ["rename a symbol in one or two files", "changelog edits"] },
     "opus": { "reviewKeywords": ["authent", "payment", "migrat", "terraform"] }
-  }
+  },
+  "effort": { "sonnet": ["medium", "high", "max"], "conserveCap": "high" }
 }
 ```
 
-The escalation order is fixed. Routing phrases and keywords, the retry limit, the review policy, learning, and the two budget thresholds are the knobs.
+The escalation order is fixed. Routing phrases and keywords, the retry limit, the effort ladders, the review policy, the classifier, learning, and the two budget thresholds are the knobs.
 
 ---
 
 ## 📋 Requirements
 
-- Claude Code **2.1.295+** (the `/config` pickers use `userConfig.options`, and the PreToolUse hook sets `onFailure`).
+- Claude Code **2.1.295+** (the `/config` pickers use `userConfig.options`, the PreToolUse hook sets `onFailure`, and the effort ladder uses the per-call `effort` from 2.1.292).
 - Node.js 18+ on `PATH` as `node`. The hooks call `node` directly, so they run the same under bash, Git Bash, and PowerShell on Windows. They do not call Python.
 
 ## 🛠️ Development
@@ -199,12 +243,12 @@ claude --plugin-dir .
 | `.claude-plugin/plugin.json` | Name, metadata, and the `/config` knobs |
 | `.claude-plugin/marketplace.json` | Marketplace entry, source `./` |
 | `settings.json` | Session agent: `orchestrator` |
-| `agents/*.md` | Opus orchestrator and reviewer, Sonnet implementer and checker, Haiku worker |
+| `agents/*.md` | Opus orchestrator, reviewer, planner, and architect, Sonnet implementer, checker, and dispatcher, Haiku worker |
 | `skills/tiers/SKILL.md` | `/cc-tiers:tiers` |
 | `commands/route.md` | `/cc-tiers:route` |
 | `commands/escalate.md` | `/cc-tiers:escalate` |
-| `config/routing.default.json` | Built-in phrase lists and default thresholds |
-| `hooks/hooks.json` | SessionStart summary, the Agent checks and counter, SubagentStop, Stop, and UserPromptSubmit |
+| `config/routing.default.json` | Built-in phrase lists, effort ladders, and default thresholds |
+| `hooks/hooks.json` | SessionStart summary, the Agent checks, effort, Haiku classifier, and counter, SubagentStop, Stop, and UserPromptSubmit |
 | `hooks/cc_tiers.mjs` | Merge rules, the counter, spend, budget, and history |
 | `hooks/route.mjs` | The heuristic behind `/cc-tiers:route` |
 | `.github/workflows/ci.yml` | Tests on Linux, macOS, and Windows, and `claude plugin validate` |
@@ -212,7 +256,7 @@ claude --plugin-dir .
 
 ## 🔒 Privacy
 
-No network and no telemetry. The hooks read the routing files, the plugin options Claude Code already passes in, the session transcript, and cc-cost's local plugin data when that plugin is installed. They write the attempt counter under the plugin data directory (`latest.json` and one file per session) and, when learning is on, `.claude/cc-tiers-history.json` in the project plus one line in `.git/info/exclude`. Uninstalling the plugin removes the plugin data directory unless you pass `--keep-data`. The history file stays in the project until you delete it.
+No telemetry, and the command hooks make no network calls. With `classifier: haiku`, the classifier hook sends each `cc-tiers:worker` call's input to Haiku through Claude Code, the same way the session reaches Claude. The hooks read the routing files, the plugin options Claude Code already passes in, the session transcript, and cc-cost's local plugin data when that plugin is installed. They write the attempt counter under the plugin data directory (`latest.json` and one file per session) and, when learning is on, `.claude/cc-tiers-history.json` in the project plus one line in `.git/info/exclude`. Uninstalling the plugin removes the plugin data directory unless you pass `--keep-data`. The history file stays in the project until you delete it.
 
 ---
 

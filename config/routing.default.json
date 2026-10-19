@@ -4,6 +4,25 @@
   "learn": true,
   "budget5h": 80,
   "budget7d": 80,
+  "classifier": "haiku",
+  "lightPath": true,
+  "effort": {
+    "on": true,
+    "haiku": [
+      "low",
+      "medium"
+    ],
+    "sonnet": [
+      "medium",
+      "high",
+      "xhigh"
+    ],
+    "opus": [
+      "high",
+      "xhigh"
+    ],
+    "conserveCap": "high"
+  },
   "escalation": [
     "haiku",
     "sonnet",
@@ -50,6 +69,35 @@
         "a bug fix that stays inside one subsystem",
         "tests for behavior that already exists",
         "a refactor that does not change architecture or public contracts"
+      ],
+      "complexKeywords": [
+        "refactor",
+        "refator",
+        "architect",
+        "arquitet",
+        "redesign",
+        "rewrite",
+        "reescrev",
+        "across",
+        "throughout",
+        "entire",
+        "whole codebase",
+        "every file",
+        "todos os arquivos",
+        "codebase",
+        "performance",
+        "optimiz",
+        "otimiz",
+        "investigat",
+        "investig",
+        "debug",
+        "depur",
+        "root cause",
+        "causa raiz",
+        "flaky",
+        "intermit",
+        "memory leak",
+        "vazamento"
       ]
     },
     "opus": {

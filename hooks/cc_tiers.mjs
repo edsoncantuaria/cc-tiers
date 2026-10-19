@@ -25,13 +25,33 @@ export const IMPLEMENTERS = { haiku: 'worker', sonnet: 'implementer', opus: 'orc
 export const SCOPED = {
   worker: 'cc-tiers:worker',
   implementer: 'cc-tiers:implementer',
+  architect: 'cc-tiers:architect',
+  planner: 'cc-tiers:planner',
   reviewer: 'cc-tiers:reviewer',
   checker: 'cc-tiers:checker',
   orchestrator: 'cc-tiers:orchestrator',
+  dispatcher: 'cc-tiers:dispatcher',
 }
-export const ROLES = { worker: 'haiku', implementer: 'sonnet', reviewer: 'opus', checker: 'sonnet', orchestrator: 'opus' }
+export const ROLES = {
+  worker: 'haiku',
+  implementer: 'sonnet',
+  architect: 'opus',
+  planner: 'opus',
+  reviewer: 'opus',
+  checker: 'sonnet',
+  orchestrator: 'opus',
+}
 export const REVIEW_ROLES = new Set(['reviewer', 'checker'])
+/** Roles whose run writes the change and so counts an attempt at its tier. */
+export const WRITER_ROLES = new Set(['worker', 'implementer', 'architect'])
 export const REVIEW_POLICIES = new Set(['cheap', 'risky', 'always', 'never'])
+export const CLASSIFIERS = new Set(['haiku', 'local'])
+export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
+export const DEFAULT_LADDERS = { haiku: ['low', 'medium'], sonnet: ['medium', 'high', 'xhigh'], opus: ['high', 'xhigh'] }
+/** The effort each agent file pins, so the hook only rewrites a call that needs a different level. */
+export const AGENT_EFFORT = { worker: 'low', implementer: 'medium', architect: 'high', planner: 'high', checker: 'medium', reviewer: 'high' }
+export const COMPLEX_THRESHOLD = 2
+export const OPUS_CEILING = 'the Opus ceiling (the orchestrator implements it; from cc-tiers:dispatcher, delegate to cc-tiers:architect)'
 export const DEFAULT_MAX_ATTEMPTS = 2
 export const DEFAULT_BUDGET = 80
 export const HISTORY_BASENAME = 'cc-tiers-history.json'
@@ -101,6 +121,26 @@ export function parseLearn(value, fallback = true) {
   if (['on', 'true', 'yes', '1'].includes(text)) return true
   if (['off', 'false', 'no', '0'].includes(text)) return false
   return fallback
+}
+
+export function parseEffort(value) {
+  const text = String(value ?? '').trim().toLowerCase()
+  return EFFORTS.includes(text) ? text : null
+}
+
+export function effortRank(level) {
+  return EFFORTS.indexOf(level)
+}
+
+/** A project ladder must be a non-empty list of known levels that never goes down. */
+function ladderList(value) {
+  if (!Array.isArray(value) || value.length === 0 || value.length > EFFORTS.length) return null
+  const levels = value.map(parseEffort)
+  if (levels.some((level) => level == null)) return null
+  for (let index = 1; index < levels.length; index += 1) {
+    if (effortRank(levels[index]) < effortRank(levels[index - 1])) return null
+  }
+  return levels
 }
 
 function phraseList(value) {
@@ -195,9 +235,32 @@ export function mergeRouting(defaults, project = null, user = null) {
     return phrases
   }
 
+  const effortIn = defaults.effort && typeof defaults.effort === 'object' ? defaults.effort : {}
+  const effortProject = source.effort && typeof source.effort === 'object' && !Array.isArray(source.effort) ? source.effort : {}
+  const ladders = {}
+  for (const tier of TIERS) {
+    ladders[tier] = ladderList(effortIn[tier]) || [...DEFAULT_LADDERS[tier]]
+    if (tier in effortProject) {
+      const replaced = ladderList(effortProject[tier])
+      if (replaced == null) notes.push(`Ignored effort.${tier} in the project file; it must list ${EFFORTS.join(', ')} levels that never go down.`)
+      else ladders[tier] = replaced
+    }
+  }
+  const conserveCap = parseEffort(effortProject.conserveCap) || parseEffort(effortIn.conserveCap) || 'high'
+  const effortOn = parseLearn(config.effort_ladder, parseLearn(effortProject.on ?? effortIn.on, true))
+
+  let classifier = String(defaults.classifier || 'haiku').toLowerCase()
+  if (!CLASSIFIERS.has(classifier)) classifier = 'haiku'
+  if (config.classifier != null && config.classifier !== '') {
+    const lowered = String(config.classifier).trim().toLowerCase()
+    if (CLASSIFIERS.has(lowered)) classifier = lowered
+  }
+  const light = parseLearn(config.light_path, parseLearn(defaults.lightPath, true))
+
   let haikuWhen = list('haiku', 'when')
   const haikuKeywords = list('haiku', 'keywords')
   const sonnetWhen = list('sonnet', 'when')
+  const complexKeywords = list('sonnet', 'complexKeywords')
   const opusWhen = list('opus', 'when')
   let reviewWhen = list('opus', 'reviewWhen')
   const reviewKeywords = list('opus', 'reviewKeywords')
@@ -213,10 +276,13 @@ export function mergeRouting(defaults, project = null, user = null) {
     budget5h,
     budget7d,
     escalation: [...TIERS],
+    effort: { on: effortOn, ladders, conserveCap },
+    classifier,
+    light,
     notes,
     tiers: {
       haiku: { model: 'haiku', agent: 'worker', scoped: SCOPED.worker, when: haikuWhen, keywords: haikuKeywords },
-      sonnet: { model: 'sonnet', agent: 'implementer', scoped: SCOPED.implementer, when: sonnetWhen },
+      sonnet: { model: 'sonnet', agent: 'implementer', scoped: SCOPED.implementer, when: sonnetWhen, complexKeywords },
       opus: {
         model: 'opus',
         agent: 'orchestrator',
@@ -263,6 +329,71 @@ export function isRisky(text, routing) {
 export function isTrivial(text, routing) {
   const haiku = routing?.tiers?.haiku
   return matchesAny(stripHeaders(text), haiku?.when) || matchesKeyword(stripHeaders(text), haiku?.keywords)
+}
+
+const FILE_RE =
+  /(?:^|[\s`'"(])((?:[\w.-]+\/)*[\w-]+\.(?:tsx?|jsx?|mjs|cjs|py|rb|go|rs|java|kt|swift|cs|cpp|hpp|c|h|php|vue|svelte|css|scss|html|json|ya?ml|toml|md|sql|sh))(?=$|[\s`'"),:;.])/gi
+const STEP_LINE_RE = /^\s*(?:[-*•]|\d+[.)])\s+\S/
+const SEQUENCE_RE = /\b(?:and then|then|after that|afterwards|e depois|depois disso|em seguida|e tambem|and also)\b/g
+
+/**
+ * A second opinion next to the keyword lists: how much a task looks like more
+ * than one mechanical edit. Each signal adds to the score; at COMPLEX_THRESHOLD
+ * a trivial-looking task starts on Sonnet instead of Haiku.
+ */
+export function assessComplexity(text, routing) {
+  const body = stripHeaders(text)
+  const hay = fold(body)
+  const signals = []
+  let score = 0
+  const add = (points, signal) => {
+    score += points
+    signals.push(signal)
+  }
+
+  const words = hay.split(/\s+/).filter(Boolean).length
+  if (words > 250) add(2, `long (${words} words)`)
+  else if (words > 120) add(1, `long (${words} words)`)
+
+  const steps = body.split(/\n/).filter((line) => STEP_LINE_RE.test(line)).length + (hay.match(SEQUENCE_RE) || []).length
+  if (steps >= 2) add(2, `multi-step (${steps} steps)`)
+  else if (steps === 1) add(1, 'two steps')
+
+  const files = new Set()
+  for (const match of body.matchAll(FILE_RE)) files.add(match[1].toLowerCase())
+  if (files.size >= 6) add(2, `${files.size} files`)
+  else if (files.size >= 3) add(1, `${files.size} files`)
+
+  if (matchesKeyword(body, routing?.tiers?.sonnet?.complexKeywords)) add(2, 'design or investigation wording')
+  return { score, signals, complex: score >= COMPLEX_THRESHOLD }
+}
+
+/**
+ * The effort for an attempt at one tier. rung is the failures already counted
+ * at that tier, so a retry runs one level up before the task changes model.
+ * boost starts a task higher (risky work, or a kind that already outgrew Sonnet).
+ * While conserving, levels above conserveCap are cut back to it.
+ */
+export function effortFor(routing, tier, rung = 0, { conserve = false, boost = 0 } = {}) {
+  const effort = routing?.effort
+  const ladder = effort?.ladders?.[tier]
+  if (!effort?.on || !Array.isArray(ladder) || !ladder.length) return null
+  let level = ladder[Math.min(Math.max(0, rung + boost), ladder.length - 1)]
+  const cap = effort.conserveCap
+  if (conserve && cap && effortRank(level) > effortRank(cap)) {
+    level = effortRank(ladder[0]) > effortRank(cap) ? ladder[0] : cap
+  }
+  return level
+}
+
+/** The highest level the ladder allows for a tier, after the conserve cap. */
+export function effortTop(routing, tier, { conserve = false } = {}) {
+  return effortFor(routing, tier, EFFORTS.length, { conserve })
+}
+
+function effortNote(routing, tier, rung) {
+  const level = effortFor(routing, tier, rung, { conserve: routing?.conserve === true })
+  return level ? ` at effort ${level}` : ''
 }
 
 /**
@@ -318,13 +449,20 @@ export function emptyHistory() {
   return { version: 1, entries: [] }
 }
 
-/** A recorded kind matches the task slug from the header; otherwise enough shared words match. */
-export function historyMatches(text, history) {
+function entryTier(entry) {
+  return entry?.tier === 'sonnet' ? 'sonnet' : 'haiku'
+}
+
+/**
+ * A recorded kind matches the task slug from the header; otherwise enough shared words match.
+ * tier picks the record: haiku entries are Haiku failures, sonnet entries are tasks that escalated past Sonnet.
+ */
+export function historyMatches(text, history, tier = 'haiku') {
   if (!history || !Array.isArray(history.entries)) return false
   const kind = slug(parseHeaders(text).TASK || '')
   const tokens = tokenize(stripHeaders(text))
   for (const entry of history.entries) {
-    if (!entry || typeof entry !== 'object') continue
+    if (!entry || typeof entry !== 'object' || entryTier(entry) !== tier) continue
     if (entry.kind && kind && entry.kind === kind) return true
     const known = new Set(Array.isArray(entry.tokens) ? entry.tokens : [])
     let shared = 0
@@ -335,13 +473,19 @@ export function historyMatches(text, history) {
   return false
 }
 
-export function noteHaikuFailure(history, { task, prompt, reason, now }) {
+export function noteHaikuFailure(history, details) {
+  return noteFailure(history, { ...details, tier: 'haiku' })
+}
+
+/** Record a Haiku failure, or (tier sonnet) a task that used its attempts on Sonnet. */
+export function noteFailure(history, { tier = 'haiku', task, prompt, reason, now }) {
   const base = history && Array.isArray(history.entries) ? history : emptyHistory()
   const kind = slug(task) || 'task'
   const tokens = tokenize(stripHeaders(`${task}\n${prompt || ''}\n${reason || ''}`)).slice(0, 24)
   const updated = now || new Date().toISOString()
   const entries = base.entries.map((entry) => ({ ...entry }))
-  const found = entries.find((entry) => entry.kind === kind)
+  const recorded = tier === 'sonnet' ? 'sonnet' : 'haiku'
+  const found = entries.find((entry) => entry.kind === kind && entryTier(entry) === recorded)
   const cleanReason = String(reason || 'no reason given').split(/\s+/).filter(Boolean).join(' ').slice(0, MAX_REASON)
   if (found) {
     found.count = (Number(found.count) || 1) + 1
@@ -349,7 +493,9 @@ export function noteHaikuFailure(history, { task, prompt, reason, now }) {
     found.updated = updated
     if (tokens.length) found.tokens = tokens
   } else {
-    entries.push({ kind, tokens, reason: cleanReason, count: 1, updated })
+    const entry = { kind, tokens, reason: cleanReason, count: 1, updated }
+    if (recorded === 'sonnet') entry.tier = 'sonnet'
+    entries.push(entry)
   }
   entries.sort((a, b) => String(b.updated).localeCompare(String(a.updated)))
   return { version: 1, entries: entries.slice(0, MAX_HISTORY) }
@@ -357,9 +503,18 @@ export function noteHaikuFailure(history, { task, prompt, reason, now }) {
 
 /**
  * Classify one task description.
- * because is one of: ceiling, orchestration, trivial, default, opus-phrase, history, risky, budget.
+ * because is one of: ceiling, orchestration, trivial, default, opus-phrase, history, risky, complex, budget.
+ * effort is the level the first attempt runs at, or null when the ladder is off.
  */
 export function decideTier(text, routing, { history = null, conserve = false, ceiling = false } = {}) {
+  const decided = classify(text, routing, { history, conserve, ceiling })
+  let boost = 0
+  if (decided.tier === 'sonnet' && isRisky(text, routing)) boost = 1
+  if (decided.tier === 'sonnet' && history && historyMatches(text, history, 'sonnet')) boost = EFFORTS.length
+  return { ...decided, effort: effortFor(routing, decided.tier, 0, { conserve, boost }) }
+}
+
+function classify(text, routing, { history, conserve, ceiling }) {
   if (ceiling) return { tier: 'opus', agent: SCOPED.orchestrator, because: 'ceiling' }
   let tier = 'sonnet'
   let because = 'default'
@@ -381,6 +536,10 @@ export function decideTier(text, routing, { history = null, conserve = false, ce
   if (tier === 'haiku' && isRisky(text, routing)) {
     tier = 'sonnet'
     because = 'risky'
+  }
+  if (tier === 'haiku' && assessComplexity(text, routing).complex) {
+    tier = 'sonnet'
+    because = 'complex'
   }
   if (conserve && tier === 'opus' && because !== 'orchestration') {
     tier = 'sonnet'
@@ -412,7 +571,7 @@ export function guidance(routing, budget, history) {
   }
   if (policy === 'cheap') {
     lines.push(
-      'Review: send Haiku output to cc-tiers:checker (Sonnet). Send work written at the Opus ceiling, and any result that matches an Opus review phrase or keyword, to cc-tiers:reviewer. Ordinary Sonnet work does not go to Opus.',
+      'Review: send Haiku output to cc-tiers:checker (Sonnet). A lookup or search that changed no files has nothing to check: tell the worker to set CC_TIERS_REVIEW: skip. Send work written at the Opus ceiling, and any result that matches an Opus review phrase or keyword, to cc-tiers:reviewer. Ordinary Sonnet work does not go to Opus.',
     )
   } else if (policy === 'always') {
     lines.push(
@@ -425,17 +584,51 @@ export function guidance(routing, budget, history) {
       'Review: skip a trivial Haiku pass. Send other finished work to cc-tiers:reviewer (Opus). A risky Haiku result goes to cc-tiers:checker (Sonnet), not Opus. While conserving, skip Opus review unless the result matches an Opus review phrase or keyword, or it was written at the Opus ceiling.',
     )
   }
+  const entries = history && Array.isArray(history.entries) ? history.entries : []
+  const kinds = (tier) =>
+    entries
+      .filter((entry) => entry && entryTier(entry) === tier)
+      .slice(0, 12)
+      .map((entry) => entry.kind)
+      .filter(Boolean)
   if (!routing.learn) {
     lines.push('Haiku failure history: off. Do not read .claude/cc-tiers-history.json.')
-  } else if (history && Array.isArray(history.entries) && history.entries.length) {
-    const kinds = history.entries.slice(0, 12).map((entry) => entry.kind).filter(Boolean)
-    lines.push(
-      `Haiku failure history: on. Similar tasks start on Sonnet, not Haiku: ${kinds.join(', ')}.`,
-    )
+  } else if (kinds('haiku').length) {
+    lines.push(`Haiku failure history: on. Similar tasks start on Sonnet, not Haiku: ${kinds('haiku').join(', ')}.`)
   } else {
     lines.push('Haiku failure history: on. No Haiku failures recorded yet. The file is .claude/cc-tiers-history.json.')
   }
+  if (routing.learn && kinds('sonnet').length) {
+    const top = effortTop(routing, 'sonnet', { conserve })
+    lines.push(
+      `Sonnet escalation history: similar tasks escalated past Sonnet before, so they start on Sonnet${top ? ` at effort ${top}` : ''}: ${kinds('sonnet').join(', ')}.`,
+    )
+  }
   return lines
+}
+
+export function effortLine(routing, conserve = false) {
+  if (!routing.effort?.on) {
+    return 'Effort ladder: off. Each agent runs at the effort its file pins. Do not pass effort on the Agent call.'
+  }
+  const ladders = TIERS.map((tier) => `${tier} ${routing.effort.ladders[tier].join(' -> ')}`).join(', ')
+  const cap = conserve ? ` Budget routing is conserving, so effort stops at ${routing.effort.conserveCap}.` : ''
+  return (
+    `Effort ladder: on (${ladders}). Each failure at a tier moves the next attempt one level up before the task changes model. ` +
+    'A task that matches an Opus review keyword starts one level up. cc-tiers sets effort on the Agent call; you may pass a higher level, never a lower one.' +
+    cap +
+    ' At the ceiling the orchestrator keeps its own effort; cc-tiers:architect follows the opus ladder.'
+  )
+}
+
+export function classifierLine(routing) {
+  if (routing.classifier === 'local') {
+    return 'Classifier: local. Only the keyword lists and the complexity score route Haiku work. Add CC_TIERS_CLASSIFY: skip to every cc-tiers:worker prompt so the Haiku classifier hook stands down.'
+  }
+  return (
+    'Classifier: haiku. Before a cc-tiers:worker call runs, a quick Haiku pass judges whether the task is really trivial. ' +
+    'If it refuses the call, delegate the same slug to cc-tiers:implementer; that is a routing correction, not a failure.'
+  )
 }
 
 export function formatSessionContext(routing, projectNote, snapshot = {}) {
@@ -444,10 +637,16 @@ export function formatSessionContext(routing, projectNote, snapshot = {}) {
     'cc-tiers routing is active.',
     `Max attempts per tier: ${routing.maxAttempts}.`,
     `Review policy: ${routing.reviewPolicy}.`,
-    'Escalation order: haiku (cc-tiers:worker) -> sonnet (cc-tiers:implementer) -> opus (the orchestrator implements the ceiling).',
+    'Escalation order: haiku (cc-tiers:worker) -> sonnet (cc-tiers:implementer) -> opus (the orchestrator implements the ceiling; in light mode, cc-tiers:architect).',
     'Reviewer: cc-tiers:reviewer, on Opus, in a fresh context.',
     'Checker: cc-tiers:checker, on Sonnet, reviews Haiku output when the review policy asks for it.',
     'Delegated agents select haiku, sonnet, or opus from their own definitions. cc-tiers blocks a per-invocation model override, because it would replace that choice.',
+    effortLine(routing, snapshot.budget?.conserve === true),
+    classifierLine(routing),
+    `A Haiku-looking task with a complexity score of ${COMPLEX_THRESHOLD} or more (several steps, many files, design or investigation wording, a long brief) starts on Sonnet.`,
+    routing.light
+      ? 'Light path: on. When a request is one trivial task, cc-tiers says so as it arrives: skip the written plan and delegate it in one call.'
+      : 'Light path: off.',
     `Haiku when: ${tiers.haiku.when.join('; ')}.`,
   ]
   if (tiers.haiku.keywords?.length) lines.push(`Haiku keywords: ${tiers.haiku.keywords.join(', ')}.`)
@@ -692,9 +891,23 @@ export function normalizeEvent(raw) {
   return { ...base, kind: 'report', agent_id: agentId, text: contentText(content), error: '' }
 }
 
+const INFRA_RE =
+  /\b(?:overloaded|rate[ _-]?limit(?:ed)?|too many requests|429|500|502|503|504|529|server_error|internal server error|service unavailable|bad gateway|gateway timeout|econnreset|econnrefused|etimedout|socket hang up|network error|fetch failed)\b/i
+
+/** An API or network error says nothing about the tier, so it does not count as a failure. */
+export function isInfraError(text) {
+  return INFRA_RE.test(String(text || ''))
+}
+
+/** Who implements a tier, as the orchestrator should read it. */
+export function implementerFor(tier) {
+  return tier === 'opus' ? OPUS_CEILING : SCOPED[IMPLEMENTERS[tier]]
+}
+
 function emptyMeta(event) {
   return {
     haikuFailure: false,
+    sonnetEscalated: false,
     duplicate: false,
     task: '',
     tier: '',
@@ -739,6 +952,8 @@ export function applyEvent(state, event, routing) {
     seen.push(id)
     state.seen = seen.slice(-MAX_SEEN)
   }
+  // A plan is orchestration, not an attempt: nothing to count, and its spend goes to (orchestration).
+  if (event.role === 'planner') return { state, meta: { ...meta, planner: true }, message: '' }
 
   const headers = parseHeaders(event.prompt || '')
   Object.assign(headers, parseHeaders(event.text || ''))
@@ -760,6 +975,17 @@ export function applyEvent(state, event, routing) {
   const defaultTier = role === 'checker' ? 'haiku' : role === 'reviewer' ? 'sonnet' : ROLES[role]
   if (!TIERS.includes(tier)) tier = defaultTier
   if (!REVIEW_ROLES.has(role)) tier = ROLES[role]
+
+  if (event.kind === 'error' && isInfraError(event.error)) {
+    meta.tier = tier
+    return {
+      state,
+      meta,
+      message:
+        `Task ${task} on ${SCOPED[role]} stopped on an API or network error (${String(event.error).slice(0, 160)}). ` +
+        'cc-tiers did not count it as a failure. Run the same tier again when the API answers.',
+    }
+  }
 
   let status = (headers.STATUS || '').toLowerCase()
   if (event.kind === 'error') status = 'fail'
@@ -790,7 +1016,7 @@ export function applyEvent(state, event, routing) {
         meta,
         message:
           `Task ${task} already escalated to ${current.tier}, so this ${tier} failure was not counted. ` +
-          `Delegate it to ${SCOPED[IMPLEMENTERS[current.tier]]} with the failure notes.`,
+          `Delegate it to ${implementerFor(current.tier)} with the failure notes.`,
       }
     } else {
       note = `Task ${task} was at ${current.tier}, but ${SCOPED[role]} finished it on ${tier}. `
@@ -808,6 +1034,7 @@ export function applyEvent(state, event, routing) {
     const applied = applyReview(tasks, task, current, tier, status, reason, routing, role)
     message = applied.message
     meta.haikuFailure = applied.haikuFailure
+    meta.sonnetEscalated = applied.sonnetEscalated === true
   } else if (status === 'pass' && review === 'skip') {
     delete tasks[task]
     message = `Task ${task} passed on ${tier} and review was skipped. cc-tiers cleared its attempt counter.`
@@ -833,6 +1060,7 @@ export function applyEvent(state, event, routing) {
     const applied = applyFailure(tasks, task, current, tier, role, reason, routing)
     message = applied.message
     meta.haikuFailure = applied.haikuFailure
+    meta.sonnetEscalated = applied.sonnetEscalated
   }
   return { state, message: `${note}${message}`, meta }
 }
@@ -861,14 +1089,17 @@ function applyFailure(tasks, task, current, tier, role, reason, routing) {
 
   if (failures.length < maxAttempts) {
     tasks[task] = current
+    const raised = tier === 'opus' ? '' : effortNote(routing, tier, failures.length)
     return {
       haikuFailure,
+      sonnetEscalated: false,
       message: formatCount(
         task,
         tier,
         failures.length,
         maxAttempts,
-        `Retry on ${tier} (${SCOPED[IMPLEMENTERS[tier]]}). Include the failure notes in the next prompt.`,
+        `Retry on ${tier} (${implementerFor(tier)})${raised}. Include the failure notes in the next prompt.` +
+          (raised ? ' cc-tiers sets that effort on the call.' : ''),
         history,
       ),
     }
@@ -880,6 +1111,7 @@ function applyFailure(tasks, task, current, tier, role, reason, routing) {
     tasks[task] = { tier, failures, carried }
     return {
       haikuFailure,
+      sonnetEscalated: false,
       message: formatCount(
         task,
         tier,
@@ -891,14 +1123,16 @@ function applyFailure(tasks, task, current, tier, role, reason, routing) {
     }
   }
   tasks[task] = { tier: next, failures: [], carried: carriedForward }
+  const start = next === 'opus' ? '' : effortNote(routing, next, 0)
   return {
     haikuFailure,
+    sonnetEscalated: tier === 'sonnet',
     message: formatCount(
       task,
       tier,
       failures.length,
       maxAttempts,
-      `The next tier is ${next} (${SCOPED[IMPLEMENTERS[next]]}). ` +
+      `The next tier is ${next} (${implementerFor(next)})${start}. ` +
         'Pass the failure notes in the delegation prompt. The new tier starts at zero failures.',
       history,
     ),
@@ -918,84 +1152,127 @@ function formatCount(task, tier, count, maximum, decision, history) {
 
 /**
  * Check one Agent call before it runs.
- * Returns { deny, context } where deny is a reason to refuse the call.
+ * Returns { deny, context, input }: deny is a reason to refuse the call, and input,
+ * when set, replaces the call's input (the effort the attempt should run at).
  * An upward move past the counter (an early escalation) moves the counter too.
  */
 export function checkDelegation(state, toolInput, routing, { history = null } = {}) {
   const input = toolInput && typeof toolInput === 'object' ? toolInput : {}
+  const pass = { deny: '', context: '', input: null }
   // Only this plugin's agents: another plugin may also ship a `worker` or `reviewer`.
   const type = String(input.subagent_type || '').trim().toLowerCase()
   const role = type.startsWith('cc-tiers:') ? matchRole(type) : null
-  if (!role) return { deny: '', context: '' }
+  if (!role) return pass
   const scoped = SCOPED[role]
+  const refuse = (deny) => ({ deny, context: '', input: null })
   if (input.model != null && String(input.model).trim() !== '') {
-    return {
-      deny:
-        `cc-tiers: do not pass model to ${scoped}. Its agent file pins ${ROLES[role]}, and a per-call model replaces the tier. ` +
+    return refuse(
+      `cc-tiers: do not pass model to ${scoped}. Its agent file pins ${ROLES[role]}, and a per-call model replaces the tier. ` +
         'Call it again without the model argument.',
-      context: '',
-    }
+    )
   }
+  if (role === 'planner') return pass
   const prompt = String(input.prompt || '')
   const headers = parseHeaders(prompt)
   const task = slug(headers.TASK || '')
   if (!task) {
-    return {
-      deny:
-        `cc-tiers: start the prompt for ${scoped} with CC_TIERS_TASK: <slug>, CC_TIERS_TIER, and CC_TIERS_ROLE lines, ` +
+    return refuse(
+      `cc-tiers: start the prompt for ${scoped} with CC_TIERS_TASK: <slug>, CC_TIERS_TIER, and CC_TIERS_ROLE lines, ` +
         'so the attempt counter can follow the task. Call it again with that header.',
-      context: '',
-    }
+    )
   }
-  if (REVIEW_ROLES.has(role)) return { deny: '', context: '' }
+  if (REVIEW_ROLES.has(role)) return pass
+  if (role === 'worker' && routing.classifier === 'haiku' && (headers.CLASSIFY || '').toLowerCase() === 'skip') {
+    return refuse(
+      'cc-tiers: the classifier is haiku, so a cc-tiers:worker prompt may not carry CC_TIERS_CLASSIFY: skip. Remove that line and call it again.',
+    )
+  }
 
   const tier = ROLES[role]
   const tasks = state.tasks || (state.tasks = {})
-  const current = tasks[task]
+  let current = tasks[task]
+  const notes = []
   if (current && typeof current === 'object' && TIERS.includes(current.tier)) {
     if (TIER_RANK[tier] < TIER_RANK[current.tier]) {
-      const target = current.tier === 'opus' ? 'the Opus orchestrator (implement it yourself, or cc-tiers:orchestrator)' : SCOPED[IMPLEMENTERS[current.tier]]
-      return {
-        deny:
-          `cc-tiers: task ${task} already escalated to ${current.tier}. Delegate it to ${target} with the failure notes, not to ${scoped}.`,
-        context: '',
-      }
+      return refuse(
+        `cc-tiers: task ${task} already escalated to ${current.tier}. Delegate it to ${implementerFor(current.tier)} with the failure notes, not to ${scoped}.`,
+      )
     }
     if (TIER_RANK[tier] > TIER_RANK[current.tier]) {
       const from = current.tier
-      tasks[task] = {
+      current = {
         tier,
         failures: [],
         carried: [...(current.carried || []), ...(current.failures || [])].slice(-MAX_CARRIED),
       }
-      return {
-        deny: '',
-        context: `cc-tiers moved ${task} from ${from} to ${tier} before the attempt limit. The new tier starts at zero failures; carry the notes.`,
-      }
+      tasks[task] = current
+      notes.push(`cc-tiers moved ${task} from ${from} to ${tier} before the attempt limit. The new tier starts at zero failures; carry the notes.`)
     }
-    return { deny: '', context: '' }
+  } else {
+    current = null
+    const decision = decideTier(prompt, routing, { history, conserve: routing.conserve === true })
+    if (role === 'worker' && ['history', 'risky', 'complex'].includes(decision.because)) {
+      const why = {
+        history: 'a similar task already failed on Haiku in this project',
+        risky: 'it matches an Opus review keyword',
+        complex: `its complexity score is ${assessComplexity(prompt, routing).signals.join(', ')}`,
+      }[decision.because]
+      notes.push(`cc-tiers routing hint: ${task} looks like Sonnet work because ${why}. Prefer cc-tiers:implementer next time.`)
+    }
   }
 
-  const decision = decideTier(prompt, routing, { history, conserve: routing.conserve === true })
-  if (role === 'worker' && (decision.because === 'history' || decision.because === 'risky')) {
-    const why =
-      decision.because === 'history'
-        ? 'a similar task already failed on Haiku in this project'
-        : 'it matches an Opus review keyword'
-    return { deny: '', context: `cc-tiers routing hint: ${task} looks like Sonnet work because ${why}. Prefer cc-tiers:implementer next time.` }
+  const effort = attemptEffort(routing, role, tier, current, prompt, history, input.effort)
+  if (effort.note) notes.push(effort.note)
+  return { deny: '', context: notes.join('\n'), input: effort.level ? { ...input, effort: effort.level } : null }
+}
+
+/**
+ * The effort one writer attempt runs at. The rung is the failures already counted
+ * at this tier. A risky task starts one level up; a kind that escalated past Sonnet
+ * before starts at the top. A higher level the orchestrator asked for is kept, up to
+ * the top of the ladder. level is null when the call already says what it needs.
+ */
+function attemptEffort(routing, role, tier, current, prompt, history, asked) {
+  if (!routing.effort?.on) return { level: null, note: '' }
+  const conserve = routing.conserve === true
+  const rung = current && current.tier === tier ? (current.failures || []).length : 0
+  let boost = 0
+  let why = rung ? `attempt ${rung + 1} at ${tier}` : ''
+  if (tier !== 'haiku' && rung === 0 && isRisky(prompt, routing)) {
+    boost = 1
+    why = 'it matches an Opus review keyword'
   }
-  return { deny: '', context: '' }
+  if (tier === 'sonnet' && rung === 0 && history && historyMatches(prompt, history, 'sonnet')) {
+    boost = EFFORTS.length
+    why = 'a similar task escalated past Sonnet before'
+  }
+  const target = effortFor(routing, tier, rung, { conserve, boost })
+  const top = effortTop(routing, tier, { conserve })
+  const given = parseEffort(asked)
+  let level = target
+  if (given && effortRank(given) > effortRank(target)) {
+    level = effortRank(given) > effortRank(top) ? top : given
+    why = level === given ? '' : `the ladder for ${tier} stops at ${top}`
+  }
+  if (level === (given || AGENT_EFFORT[role])) return { level: null, note: '' }
+  const reason = why ? ` because ${why}` : ''
+  return { level, note: `cc-tiers set effort ${level} for ${SCOPED[role]}${reason}.` }
 }
 
 export function hookOutput(eventName, text) {
   return { hookSpecificOutput: { hookEventName: eventName, additionalContext: text } }
 }
 
-export function preToolOutput(deny, context) {
+/** updatedInput replaces the whole Agent input, so it carries every field the call sent. */
+export function preToolOutput(deny, context, updatedInput = null) {
   const output = { hookEventName: 'PreToolUse' }
   if (deny) {
     output.permissionDecision = 'deny'
     output.permissionDecisionReason = deny
+  } else if (updatedInput) {
+    output.permissionDecision = 'allow'
+    output.permissionDecisionReason = `cc-tiers set effort ${updatedInput.effort}`
+    output.updatedInput = updatedInput
   }
   if (context) output.additionalContext = context
   return { hookSpecificOutput: output }
@@ -1469,7 +1746,28 @@ export function userFromEnv(env = process.env) {
     learn: env.CLAUDE_PLUGIN_OPTION_LEARN || null,
     budget_5h: env.CLAUDE_PLUGIN_OPTION_BUDGET_5H || null,
     budget_7d: env.CLAUDE_PLUGIN_OPTION_BUDGET_7D || null,
+    effort_ladder: env.CLAUDE_PLUGIN_OPTION_EFFORT_LADDER || null,
+    classifier: env.CLAUDE_PLUGIN_OPTION_CLASSIFIER || null,
+    light_path: env.CLAUDE_PLUGIN_OPTION_LIGHT_PATH || null,
   }
+}
+
+/**
+ * The note UserPromptSubmit adds when a request is one trivial task: no written
+ * plan, one delegation, and no checker pass for a lookup. Empty otherwise.
+ */
+export function lightHint(prompt, routing, { history = null, conserve = false } = {}) {
+  if (!routing.light) return ''
+  const text = String(prompt || '').trim()
+  if (!text || text.startsWith('/') || /^CC_TIERS_[A-Z]+:/m.test(text)) return ''
+  if (text.split(/\s+/).length > 40) return ''
+  const decision = decideTier(text, routing, { history, conserve })
+  if (decision.tier !== 'haiku' || assessComplexity(text, routing).score > 0) return ''
+  return (
+    'cc-tiers light path: this request looks like one trivial task. Skip the written plan and the cc-tiers:planner call: ' +
+    'give it one slug and delegate it straight to cc-tiers:worker. A lookup or search that changes no files needs no checker pass ' +
+    '(CC_TIERS_REVIEW: skip). Reply in one or two lines. If the request is not what it looks like, route it as usual.'
+  )
 }
 
 export function pluginRoot(env = process.env) {
@@ -1554,7 +1852,7 @@ export function processReport(ctx, state, event, usage = null) {
   const applied = applyEvent(state, event, ctx.routing)
   if (applied.meta.duplicate) return ''
   let message = applied.message
-  const task = applied.meta.task
+  const task = applied.meta.planner ? OVERHEAD : applied.meta.task
   if (ctx.ccCost && task && usage?.key) {
     state.spent = state.spent || []
     if (!state.spent.includes(usage.key)) {
@@ -1576,6 +1874,22 @@ export function processReport(ctx, state, event, usage = null) {
     ensureHistoryIgnored(ctx.projectDir)
     message += `\ncc-tiers recorded a Haiku failure for ${task}. Similar tasks will start on Sonnet.`
   }
+  if (applied.meta.sonnetEscalated && ctx.routing.learn && ctx.projectDir) {
+    const file = historyPath(ctx.projectDir)
+    withLock(file, () => {
+      const history = noteFailure(loadHistory(file), {
+        tier: 'sonnet',
+        task,
+        prompt: applied.meta.prompt,
+        reason: applied.meta.reason,
+      })
+      saveHistory(file, history)
+    })
+    ensureHistoryIgnored(ctx.projectDir)
+    const top = effortTop(ctx.routing, 'sonnet', { conserve: ctx.routing.conserve === true })
+    message += `\ncc-tiers recorded that ${task} escalated past Sonnet. Similar tasks will start on Sonnet${top ? ` at effort ${top}` : ''}.`
+  }
+  if (applied.meta.planner) return ''
   if (ctx.ccCost && task && state.spend?.[task]) {
     const line = formatTaskSpend(task, state.spend[task])
     if (line) message = message ? `${message}\n${line}` : line

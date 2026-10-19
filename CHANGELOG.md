@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.4.0 - 2026-10-19
+
+### Added
+
+- Effort ladder. A retry at the same tier runs one effort level higher before the task changes model: Haiku `low` → `medium`, Sonnet `medium` → `high` → `xhigh`, Opus (`cc-tiers:architect`) `high` → `xhigh`. The PreToolUse hook sets `effort` on the Agent call with `updatedInput`, keeps a higher level the orchestrator asks for up to the top of the ladder, and never lowers it. A Sonnet task that matches a review keyword starts one level up. While budget routing conserves, effort stops at `conserveCap` (`high`). `effort_ladder` (`on` / `off`) in `/config`, and `effort.<tier>` / `effort.conserveCap` in the project file.
+- Complexity score, a local second opinion next to the keyword lists: several steps, three or more files, design or investigation wording (`sonnet.complexKeywords`, English and Portuguese), or a long brief. A trivial-looking task that scores 2 or more starts on Sonnet (`because: complex`). `/cc-tiers:route` prints the score, its signals, and the first effort.
+- Haiku classifier, a `prompt` hook limited to `cc-tiers:worker` calls (`if: Agent(cc-tiers:worker)`, `continueOnBlock`). It refuses a worker call whose task is not really trivial, and the orchestrator sends the slug to Sonnet without counting a failure. `classifier: local` turns it off; worker prompts then carry `CC_TIERS_CLASSIFY: skip`, which the command hook refuses while the classifier is `haiku`.
+- Light path. UserPromptSubmit tells the orchestrator when a request is one trivial task: no written plan, one delegation, no checker pass for a lookup. `light_path` (`on` / `off`).
+- Light mode: `cc-tiers:dispatcher`, a Sonnet session agent that calls Opus only through `cc-tiers:planner` (a read-only plan for a multi-task request), `cc-tiers:architect` (the ceiling), and `cc-tiers:reviewer`. Planner runs are not attempts; their spend goes to `(orchestration)`.
+- Sonnet escalations are learned. A task that used its attempts on Sonnet is recorded in the history with `tier: sonnet`, and a similar task later starts on Sonnet at the top of its ladder.
+
+### Changed
+
+- An API or network error (overloaded, rate limit, 5xx, connection reset) is no longer counted as a failure. The same tier runs again, so an outage does not push work up to Opus.
+- Under the `cheap` policy, a lookup or search that changed no files skips the checker.
+- Escalation and refusal messages name `cc-tiers:architect` as the Opus ceiling in light mode.
+
 ## 0.3.0 - 2026-10-19
 
 ### Fixed

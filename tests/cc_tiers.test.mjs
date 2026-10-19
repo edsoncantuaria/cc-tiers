@@ -90,6 +90,9 @@ test('required files are present and Python hooks are gone', () => {
     'agents/implementer.md',
     'agents/reviewer.md',
     'agents/checker.md',
+    'agents/architect.md',
+    'agents/planner.md',
+    'agents/dispatcher.md',
   ]) {
     assert.ok(existsSync(path.join(ROOT, relative)), relative)
   }
@@ -98,10 +101,10 @@ test('required files are present and Python hooks are gone', () => {
   }
 })
 
-test('manifest declares the 0.3.0 knobs', () => {
+test('manifest declares the 0.4.0 knobs', () => {
   const manifest = JSON.parse(readFileSync(path.join(ROOT, '.claude-plugin/plugin.json'), 'utf8'))
   assert.equal(manifest.name, 'cc-tiers')
-  assert.equal(manifest.version, '0.3.0')
+  assert.equal(manifest.version, '0.4.0')
   assert.equal(/\s|@|:|\/|\\/.test(manifest.name), false)
   assert.equal(RESERVED_PREFIXES.some((prefix) => manifest.name.startsWith(prefix)), false)
   assert.equal(manifest.license, 'MIT')
@@ -114,6 +117,9 @@ test('manifest declares the 0.3.0 knobs', () => {
     ['learn', 'string'],
     ['budget_5h', 'number'],
     ['budget_7d', 'number'],
+    ['effort_ladder', 'string'],
+    ['classifier', 'string'],
+    ['light_path', 'string'],
   ]) {
     const option = manifest.userConfig[key]
     assert.equal(option.type, expected)
@@ -132,6 +138,11 @@ test('manifest declares the 0.3.0 knobs', () => {
   assert.equal(manifest.userConfig.budget_7d.default, 80)
   assert.equal(manifest.userConfig.budget_5h.min, 1)
   assert.equal(manifest.userConfig.budget_7d.max, 100)
+  assert.deepEqual(manifest.userConfig.effort_ladder.options, ['on', 'off'])
+  assert.equal(manifest.userConfig.effort_ladder.default, 'on')
+  assert.deepEqual(manifest.userConfig.classifier.options, ['haiku', 'local'])
+  assert.equal(manifest.userConfig.classifier.default, 'haiku')
+  assert.deepEqual(manifest.userConfig.light_path.options, ['on', 'off'])
   assert.equal(readdirSync(ROOT).includes('CLAUDE.md'), false)
 })
 
@@ -147,6 +158,7 @@ test('marketplace and settings stay pointed at this plugin', () => {
   const changelog = readFileSync(path.join(ROOT, 'CHANGELOG.md'), 'utf8')
   assert.ok(changelog.includes('0.2.0'))
   assert.ok(changelog.includes('0.3.0'))
+  assert.ok(changelog.includes('0.4.0'))
   assert.ok(changelog.includes('cc-cost'))
 })
 
@@ -157,7 +169,11 @@ test('agents pin family aliases, including the Sonnet checker', () => {
     checker: 'sonnet',
     implementer: 'sonnet',
     worker: 'haiku',
+    architect: 'opus',
+    planner: 'opus',
+    dispatcher: 'sonnet',
   }
+  const efforts = { worker: 'low', implementer: 'medium', architect: 'high', planner: 'high', checker: 'medium', reviewer: 'high' }
   for (const [name, model] of Object.entries(expected)) {
     const fields = frontmatter(path.join(ROOT, 'agents', `${name}.md`))
     assert.equal(fields.name, name)
@@ -165,7 +181,14 @@ test('agents pin family aliases, including the Sonnet checker', () => {
     assert.equal(fields.model, model)
     assert.ok(MODELS.has(fields.model))
     assert.equal(fields.name.includes(':'), false)
+    assert.ok(tiers.EFFORTS.includes(fields.effort), `${name} effort`)
+    if (name in efforts) assert.equal(fields.effort, efforts[name], `${name} effort matches AGENT_EFFORT`)
   }
+  assert.deepEqual(tiers.AGENT_EFFORT, efforts)
+  assert.match(frontmatter(path.join(ROOT, 'agents', 'dispatcher.md')).disallowedTools, /Edit/)
+  assert.match(frontmatter(path.join(ROOT, 'agents', 'planner.md')).tools, /^Read, Grep, Glob, Bash$/)
+  const defaults = tiers.loadJson(path.join(ROOT, 'config/routing.default.json'))
+  for (const tier of tiers.TIERS) assert.equal(defaults.effort[tier][0], efforts[tiers.IMPLEMENTERS[tier]] || 'high')
 })
 
 test('skill and commands keep their frontmatter', () => {
@@ -190,6 +213,13 @@ test('hooks call node directly, so they run under bash and PowerShell', () => {
   for (const name of ['SessionStart', 'Stop', 'UserPromptSubmit', 'SubagentStop']) assert.ok(events[name], name)
   for (const name of ['PreToolUse', 'PostToolUse', 'PostToolUseFailure']) assert.equal(events[name][0].matcher, 'Agent')
   assert.equal(events.PreToolUse[0].hooks[0].onFailure, 'continue')
+  const classifier = events.PreToolUse[1]
+  assert.equal(classifier.matcher, 'Agent')
+  assert.equal(classifier.hooks[0].type, 'prompt')
+  assert.equal(classifier.hooks[0].if, 'Agent(cc-tiers:worker)')
+  assert.equal(classifier.hooks[0].continueOnBlock, true)
+  assert.ok(classifier.hooks[0].prompt.includes('$ARGUMENTS'))
+  assert.ok(classifier.hooks[0].prompt.includes('CC_TIERS_CLASSIFY: skip'))
   for (const event of Object.values(events)) {
     const command = event[0].hooks[0].command
     assert.match(command, /^node "\$\{CLAUDE_PLUGIN_ROOT\}\/hooks\/[a-z_]+\.mjs"$/)
@@ -1052,6 +1082,189 @@ test('the route helper prints the heuristic tier', async () => {
     assert.equal(decision.risky, true)
     assert.equal(decision.review, 'reviewer')
     assert.equal(tiers.pluginRoot({}), ROOT)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+const HEADER = (task, tier, role) => `CC_TIERS_TASK: ${task}\nCC_TIERS_TIER: ${tier}\nCC_TIERS_ROLE: ${role}\n`
+
+test('the effort ladder raises a retry before the task changes model', () => {
+  const routing = defaultRouting()
+  assert.deepEqual(routing.effort.ladders, { haiku: ['low', 'medium'], sonnet: ['medium', 'high', 'xhigh'], opus: ['high', 'xhigh'] })
+  assert.equal(tiers.effortFor(routing, 'sonnet', 0), 'medium')
+  assert.equal(tiers.effortFor(routing, 'sonnet', 1), 'high')
+  assert.equal(tiers.effortFor(routing, 'sonnet', 9), 'xhigh')
+  assert.equal(tiers.effortFor(routing, 'sonnet', 2, { conserve: true }), 'high')
+  assert.equal(tiers.effortFor(routing, 'opus', 0, { conserve: true }), 'high')
+  assert.equal(tiers.effortFor(routing, 'haiku', 0, { boost: 1 }), 'medium')
+
+  let state = tiers.emptyState('s')
+  const first = apply(state, routing, 'e1', 'implementer', report('implementer', 'sonnet', 'fail', '', 'cursor off by one'))
+  assert.ok(first.message.includes('Retry on sonnet (cc-tiers:implementer) at effort high'))
+  state = first.state
+  const prompt = `${HEADER('users-pagination', 'sonnet', 'implementer')}Add pagination to GET /users.`
+  const retry = tiers.checkDelegation(state, { subagent_type: 'cc-tiers:implementer', prompt, description: 'retry' }, routing)
+  assert.equal(retry.deny, '')
+  assert.deepEqual(retry.input, { subagent_type: 'cc-tiers:implementer', prompt, description: 'retry', effort: 'high' })
+  assert.ok(retry.context.includes('cc-tiers set effort high'))
+  const asked = tiers.checkDelegation(state, { subagent_type: 'cc-tiers:implementer', prompt, effort: 'max' }, routing)
+  assert.equal(asked.input.effort, 'xhigh')
+  const lower = tiers.checkDelegation(state, { subagent_type: 'cc-tiers:implementer', prompt, effort: 'low' }, routing)
+  assert.equal(lower.input.effort, 'high')
+  assert.equal(tiers.checkDelegation(state, { subagent_type: 'cc-tiers:implementer', prompt, effort: 'high' }, routing).input, null)
+
+  const fresh = tiers.checkDelegation(tiers.emptyState('s'), { subagent_type: 'cc-tiers:implementer', prompt }, routing)
+  assert.equal(fresh.input, null)
+  const risky = tiers.checkDelegation(
+    tiers.emptyState('s'),
+    { subagent_type: 'cc-tiers:implementer', prompt: `${HEADER('login', 'sonnet', 'implementer')}Add OAuth login.` },
+    routing,
+  )
+  assert.equal(risky.input.effort, 'high')
+  assert.ok(risky.context.includes('review keyword'))
+
+  const second = apply(state, routing, 'e2', 'implementer', report('implementer', 'sonnet', 'fail', '', 'still wrong'))
+  assert.ok(second.message.includes('The next tier is opus (the Opus ceiling'))
+  assert.ok(second.message.includes('cc-tiers:architect'))
+  assert.equal(second.meta.sonnetEscalated, true)
+  const ceiling = tiers.checkDelegation(second.state, { subagent_type: 'cc-tiers:architect', prompt: HEADER('users-pagination', 'opus', 'architect') }, routing)
+  assert.equal(ceiling.input, null)
+  const down = tiers.checkDelegation(second.state, { subagent_type: 'cc-tiers:implementer', prompt }, routing)
+  assert.ok(down.deny.includes('cc-tiers:architect'))
+})
+
+test('the effort ladder can be turned off or replaced by the project', () => {
+  const off = defaultRouting({ effort_ladder: 'off' })
+  assert.equal(off.effort.on, false)
+  assert.equal(tiers.effortFor(off, 'sonnet', 1), null)
+  const state = tiers.emptyState('s')
+  state.tasks.a = { tier: 'sonnet', failures: ['sonnet/implementer: x'], carried: [] }
+  const call = { subagent_type: 'cc-tiers:implementer', prompt: HEADER('a', 'sonnet', 'implementer') }
+  assert.equal(tiers.checkDelegation(state, call, off).input, null)
+  const retry = apply(tiers.emptyState('s'), off, 'o1', 'implementer', report('implementer', 'sonnet', 'fail'))
+  assert.equal(retry.message.includes('at effort'), false)
+
+  const project = tiers.mergeRouting(tiers.loadJson(path.join(ROOT, 'config/routing.default.json')), {
+    effort: { sonnet: ['high', 'max'], haiku: ['high', 'low'], conserveCap: 'medium' },
+  })
+  assert.deepEqual(project.effort.ladders.sonnet, ['high', 'max'])
+  assert.deepEqual(project.effort.ladders.haiku, ['low', 'medium'])
+  assert.ok(project.notes.some((note) => note.includes('effort.haiku')))
+  assert.equal(tiers.effortFor(project, 'sonnet', 1, { conserve: true }), 'high')
+  const text = tiers.formatSessionContext(defaultRouting(), 'not present', { budget: { conserve: true, hits: ['5h 90%'] } })
+  assert.ok(text.includes('Effort ladder: on (haiku low -> medium, sonnet medium -> high -> xhigh, opus high -> xhigh)'))
+  assert.ok(text.includes('effort stops at high'))
+  assert.ok(text.includes('Classifier: haiku'))
+})
+
+test('the complexity score keeps multi-step work off Haiku', () => {
+  const routing = defaultRouting()
+  assert.deepEqual(tiers.assessComplexity('Rename fetchUser to loadUser in api.ts', routing).score, 0)
+  const steps = 'Rename fetchUser to loadUser:\n- update api.ts\n- update client.ts\n- update server.ts'
+  const assessed = tiers.assessComplexity(steps, routing)
+  assert.equal(assessed.complex, true)
+  assert.ok(assessed.signals.some((signal) => signal.startsWith('multi-step')))
+  assert.deepEqual([tiers.decideTier(steps, routing).tier, tiers.decideTier(steps, routing).because], ['sonnet', 'complex'])
+  const design = tiers.decideTier('Rename the helpers and refactor the whole codebase around them', routing)
+  assert.equal(design.because, 'complex')
+  assert.equal(tiers.decideTier('Renomear e depois investigar o vazamento de memória', routing).tier, 'sonnet')
+  const hint = tiers.checkDelegation(tiers.emptyState('s'), { subagent_type: 'cc-tiers:worker', prompt: `${HEADER('r', 'haiku', 'worker')}${steps}` }, routing)
+  assert.ok(hint.context.includes('complexity score'))
+})
+
+test('the classifier header is refused unless the classifier is local', () => {
+  const prompt = `${HEADER('t', 'haiku', 'worker')}CC_TIERS_CLASSIFY: skip\nfix a typo in README`
+  const haiku = tiers.checkDelegation(tiers.emptyState('s'), { subagent_type: 'cc-tiers:worker', prompt }, defaultRouting())
+  assert.ok(haiku.deny.includes('CC_TIERS_CLASSIFY'))
+  const local = defaultRouting({ classifier: 'local' })
+  assert.equal(local.classifier, 'local')
+  assert.equal(tiers.checkDelegation(tiers.emptyState('s'), { subagent_type: 'cc-tiers:worker', prompt }, local).deny, '')
+  assert.equal(defaultRouting({ classifier: 'gpt' }).classifier, 'haiku')
+  assert.ok(tiers.classifierLine(local).includes('CC_TIERS_CLASSIFY: skip'))
+})
+
+test('an API or network error is not counted as a failure', () => {
+  const routing = defaultRouting()
+  const raw = event('x1', 'implementer', '', HEADER('users-pagination', 'sonnet', 'implementer'), true)
+  raw.error = 'API Error: 529 overloaded_error'
+  const applied = tiers.applyEvent(tiers.emptyState('s'), tiers.normalizeEvent(raw), routing)
+  assert.ok(applied.message.includes('did not count it as a failure'))
+  assert.equal(applied.state.tasks['users-pagination'], undefined)
+  assert.equal(tiers.isInfraError('Rate limit reached'), true)
+  assert.equal(tiers.isInfraError('agent crashed'), false)
+  const crash = tiers.applyEvent(tiers.emptyState('s'), tiers.normalizeEvent(event('x2', 'implementer', '', HEADER('users-pagination', 'sonnet', 'implementer'), true)), routing)
+  assert.equal(crash.state.tasks['users-pagination'].failures.length, 1)
+})
+
+test('the planner is orchestration: no header, no count, spend to (orchestration)', () => {
+  const routing = defaultRouting()
+  assert.equal(tiers.checkDelegation(tiers.emptyState('s'), { subagent_type: 'cc-tiers:planner', prompt: 'plan this' }, routing).deny, '')
+  assert.ok(tiers.checkDelegation(tiers.emptyState('s'), { subagent_type: 'cc-tiers:planner', prompt: 'x', model: 'sonnet' }, routing).deny)
+  const state = tiers.emptyState('s')
+  const ctx = { routing, ccCost: true, projectDir: '' }
+  const planned = tiers.normalizeEvent(event('p1', 'planner', 'Slug: a, Tier: sonnet', 'plan this'))
+  assert.equal(tiers.processReport(ctx, state, planned, { key: 'p1', tier: 'opus', tokens: 900 }), '')
+  assert.deepEqual(state.spend['(orchestration)'], { haiku: 0, sonnet: 0, opus: 900 })
+  assert.deepEqual(state.tasks, {})
+})
+
+test('a task that escalated past Sonnet starts similar work at the top of the Sonnet ladder', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const routing = defaultRouting({ max_attempts: 1 })
+    const ctx = { routing, ccCost: false, projectDir: dir }
+    const state = tiers.emptyState('s')
+    const prompt = `${HEADER('cursor-pagination', 'sonnet', 'implementer')}Add cursor pagination to the orders listing`
+    const failed = tiers.normalizeEvent(event('s1', 'implementer', report('implementer', 'sonnet', 'fail').replace('users-pagination', 'cursor-pagination'), prompt))
+    const message = tiers.processReport(ctx, state, failed)
+    assert.ok(message.includes('escalated past Sonnet'))
+    const history = tiers.loadHistory(tiers.historyPath(dir))
+    assert.equal(history.entries[0].tier, 'sonnet')
+    assert.equal(tiers.historyMatches(prompt, history, 'sonnet'), true)
+    assert.equal(tiers.historyMatches(prompt, history, 'haiku'), false)
+    const similar = `${HEADER('orders-cursor', 'sonnet', 'implementer')}Add cursor pagination to the orders export`
+    const call = tiers.checkDelegation(tiers.emptyState('s2'), { subagent_type: 'cc-tiers:implementer', prompt: similar }, routing, { history })
+    assert.equal(call.input.effort, 'xhigh')
+    assert.ok(call.context.includes('escalated past Sonnet'))
+    assert.equal(tiers.decideTier(similar, routing, { history }).effort, 'xhigh')
+    assert.ok(tiers.guidance(routing, null, history).some((line) => line.startsWith('Sonnet escalation history')))
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the light path flags a one-task trivial request only', () => {
+  const routing = defaultRouting()
+  assert.ok(tiers.lightHint('fix a typo in README', routing).includes('cc-tiers light path'))
+  assert.ok(tiers.lightHint('where is fetchUser defined?', routing).includes('no checker pass'))
+  assert.equal(tiers.lightHint('Add pagination to GET /users', routing), '')
+  assert.equal(tiers.lightHint('Rename fetchUser and then update the docs', routing), '')
+  assert.equal(tiers.lightHint('Rename the login handler', routing), '')
+  assert.equal(tiers.lightHint('/cc-tiers:route fix a typo', routing), '')
+  assert.equal(tiers.lightHint('fix a typo in README', defaultRouting({ light_path: 'off' })), '')
+})
+
+test('the hooks set effort on the call and add the light path on prompt submit', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const env = hookEnv(dir, { CC_TIERS_CC_COST: '0' })
+    const prompt = `${HEADER('users-pagination', 'sonnet', 'implementer')}Add pagination.`
+    runHook('after_agent.mjs', event('h1', 'implementer', report('implementer', 'sonnet', 'fail'), prompt), env)
+    const proc = runHook(
+      'before_agent.mjs',
+      { session_id: 'sess-1', hook_event_name: 'PreToolUse', tool_name: 'Agent', tool_input: { subagent_type: 'cc-tiers:implementer', prompt } },
+      env,
+    )
+    assert.equal(proc.status, 0, proc.stderr)
+    const output = JSON.parse(proc.stdout).hookSpecificOutput
+    assert.equal(output.permissionDecision, 'allow')
+    assert.deepEqual(output.updatedInput, { subagent_type: 'cc-tiers:implementer', prompt, effort: 'high' })
+
+    const submit = runHook('stop.mjs', { session_id: 'sess-2', hook_event_name: 'UserPromptSubmit', prompt: 'fix a typo in README' }, env)
+    assert.ok(JSON.parse(submit.stdout).hookSpecificOutput.additionalContext.includes('cc-tiers light path'))
+    const plain = runHook('stop.mjs', { session_id: 'sess-2', hook_event_name: 'UserPromptSubmit', prompt: 'Add pagination to GET /users' }, env)
+    assert.equal(plain.stdout, '')
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
