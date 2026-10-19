@@ -1,0 +1,14 @@
+{
+  "name": "cc-tiers",
+  "version": "0.5.0",
+  "private": true,
+  "description": "Claude Code plugin: Opus plans, Sonnet builds, Haiku does the small stuff",
+  "license": "MIT",
+  "type": "module",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "bench": "node bench/run.mjs",
+    "bench:table": "node bench/run.mjs --table"
+  }
+}
