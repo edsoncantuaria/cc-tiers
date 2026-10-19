@@ -107,6 +107,7 @@ test('manifest declares the 0.5.0 knobs', () => {
   const manifest = JSON.parse(readFileSync(path.join(ROOT, '.claude-plugin/plugin.json'), 'utf8'))
   assert.equal(manifest.name, 'cc-tiers')
   assert.equal(manifest.version, '0.5.0')
+  assert.equal(JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version, manifest.version)
   assert.equal(/\s|@|:|\/|\\/.test(manifest.name), false)
   assert.equal(RESERVED_PREFIXES.some((prefix) => manifest.name.startsWith(prefix)), false)
   assert.equal(manifest.license, 'MIT')
@@ -247,7 +248,7 @@ test('readmes stay in sync in structure and behavior', () => {
       'cc-tiers-history.json',
       'cheap',
       'cc-tiers:checker',
-      'node --test',
+      'npm test',
       'five_hour',
       'seven_day',
     ]) {

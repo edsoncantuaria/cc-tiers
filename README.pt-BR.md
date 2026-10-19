@@ -234,6 +234,28 @@ A ordem de escalonamento é fixa. As frases e palavras-chave de roteamento, o li
 
 ---
 
+## 📊 Benchmark
+
+> [!IMPORTANT]
+> **O que o cc-tiers entrega é roteamento, não uma conta menor em toda tarefa.** A sessão decide para onde vai cada parte do trabalho: Haiku para o trivial, Sonnet para o comum, Opus para o plano, o teto e a revisão arriscada. Uma falha sobe a tarefa um tier, com as notas junto. Essa decisão tem custo próprio (a thread que roteia e um contexto novo por subagente). Em tarefas pequenas esse custo é maior que o que os tiers mais baratos economizam, como mostram os números abaixo. Compensa quando o trabalho é grande, variado ou com chance de falhar num modelo barato. O benchmark mede esse custo; não mede o valor do roteamento.
+
+`bench/` roda sete tarefas (3 triviais, 2 normais, 1 mista, 1 difícil) num pequeno projeto Node, cada uma corrigida por um teste oculto. Medido em 19/10/2026 com Claude Code 2.1.303 e cc-tiers 0.5.0, duas rodadas por tarefa, a preços de tabela da API. Todas as configurações passaram em todas as tarefas (112/112).
+
+| Configuração | Uma tarefa por sessão | As sete numa sessão | vs só Opus (sessão) |
+| --- | --: | --: | --: |
+| Só Opus | $0.105 / tarefa | $0.209 / tarefa | — |
+| Só Sonnet | $0.050 / tarefa | $0.096 / tarefa | **−54%** |
+| cc-tiers (orquestrador Opus) | $0.190 / tarefa | $0.487 / tarefa | **+133%** |
+| cc-tiers light (dispatcher Sonnet) | $0.053 / tarefa | $0.163 / tarefa | **−22%** |
+
+- **O modo light é o que economiza:** cerca de metade do custo do só Opus em tarefas avulsas e 22% a menos numa sessão de trabalho, com o Opus ainda disponível para planejar, escalar e revisar o que é arriscado.
+- **O orquestrador Opus padrão custa mais que o Opus puro** em tarefas desse tamanho: a thread principal em Opus paga por cada pedido, e cada subagente paga um contexto novo. Só compensa quando boa parte do trabalho é longa o bastante para rodar em Sonnet ou Haiku. No dia a dia, use o modo light (`claude --agent cc-tiers:dispatcher`).
+- Sonnet puro foi o mais barato e passou em tudo aqui; essas tarefas nunca precisaram escalar. O valor dos tiers é a rede de segurança em trabalho mais difícil, que esta fixture não exercita.
+
+Dados brutos: `bench/results/oneshot-all-0.5.json` e `bench/results/session-all-0.5.json`. Para rodar de novo: `npm run bench` (adicione `-- --session` para uma sessão só); gasta tokens de verdade.
+
+---
+
 ## 📋 Requisitos
 
 - Claude Code **2.1.295+** (os seletores do `/config` usam `userConfig.options`, o hook PreToolUse usa `onFailure`, e a escada de effort usa o `effort` por chamada da 2.1.292).
@@ -244,7 +266,7 @@ A ordem de escalonamento é fixa. As frases e palavras-chave de roteamento, o li
 ```bash
 git clone https://github.com/edsoncantuaria/cc-tiers
 cd cc-tiers
-node --test tests/*.test.mjs
+npm test
 claude plugin validate --strict .
 claude --plugin-dir .
 ```
