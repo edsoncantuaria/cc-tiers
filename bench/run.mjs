@@ -1,10 +1,13 @@
 #!/usr/bin/env node
 /**
  * cc-tiers benchmark. Runs every task in tasks.json under each configuration with
- * `claude -p`, in a fresh git copy of fixture/, then copies the hidden check for
- * that task in and runs it with the project's own tests. Records pass/fail, the
- * cost Claude Code reports (list prices, per model), turns, wall time, subagents
- * by type, and the escalations cc-tiers announced in its hook messages.
+ * `claude -p`, in a fresh git copy of fixture/, and grades each step the way
+ * SWE-bench does: FAIL_TO_PASS is the task's hidden check, run alone;
+ * PASS_TO_PASS re-runs every test file that passed before the step, in its
+ * before-form (minus the files the task changes on purpose). A task is resolved
+ * when both pass. Records pass@1, pass^k, regressions, fresh tokens per model,
+ * turns, wall time, subagents by type, and the escalations cc-tiers announced in
+ * its hook messages. The raw JSON keeps the cost Claude Code reports.
  *
  *   node bench/run.mjs [--configs opus,sonnet,cc-tiers,cc-tiers-light] [--tasks typo,lru]
  *                      [--repeat 1] [--parallel 3] [--out bench/results/latest.json]
@@ -95,22 +98,66 @@ function runClaude(dir, config, prompt, timeoutMs, plugin, resume = '') {
   })
 }
 
-function check(dir, task, result, checks) {
+function runTests(dir, files, extraEnv = {}) {
+  const env = { ...process.env, ...extraEnv }
+  delete env.NODE_TEST_CONTEXT
+  const proc = spawnSync(process.execPath, ['--test', ...files], { cwd: dir, encoding: 'utf8', env, timeout: 120000 })
+  return { pass: proc.status === 0, output: `${proc.stdout}\n${proc.stderr}` }
+}
+
+/** The test/*.test.mjs files that pass on their own right now, path -> content. */
+export function passingTests(dir) {
+  const passing = new Map()
+  const folder = path.join(dir, 'test')
+  if (!existsSync(folder)) return passing
+  for (const name of readdirSync(folder).sort()) {
+    const file = `test/${name}`
+    if (name.endsWith('.test.mjs') && runTests(dir, [file]).pass) passing.set(file, readFileSync(path.join(dir, file), 'utf8'))
+  }
+  return passing
+}
+
+/**
+ * FAIL_TO_PASS: the hidden check alone. PASS_TO_PASS: each file in `before`
+ * that the task does not change on purpose, written back in its before-form and
+ * run alone, as `before` was measured; the model's version (or its absence) is
+ * put back afterwards. ownTests: the test files as the model left them.
+ */
+export function grade(dir, task, result, checks, before) {
   const target = path.join(dir, '.bench-check')
   mkdirSync(target, { recursive: true })
   cpSync(path.join(checks, `${task.id}.test.mjs`), path.join(target, `${task.id}.test.mjs`))
-  const files = [`.bench-check/${task.id}.test.mjs`]
-  const tests = spawnSync('git', ['ls-files', '--others', '--cached', '--exclude-standard', 'test'], { cwd: dir, encoding: 'utf8' })
-  for (const file of tests.stdout.split('\n')) if (/\.test\.m?js$/.test(file)) files.push(file)
-  const env = { ...process.env, BENCH_RESULT: String(result || '') }
-  delete env.NODE_TEST_CONTEXT
-  const proc = spawnSync(process.execPath, ['--test', ...files], {
-    cwd: dir,
-    encoding: 'utf8',
-    env,
-    timeout: 120000,
-  })
-  return { pass: proc.status === 0, output: `${proc.stdout}\n${proc.stderr}`.slice(-1500) }
+  const hidden = runTests(dir, [`.bench-check/${task.id}.test.mjs`], { BENCH_RESULT: String(result || '') })
+  const outputs = hidden.pass ? [] : [hidden.output]
+
+  const changes = new Set(task.changesTests || [])
+  const regressions = []
+  for (const [file, content] of before) {
+    if (changes.has(file)) continue
+    const full = path.join(dir, file)
+    const left = existsSync(full) ? readFileSync(full, 'utf8') : null
+    try {
+      mkdirSync(path.dirname(full), { recursive: true })
+      writeFileSync(full, content)
+      const run = runTests(dir, [file])
+      if (!run.pass) {
+        regressions.push(file)
+        outputs.push(run.output)
+      }
+    } finally {
+      if (left === null) rmSync(full, { force: true })
+      else writeFileSync(full, left)
+    }
+  }
+
+  const listed = spawnSync('git', ['ls-files', '--others', '--cached', '--exclude-standard', 'test'], { cwd: dir, encoding: 'utf8' })
+  const own = String(listed.stdout || '').split('\n').filter((file) => /\.test\.m?js$/.test(file))
+  const ownRun = own.length ? runTests(dir, own) : { pass: true, output: '' }
+  if (!ownRun.pass) outputs.push(ownRun.output)
+
+  const f2p = hidden.pass
+  const p2p = regressions.length === 0
+  return { f2p, p2p, ownTests: ownRun.pass, resolved: f2p && p2p, regressions, output: outputs.join('\n').slice(-1500) }
 }
 
 const ESCALATIONS = [
@@ -224,6 +271,7 @@ function summarize(config, task, rep, run, verdict, escalations = null, route = 
   const json = run.json || {}
   const models = {}
   const tokens = {}
+  let freshTokens = 0
   for (const [model, usage] of Object.entries(json.modelUsage || {})) {
     models[model] = Number(usage.costUSD) || 0
     tokens[model] = {
@@ -232,13 +280,20 @@ function summarize(config, task, rep, run, verdict, escalations = null, route = 
       cacheRead: usage.cacheReadInputTokens || 0,
       cacheWrite: usage.cacheCreationInputTokens || 0,
     }
+    freshTokens += tokens[model].input + tokens[model].cacheWrite + tokens[model].output
   }
   return {
     config,
     task: task.id,
     kind: task.kind,
     rep,
-    pass: verdict.pass,
+    f2p: verdict.f2p,
+    p2p: verdict.p2p,
+    ownTests: verdict.ownTests,
+    resolved: verdict.resolved,
+    regressions: verdict.regressions,
+    pass: verdict.resolved,
+    freshTokens,
     cost: Number(json.total_cost_usd) || 0,
     models,
     tokens,
@@ -252,8 +307,14 @@ function summarize(config, task, rep, run, verdict, escalations = null, route = 
     routedAsDocumented: route?.ok ?? null,
     delegations: route?.steps ?? null,
     error: json.is_error ? String(json.result || '').slice(0, 300) : run.code === 0 ? '' : run.stderr.slice(-300),
-    checkOutput: verdict.pass ? '' : verdict.output,
+    checkOutput: verdict.resolved ? '' : verdict.output,
   }
+}
+
+function progress(row) {
+  if (row.resolved) return 'PASS'
+  const regressions = row.regressions.length ? ` (regressions: ${row.regressions.join(', ')})` : ''
+  return `FAIL f2p=${row.f2p} p2p=${row.p2p}${regressions}`
 }
 
 async function pool(items, size, fn) {
@@ -269,27 +330,52 @@ async function pool(items, size, fn) {
   return results
 }
 
-function money(value) {
-  return `$${Number(value).toFixed(value >= 1 ? 2 : 3)}`
+const resolvedOf = (row) => Boolean(row.resolved ?? row.pass)
+const percent = (share) => `${Math.round(share * 100)}%`
+const kilo = (tokens) => `${(tokens / 1000).toFixed(1)}k`
+
+/**
+ * pass@1 (HumanEval): mean over tasks of the share of runs resolved. pass^k
+ * (τ-bench): share of tasks resolved in every one of their k runs. Regressions:
+ * runs whose hidden check passed but that broke a test that passed before.
+ */
+export function metrics(rows) {
+  const tasks = [...new Set(rows.map((row) => row.task))]
+  const perTask = tasks.map((task) => {
+    const mine = rows.filter((row) => row.task === task)
+    return { runs: mine.length, resolved: mine.filter(resolvedOf).length }
+  })
+  const resolved = rows.filter(resolvedOf).length
+  const counted = rows.some((row) => row.freshTokens != null)
+  const tokens = rows.reduce((sum, row) => sum + (row.freshTokens || 0), 0)
+  return {
+    pass1: perTask.length ? perTask.reduce((sum, task) => sum + task.resolved / task.runs, 0) / perTask.length : 0,
+    passK: perTask.length ? perTask.filter((task) => task.resolved === task.runs).length / perTask.length : 0,
+    k: perTask.length ? Math.min(...perTask.map((task) => task.runs)) : 0,
+    resolved,
+    runs: rows.length,
+    regressions: rows.filter((row) => row.f2p && row.p2p === false).length,
+    tokensPerResolved: counted && resolved ? tokens / resolved : null,
+  }
 }
 
-/** The README table: one row per configuration, then one per task kind. */
+/** The README table: one row per configuration, then one per task, then one per task kind. */
 export function table(results) {
   const configs = [...new Set(results.map((row) => row.config))]
+  const baseline = configs.includes('opus') ? metrics(results.filter((row) => row.config === 'opus')).tokensPerResolved : null
   const lines = [
-    '| Configuration | Passed | Mean cost per task | Cost per passed task | Median time | Opus share of cost |',
-    '| --- | --: | --: | --: | --: | --: |',
+    `| Configuration | pass@1 | pass^k | Resolved | Regressions | Tokens per resolved task | Δ tokens vs ${label('opus')} |`,
+    '| --- | --: | --: | --: | --: | --: | --: |',
   ]
   for (const config of configs) {
-    const rows = results.filter((row) => row.config === config)
-    const passed = rows.filter((row) => row.pass).length
-    const cost = rows.reduce((sum, row) => sum + row.cost, 0)
-    const opus = rows.reduce((sum, row) => sum + Object.entries(row.models).filter(([model]) => model.includes('opus')).reduce((s, [, v]) => s + v, 0), 0)
-    const times = rows.map((row) => row.seconds).sort((a, b) => a - b)
-    const median = times[Math.floor(times.length / 2)] ?? 0
-    lines.push(
-      `| ${label(config)} | ${passed}/${rows.length} | ${money(cost / rows.length)} | ${passed ? money(cost / passed) : '—'} | ${median}s | ${cost ? Math.round((opus / cost) * 100) : 0}% |`,
-    )
+    const m = metrics(results.filter((row) => row.config === config))
+    let delta = '—'
+    if (config !== 'opus' && baseline && m.tokensPerResolved != null) {
+      const change = Math.round((m.tokensPerResolved / baseline - 1) * 100)
+      delta = change < 0 ? `−${-change}%` : `+${change}%`
+    }
+    const tokens = m.tokensPerResolved == null ? '—' : kilo(m.tokensPerResolved)
+    lines.push(`| ${label(config)} | ${percent(m.pass1)} | ${percent(m.passK)} | ${m.resolved}/${m.runs} | ${m.regressions} | ${tokens} | ${delta} |`)
   }
   lines.push('')
   const tasks = [...new Set(results.map((row) => row.task))]
@@ -299,9 +385,8 @@ export function table(results) {
     const cells = configs.map((config) => {
       const rows = results.filter((row) => row.config === config && row.task === task)
       if (!rows.length) return '—'
-      const passed = rows.filter((row) => row.pass).length
-      const cost = rows.reduce((sum, row) => sum + row.cost, 0) / rows.length
-      return `${passed === rows.length ? '✅' : passed ? '🟡' : '❌'} ${money(cost)}`
+      const resolved = rows.filter(resolvedOf).length
+      return `${resolved === rows.length ? '✅' : resolved ? '🟡' : '❌'} ${resolved}/${rows.length}`
     })
     const kind = results.find((row) => row.task === task)?.kind
     lines.push(`| \`${task}\` (${kind}) | ${cells.join(' | ')} |`)
@@ -311,20 +396,18 @@ export function table(results) {
   return lines.join('\n')
 }
 
-/** Pass rate and cost per passed task for each kind of task, plus the escalations cc-tiers announced. */
+/** pass@1 for each kind of task, plus the escalations cc-tiers announced and how often it routed as documented. */
 export function kindTable(results) {
   const configs = [...new Set(results.map((row) => row.config))]
   const kinds = [...new Set(results.map((row) => row.kind))]
   const lines = [
-    `| Configuration | ${kinds.map((kind) => `${kind}: passed | ${kind}: cost per passed task`).join(' | ')} | Escalations | Routed as documented |`,
-    `| --- | ${kinds.map(() => '--: | --:').join(' | ')} | --: | --: |`,
+    `| Configuration | ${kinds.map((kind) => `${kind}: pass@1`).join(' | ')} | Escalations | Routed as documented |`,
+    `| --- | ${kinds.map(() => '--:').join(' | ')} | --: | --: |`,
   ]
   for (const config of configs) {
     const cells = kinds.map((kind) => {
       const rows = results.filter((row) => row.config === config && row.kind === kind)
-      const passed = rows.filter((row) => row.pass).length
-      const cost = rows.reduce((sum, row) => sum + row.cost, 0)
-      return `${passed}/${rows.length} | ${passed ? money(cost / passed) : '—'}`
+      return rows.length ? percent(metrics(rows).pass1) : '—'
     })
     const counted = results.filter((row) => row.config === config && row.escalations != null)
     const escalations = counted.length ? counted.reduce((sum, row) => sum + row.escalations, 0) : '—'
@@ -407,15 +490,16 @@ async function main() {
     let seen = 0
     try {
       for (const task of tasks) {
+        const before = passingTests(dir)
         const run = await runClaude(dir, CONFIGS[config], task.prompt, timeoutMs, plugin, id)
         if (run.json?.session_id && run.json.session_id !== id) seen = 0
         id = run.json?.session_id || id
         const read = transcriptFor(config, id, seen, task.kind)
         seen = read.seen
-        const verdict = check(dir, task, run.json?.result, checks)
+        const verdict = grade(dir, task, run.json?.result, checks, before)
         rmSync(path.join(dir, '.bench-check'), { recursive: true, force: true })
         const row = { ...summarize(nameOf(config), task, rep, run, verdict, read.found, read.route), mode: 'session' }
-        process.stderr.write(`${row.pass ? 'PASS' : 'FAIL'} ${row.config} ${task.id} ${money(row.cost)} ${row.seconds}s${row.escalations ? ` escalations ${row.escalationPath.join(', ')}` : ''}${row.route ? ` route ${row.route}${row.routedAsDocumented === false ? ' (off)' : ''}` : ''}\n`)
+        process.stderr.write(`${progress(row)} ${row.config} ${task.id} ${kilo(row.freshTokens)} tokens ${row.seconds}s${row.escalations ? ` escalations ${row.escalationPath.join(', ')}` : ''}${row.route ? ` route ${row.route}${row.routedAsDocumented === false ? ' (off)' : ''}` : ''}\n`)
         rows.push(row)
       }
       return rows
@@ -426,12 +510,13 @@ async function main() {
   const results = session ? (await pool(jobs, parallel, sessionJob)).flat() : await pool(jobs, parallel, async ({ rep, task, config }) => {
     const dir = workspace(fixture)
     try {
+      const before = passingTests(dir)
       const run = await runClaude(dir, CONFIGS[config], task.prompt, timeoutMs, plugin)
-      const verdict = check(dir, task, run.json?.result, checks)
+      const verdict = grade(dir, task, run.json?.result, checks, before)
       const name = tag && config.startsWith('cc-tiers') ? `${config}@${tag}` : config
       const read = transcriptFor(config, run.json?.session_id, 0, task.kind)
       const row = summarize(name, task, rep, run, verdict, read.found, read.route)
-      process.stderr.write(`${row.pass ? 'PASS' : 'FAIL'} ${name} ${task.id} ${money(row.cost)} ${row.seconds}s\n`)
+      process.stderr.write(`${progress(row)} ${name} ${task.id} ${kilo(row.freshTokens)} tokens ${row.seconds}s\n`)
       return row
     } finally {
       rmSync(dir, { recursive: true, force: true })

@@ -1,9 +1,9 @@
 [
   { "id": "lookup", "kind": "trivial", "prompt": "Where is validateEmail called in src/? Name the file and the function that calls it. Do not change any file." },
   { "id": "typo", "kind": "trivial", "prompt": "Fix the typo \"Recieved\" in the error message in src/api.js." },
-  { "id": "rename", "kind": "trivial", "prompt": "Rename fetchUser to loadUser in src/users.js and src/api.js. Keep the tests passing." },
+  { "id": "rename", "kind": "trivial", "prompt": "Rename fetchUser to loadUser in src/users.js and src/api.js. Keep the tests passing.", "changesTests": ["test/users.test.mjs"] },
   { "id": "bugfix", "kind": "normal", "prompt": "chunk() in src/text.js drops the last partial chunk: chunk([1,2,3,4,5], 2) should be [[1,2],[3,4],[5]]. Fix it and add a test for it." },
-  { "id": "pagination", "kind": "normal", "prompt": "Add cursor pagination to listUsers in src/users.js: listUsers({ limit = 10, cursor } = {}) returns { items, nextCursor }, where nextCursor is an opaque string, or null on the last page. An invalid cursor throws a TypeError. Update every caller and the tests." },
+  { "id": "pagination", "kind": "normal", "prompt": "Add cursor pagination to listUsers in src/users.js: listUsers({ limit = 10, cursor } = {}) returns { items, nextCursor }, where nextCursor is an opaque string, or null on the last page. An invalid cursor throws a TypeError. Update every caller and the tests.", "changesTests": ["test/users.test.mjs"] },
   { "id": "mixed", "kind": "mixed", "prompt": "Two changes: rename slugify to toSlug in src/text.js and its callers, and make validateEmail in src/users.js reject an address whose domain has no dot (ana@localhost) or ends with a dot. Add tests for the email rule." },
   { "id": "lru", "kind": "hard", "prompt": "Add src/cache.js exporting createLruCache({ max, ttlMs, now = Date.now }). It returns an object with get(key), set(key, value), has(key), delete(key) and a size getter. Evict the least recently used entry when size would exceed max; get() counts as a use. An entry expires once now() - its set time >= ttlMs; set() on an existing key replaces the value and restarts its expiry. max must be a positive integer, else throw a RangeError. Add tests." }
 ]

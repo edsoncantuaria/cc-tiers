@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -1425,12 +1425,94 @@ test('the benchmark fixture is green, and every hidden check fails before the ta
   const { table, label } = await import(pathToFileURL(path.join(bench, 'run.mjs')).href)
   assert.equal(label('cc-tiers-light@0.5'), 'cc-tiers light (Sonnet dispatcher) 0.5')
   const rows = [
-    { config: 'opus', task: 'typo', kind: 'trivial', pass: true, cost: 0.1, models: { 'claude-opus-5-5': 0.1 }, seconds: 5 },
-    { config: 'opus', task: 'typo', kind: 'trivial', pass: false, cost: 0.3, models: { 'claude-opus-5-5': 0.3 }, seconds: 9 },
+    { config: 'opus', task: 'typo', kind: 'trivial', resolved: true, f2p: true, p2p: true, freshTokens: 12000 },
+    { config: 'opus', task: 'typo', kind: 'trivial', resolved: false, f2p: true, p2p: false, freshTokens: 8000 },
   ]
   const text = table(rows)
-  assert.ok(text.includes('| Opus only | 1/2 | $0.200 | $0.400 | 9s | 100% |'))
-  assert.ok(text.includes('| `typo` (trivial) | 🟡 $0.200 |'))
+  assert.ok(text.includes('| Configuration | pass@1 | pass^k | Resolved | Regressions | Tokens per resolved task | Δ tokens vs Opus only |'))
+  assert.ok(text.includes('| Opus only | 50% | 0% | 1/2 | 1 | 20.0k | — |'))
+  assert.ok(text.includes('| `typo` (trivial) | 🟡 1/2 |'))
+  assert.equal(text.includes('$'), false)
+})
+
+test('pass-to-pass uses the before-form of each test file', async () => {
+  const bench = path.join(ROOT, 'bench')
+  const { grade, passingTests } = await import(pathToFileURL(path.join(bench, 'run.mjs')).href)
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-grade-'))
+  try {
+    const { cpSync } = await import('node:fs')
+    cpSync(path.join(bench, 'fixture'), dir, { recursive: true })
+    spawnSync('git', ['init', '-q'], { cwd: dir })
+    const before = passingTests(dir)
+    assert.deepEqual([...before.keys()].sort(), ['test/api.test.mjs', 'test/users.test.mjs'])
+    const file = (name) => path.join(dir, name)
+    const users = readFileSync(file('src/users.js'), 'utf8')
+    const trivial = "import { test } from 'node:test'\ntest('ok', () => {})\n"
+    writeFileSync(file('test/users.test.mjs'), trivial)
+    writeFileSync(file('src/users.js'), users.replace('return USERS.slice()', 'return []'))
+    const checks = path.join(bench, 'checks')
+    const broken = grade(dir, { id: 'typo' }, '', checks, before)
+    assert.equal(broken.f2p, false)
+    assert.equal(broken.p2p, false)
+    assert.equal(broken.resolved, false)
+    assert.equal(broken.ownTests, true)
+    assert.deepEqual(broken.regressions, ['test/users.test.mjs'])
+    assert.equal(readFileSync(file('test/users.test.mjs'), 'utf8'), trivial)
+    const changed = grade(dir, { id: 'typo', changesTests: ['test/users.test.mjs'] }, '', checks, before)
+    assert.equal(changed.p2p, true)
+    assert.deepEqual(changed.regressions, [])
+
+    writeFileSync(file('src/users.js'), users)
+    rmSync(file('test/api.test.mjs'))
+    const api = readFileSync(file('src/api.js'), 'utf8')
+    writeFileSync(file('src/api.js'), api.replace('if (!validateEmail(email))', 'if (false)'))
+    const deleted = grade(dir, { id: 'typo' }, '', checks, before)
+    assert.equal(deleted.p2p, false)
+    assert.deepEqual(deleted.regressions, ['test/api.test.mjs'])
+    assert.equal(existsSync(file('test/api.test.mjs')), false)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('quality metrics: pass@1, pass^k, regressions, tokens', async () => {
+  const { metrics, table } = await import(pathToFileURL(path.join(ROOT, 'bench', 'run.mjs')).href)
+  const row = (config, task, f2p, p2p, freshTokens) => ({ config, task, kind: 'normal', f2p, p2p, resolved: f2p && p2p, freshTokens })
+  const rows = [
+    row('opus', 'a', true, true, 20000),
+    row('opus', 'a', true, true, 20000),
+    row('opus', 'b', true, true, 20000),
+    row('opus', 'b', false, true, 30000),
+    row('cc-tiers', 'a', true, true, 30000),
+    row('cc-tiers', 'a', true, true, 30000),
+    row('cc-tiers', 'b', true, false, 40000),
+    row('cc-tiers', 'b', true, true, 35000),
+    row('sonnet', 'a', true, true, 27600),
+    row('sonnet', 'a', true, true, 27600),
+    row('sonnet', 'b', true, true, 27600),
+    row('sonnet', 'b', true, true, 27600),
+  ]
+  assert.deepEqual(metrics(rows.filter((r) => r.config === 'opus')), { pass1: 0.75, passK: 0.5, k: 2, resolved: 3, runs: 4, regressions: 0, tokensPerResolved: 30000 })
+  assert.deepEqual(metrics(rows.filter((r) => r.config === 'cc-tiers')), { pass1: 0.75, passK: 0.5, k: 2, resolved: 3, runs: 4, regressions: 1, tokensPerResolved: 45000 })
+  const text = table(rows)
+  assert.ok(text.includes('| Opus only | 75% | 50% | 3/4 | 0 | 30.0k | — |'))
+  assert.ok(text.includes('| cc-tiers (Opus orchestrator) | 75% | 50% | 3/4 | 1 | 45.0k | +50% |'))
+  assert.ok(text.includes('| Sonnet only | 100% | 100% | 4/4 | 0 | 27.6k | −8% |'))
+  assert.ok(text.includes('| `b` (normal) | 🟡 1/2 | 🟡 1/2 | ✅ 2/2 |'))
+  assert.equal(text.includes('$'), false)
+  assert.ok(table(rows.filter((r) => r.config !== 'opus')).includes('| cc-tiers (Opus orchestrator) | 75% | 50% | 3/4 | 1 | 45.0k | — |'))
+})
+
+test('old result rows render with pass as resolved', async () => {
+  const { table } = await import(pathToFileURL(path.join(ROOT, 'bench', 'run.mjs')).href)
+  const rows = [
+    { config: 'opus', task: 'typo', kind: 'trivial', pass: true, cost: 0.1, models: { 'claude-opus-5-5': 0.1 } },
+    { config: 'opus', task: 'typo', kind: 'trivial', pass: false, cost: 0.3, models: { 'claude-opus-5-5': 0.3 } },
+  ]
+  const text = table(rows)
+  assert.ok(text.includes('| Opus only | 50% | 0% | 1/2 | 0 | — | — |'))
+  assert.ok(text.includes('| `typo` (trivial) | 🟡 1/2 |'))
+  assert.equal(text.includes('$'), false)
 })
 
 test('the hard benchmark fixture is green, and every hidden check fails before its task and passes with the reference fix', async () => {
@@ -1474,6 +1556,12 @@ test('the hard benchmark fixture is green, and every hidden check fails before i
       const result = existsSync(answer) ? readFileSync(answer, 'utf8') : ''
       const proc = run(dir, [`.bench-check/${task.id}.test.mjs`, ...projectTests(dir)], { BENCH_RESULT: result })
       assert.equal(proc.status, 0, `${task.id} reference fails:\n${proc.stdout.slice(-1500)}`)
+      const changed = []
+      for (const file of projectTests(untouched)) {
+        writeFileSync(path.join(dir, file), readFileSync(path.join(untouched, file)))
+        if (run(dir, [file]).status !== 0) changed.push(file)
+      }
+      assert.deepEqual(changed, task.changesTests ?? [], `${task.id}: original tests that fail against the reference`)
     }
   } finally {
     await Promise.all(dirs.map((dir) => rm(dir, { recursive: true, force: true })))
@@ -1496,13 +1584,15 @@ test('the benchmark counts escalations from hook output only, and splits results
   assert.deepEqual(escalationsIn(lines), ['haiku->sonnet (early)', 'sonnet->opus (limit)'])
   assert.deepEqual(escalationsIn(lines, 1), ['sonnet->opus (limit)'])
   const rows = [
-    { config: 'sonnet', kind: 'hard', pass: false, cost: 0.5, escalations: null },
-    { config: 'sonnet', kind: 'hard', pass: true, cost: 0.3, escalations: null },
-    { config: 'cc-tiers', kind: 'hard', pass: true, cost: 1, escalations: 2 },
+    { config: 'sonnet', task: 'race', kind: 'hard', resolved: false, escalations: null },
+    { config: 'sonnet', task: 'race', kind: 'hard', resolved: true, escalations: null },
+    { config: 'cc-tiers', task: 'race', kind: 'hard', resolved: true, escalations: 2 },
   ]
   const text = kindTable(rows).join('\n')
-  assert.ok(text.includes('| Sonnet only | 1/2 | $0.800 | — |'))
-  assert.ok(text.includes('| cc-tiers (Opus orchestrator) | 1/1 | $1.00 | 2 | — |'))
+  assert.ok(text.includes('| Configuration | hard: pass@1 | Escalations | Routed as documented |'))
+  assert.ok(text.includes('| Sonnet only | 50% | — | — |'))
+  assert.ok(text.includes('| cc-tiers (Opus orchestrator) | 100% | 2 | — |'))
+  assert.equal(text.includes('$'), false)
   const call = (name, input) => JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', name, input }] } })
   const steps = routeIn([
     call('Agent', { subagent_type: 'cc-tiers:worker', prompt: 'CC_TIERS_TASK: rename\nCC_TIERS_TIER: haiku' }),
