@@ -1860,3 +1860,26 @@ test('the calculator check fails on the empty fixture and passes with the refere
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('the calculator check ignores eval in comments and strings but catches a real call', async () => {
+  const bench = path.join(ROOT, 'bench')
+  const { cpSync } = await import('node:fs')
+  const env = { ...process.env }
+  delete env.NODE_TEST_CONTEXT
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-calc-'))
+  try {
+    mkdirSync(path.join(dir, '.bench-check'))
+    mkdirSync(path.join(dir, 'src'))
+    cpSync(path.join(bench, 'checks-calc', 'calc.test.mjs'), path.join(dir, '.bench-check', 'calc.test.mjs'))
+    const reference = readFileSync(path.join(bench, 'solutions-calc', 'calc.js'), 'utf8')
+    const check = () => spawnSync(process.execPath, ['--test', '--test-name-pattern=eval', '.bench-check/calc.test.mjs'], { cwd: dir, encoding: 'utf8', env })
+    const mentions = '\n// Safe evaluator: no eval() or Function()\n/* Function( */\nexport const note = "eval(" + `Function(`\n'
+    writeFileSync(path.join(dir, 'src', 'calc.js'), reference + mentions)
+    const clean = check()
+    assert.equal(clean.status, 0, `comment or string tripped the check:\n${clean.stdout.slice(-1500)}`)
+    writeFileSync(path.join(dir, 'src', 'calc.js'), reference + '\nexport const run = (text) => eval(text)\n')
+    assert.notEqual(check().status, 0, 'a real eval call passed the check')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})

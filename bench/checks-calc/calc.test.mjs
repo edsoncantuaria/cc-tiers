@@ -28,5 +28,7 @@ test('malformed input throws a SyntaxError', async () => {
 
 test('the source does not use eval or Function', () => {
   const source = readFileSync(new URL('../src/calc.js', import.meta.url), 'utf8')
-  assert.doesNotMatch(source, /\beval\s*\(|\bFunction\s*\(/)
+  // Comments and string literals may mention eval; only code counts.
+  const code = source.replace(/\/\/[^\n]*|\/\*[\s\S]*?\*\/|'(?:\\.|[^'\\\n])*'|"(?:\\.|[^"\\\n])*"|`(?:\\.|[^`\\])*`/g, ' ')
+  assert.doesNotMatch(code, /\beval\s*\(|\bFunction\s*\(/)
 })
