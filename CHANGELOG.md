@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `bench/fixture-hard/` and `bench/tasks-hard.json`: a harder benchmark on a shift-scheduling service with shared state, time zones, and async booking. It has twelve tasks: 4 trivial, 3 normal, 3 hard, and 2 large requests that mix all three kinds. Each hidden check in `bench/checks-hard/` fails on the untouched fixture and passes with the reference fix in `bench/solutions-hard/`, and `npm test` verifies both. Not run in full yet; a Sonnet-only calibration is in `bench/results/calibration-sonnet-hard.json`.
+- `bench/run.mjs` takes `--tasks-file`, `--fixture`, and `--checks` (`tasks-hard.json` pairs with `fixture-hard/` and `checks-hard/` by default). It records subagents by type for every configuration. For cc-tiers it also records the escalations the hooks announced and whether each task was routed as the README says, both read from the session transcript.
+
+### Changed
+
+- `bench/run.mjs` starts `claude` with `--setting-sources project,local`, so the user's own CLAUDE.md, agents, plugins, and hooks no longer leak into a benchmark run.
+
 ## 0.5.0 - 2026-10-19
 
 ### Added
