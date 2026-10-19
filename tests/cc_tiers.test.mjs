@@ -106,7 +106,7 @@ test('required files are present and Python hooks are gone', () => {
 test('manifest declares the 0.5.0 knobs', () => {
   const manifest = JSON.parse(readFileSync(path.join(ROOT, '.claude-plugin/plugin.json'), 'utf8'))
   assert.equal(manifest.name, 'cc-tiers')
-  assert.equal(manifest.version, '0.5.0')
+  assert.equal(manifest.version, '0.5.1')
   assert.equal(JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version, manifest.version)
   assert.equal(/\s|@|:|\/|\\/.test(manifest.name), false)
   assert.equal(RESERVED_PREFIXES.some((prefix) => manifest.name.startsWith(prefix)), false)
@@ -165,6 +165,7 @@ test('marketplace and settings stay pointed at this plugin', () => {
   assert.ok(changelog.includes('0.3.0'))
   assert.ok(changelog.includes('0.4.0'))
   assert.ok(changelog.includes('0.5.0'))
+  assert.ok(changelog.includes('0.5.1'))
   assert.ok(changelog.includes('cc-cost'))
 })
 

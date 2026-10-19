@@ -1,6 +1,6 @@
 {
   "name": "cc-tiers",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Tiered Opus, Sonnet, and Haiku workflow with an effort ladder, a Haiku classifier, a light mode, cheaper review, budget routing, and cc-cost spend",
   "author": {
     "name": "edsoncantuaria",
