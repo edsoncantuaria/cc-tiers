@@ -134,7 +134,7 @@ The escalation order is fixed. Routing phrases and the retry limit are the knobs
 ```bash
 git clone https://github.com/edsoncantuaria/cc-tiers
 cd cc-tiers
-python3 -m unittest          # routing merge + attempt counter
+python3 -m unittest discover -s tests   # routing merge + attempt counter
 claude plugin validate .     # manifest, hooks, agent and skill frontmatter
 claude --plugin-dir .        # one session against this checkout
 ```

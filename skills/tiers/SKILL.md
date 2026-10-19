@@ -35,7 +35,7 @@ Default to Sonnet when a task is not clearly trivial. Split a mixed request into
 
 ## Attempt rule
 
-A failure is a failed test, a rejected review, or a subagent error. After ${user_config.max_attempts} failures at one tier (default 2), escalate Haiku to Sonnet, then Sonnet to Opus. Paste every failure note into the next prompt. The new tier starts at zero. At Opus, implement the ceiling yourself; if those attempts also fail, stop and report the notes. Do not add a tier above Opus.
+A failure is a failed test, a rejected review, or a subagent error. After ${user_config.max_attempts} failures at one tier (default 2), escalate Haiku to Sonnet, then Sonnet to Opus. Paste every failure note into the next prompt. The new tier starts at zero. The Opus ceiling is `cc-tiers:orchestrator`: do the work in this session when that agent is already the session agent, and delegate to it (no `model` override, failure notes in the prompt) when it is not. If the Opus attempts also fail, stop and report the notes. Do not add a tier above Opus.
 
 A hook note that begins `cc-tiers counted a failure` is the counter. Follow its next step.
 

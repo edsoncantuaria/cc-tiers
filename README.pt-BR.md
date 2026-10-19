@@ -134,7 +134,7 @@ A ordem de escalonamento é fixa. As frases de roteamento e o limite de tentativ
 ```bash
 git clone https://github.com/edsoncantuaria/cc-tiers
 cd cc-tiers
-python3 -m unittest          # merge das regras + contador de tentativas
+python3 -m unittest discover -s tests   # merge das regras + contador de tentativas
 claude plugin validate .     # manifesto, hooks e frontmatter de agentes e skills
 claude --plugin-dir .        # uma sessão contra este checkout
 ```

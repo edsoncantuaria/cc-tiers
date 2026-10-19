@@ -19,4 +19,4 @@ CC_TIERS_TIER: <new tier>
 CC_TIERS_ROLE: worker|implementer
 ```
 
-Do not pass a `model` argument. Run the agent in the foreground. If the new tier is Opus, do the work in this session rather than delegating to the worker or the implementer.
+Do not pass a `model` argument. Run the agent in the foreground. If the new tier is Opus and this session is already `cc-tiers:orchestrator`, do the work here. If it is not, delegate to `cc-tiers:orchestrator` with the failure notes in the prompt.
