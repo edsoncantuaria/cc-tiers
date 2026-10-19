@@ -79,7 +79,7 @@ Código escrito de memória, com uma versão antiga da API em mente, falha de je
 - Como o repositório já chama a API, como `arquivo:linha`.
 - Referências fora do repositório, só quando se aplicam.
 
-Ele devolve um briefing com a fonte de cada fato. O orquestrador cola o relatório inteiro, trailer incluído, no prompt de quem vai escrever, entre duas linhas que só têm `CC_TIERS_RESEARCH_BEGIN` e `CC_TIERS_RESEARCH_END`, e acrescenta `CC_TIERS_RESEARCH: done`. Uma tarefa que não toca biblioteca, framework nem API externa diz o motivo no lugar: `CC_TIERS_RESEARCH: none - <motivo>`. Um briefing pode servir a várias tarefas: o prompt do pesquisador leva `CC_TIERS_COVERS: <slug>, <slug>`, e um pass marca todos.
+Ele devolve um briefing de até umas 30 linhas em três blocos, **Versão e doc**, **No repo** e **Fora do repo**, com a fonte de cada fato. O orquestrador cola o relatório inteiro, trailer incluído, no prompt de quem vai escrever, entre duas linhas que só têm `CC_TIERS_RESEARCH_BEGIN` e `CC_TIERS_RESEARCH_END`, e acrescenta `CC_TIERS_RESEARCH: done`. Uma tarefa que não toca biblioteca, framework nem API externa diz o motivo no lugar: `CC_TIERS_RESEARCH: none - <motivo>`. Um briefing pode servir a várias tarefas: o prompt do pesquisador leva `CC_TIERS_COVERS: <slug>, <slug>`, e um pass marca todos.
 
 O hook PreToolUse garante isso. Ele recusa a chamada ao implementer ou ao architect que não tem nem pesquisa concluída para aquela tarefa nem a linha `none`. Pesquisa não é tentativa, e uma pesquisa que falha não conta contra a tarefa. O worker fica de fora. O teto Opus e a tarefa do próprio dispatcher são pesquisados por prompt, sem checagem do hook. `research: off` tira o passo e a checagem.
 
@@ -98,6 +98,7 @@ Um hook na ferramenta Agent guarda o contador. Quando ele diz `cc-tiers counted 
 Os hooks garantem o que os prompts pedem:
 
 - **Antes de uma delegação** (PreToolUse), a chamada a um agente do cc-tiers é recusada quando passa `model`, não tem o header `CC_TIERS_TASK` ou manda uma tarefa já escalada de volta para um nível abaixo. Subir uma tarefa antes do limite (`/cc-tiers:escalate`) move o contador junto, com as notas.
+- **Pesquisa** (`research: on`, o padrão): a chamada ao implementer ou ao architect é recusada quando a tarefa não tem nem um pass do researcher nem a linha `CC_TIERS_RESEARCH: none - <motivo>`.
 - **Agentes em background** também contam. O lançamento grava o id do agente, e o SubagentStop conta o relatório quando ele termina. O aviso chega ao orquestrador na próxima delegação ou no fim do turno.
 - **O teto Opus** não tem chamada Agent, então o orquestrador marca a própria tentativa com o header `CC_TIERS_TASK` / `CC_TIERS_TIER: opus` / `CC_TIERS_ROLE: orchestrator` e fecha com `CC_TIERS_STATUS`. O hook conta esse trailer como qualquer outro relatório.
 - Agentes em paralelo dividem um arquivo de contador por sessão, com lock e gravação atômica.
@@ -107,7 +108,7 @@ Os hooks garantem o que os prompts pedem:
 
 ## 🪜 Effort
 
-Cada nível também tem uma escada de effort. Uma nova tentativa no mesmo nível roda um nível de effort acima antes de a tarefa trocar de modelo, porque pensar mais no Sonnet muitas vezes resolve o que um modelo novo resolveria, e as notas ficam num contexto só:
+Cada nível também tem uma escada de effort. Uma nova tentativa no mesmo nível roda um nível de effort acima antes de a tarefa trocar de modelo, apostando que pensar mais no Sonnet pode resolver o que de outro jeito pediria um modelo novo, e para que as notas fiquem num contexto só:
 
 | Nível | Tentativa 1 | Tentativa 2 | Tentativa 3+ |
 | --- | --- | --- | --- |
@@ -256,20 +257,20 @@ A ordem de escalonamento é fixa. As frases e palavras-chave de roteamento, o li
 ## 📊 Benchmark
 
 > [!IMPORTANT]
-> **O benchmark mede qualidade primeiro.** Uma rodada gasta tokens, e o cc-tiers gasta mais que um modelo sozinho, porque plano, pesquisa, construção e revisão são contextos separados. A tabela mostra isso como o preço do que ele compra: tarefas que passam e continuam passando. Uma configuração é julgada pelas colunas de qualidade antes de ser julgada por tokens.
+> **O benchmark mede qualidade primeiro.** Uma rodada gasta tokens, e o cc-tiers gasta mais que um modelo sozinho, porque plano, pesquisa, construção e revisão são contextos separados. Esses tokens a mais têm a intenção de comprar tarefas que passam e continuam passando; a tabela mostra se compram. Uma configuração é julgada pelas colunas de qualidade antes de ser julgada por tokens.
 
 O `bench/` corrige cada rodada com checks ocultos e reporta métricas que vêm de trabalhos publicados:
 
 | Métrica | Significado | De onde vem |
 | --- | --- | --- |
-| `pass@1` | Parcela das tarefas que a primeira tentativa resolve | pass@k, HumanEval (Chen et al., 2021) |
+| `pass@1` | Parcela das rodadas que resolvem a tarefa, na média das tarefas | pass@k, HumanEval (Chen et al., 2021) |
 | `pass^k` | Parcela das tarefas resolvidas em todas as `k` repetições. Cai quando a configuração tem sorte, mas não é confiável. A tabela mostra como `(k=N)` | pass^k, τ-bench (Yao et al., 2024) |
 | FAIL_TO_PASS | O check oculto que falha na fixture intocada precisa passar depois da mudança | SWE-bench (Jimenez et al., 2024) |
 | PASS_TO_PASS | Os arquivos de teste que passavam antes do passo precisam continuar passando: cada um roda de novo na forma de antes, um arquivo por vez | SWE-bench (Jimenez et al., 2024) |
 | Resolvida | FAIL_TO_PASS passou e nenhum arquivo PASS_TO_PASS regrediu | SWE-bench |
 | Tokens por tarefa resolvida | Tokens novos (entrada + escrita de cache + saída) da rodada inteira divididos pelas tarefas resolvidas | cc-tiers |
 
-Testes que o modelo escreveu não contam para resolvida; ficam no JSON bruto como `ownTests`. Cada tarefa também registra `changesTests`, se a rodada editou um arquivo de teste já existente.
+Testes que o modelo escreveu não contam para resolvida; ficam no JSON bruto como `ownTests`. Uma tarefa no arquivo de tarefas também pode listar `changesTests`: os arquivos de teste originais que ela muda de propósito. Eles ficam fora do PASS_TO_PASS. Nada é gravado por rodada.
 
 **Três suítes.**
 

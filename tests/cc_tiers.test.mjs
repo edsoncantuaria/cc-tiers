@@ -158,6 +158,8 @@ test('marketplace and settings stay pointed at this plugin', () => {
   assert.ok(market.owner.name)
   assert.equal(market.plugins[0].name, 'cc-tiers')
   assert.equal(market.plugins[0].source, './')
+  const manifest = JSON.parse(readFileSync(path.join(ROOT, '.claude-plugin/plugin.json'), 'utf8'))
+  assert.equal(market.description, manifest.description)
   const settings = JSON.parse(readFileSync(path.join(ROOT, 'settings.json'), 'utf8'))
   assert.equal(settings.agent, 'orchestrator')
   assert.deepEqual(Object.keys(settings), ['agent'])

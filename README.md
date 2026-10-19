@@ -79,7 +79,7 @@ Code written from memory of an old API version fails in ways a test does not alw
 - How the repo already calls the API, as `file:line`.
 - Prior art outside the repo, only when it applies.
 
-It returns a brief with a source for every fact. The orchestrator pastes the whole report, trailer included, into the writer's prompt between two lines that hold only `CC_TIERS_RESEARCH_BEGIN` and `CC_TIERS_RESEARCH_END`, and adds `CC_TIERS_RESEARCH: done`. A task that touches no library, framework, or external API says why instead: `CC_TIERS_RESEARCH: none - <reason>`. One brief can serve several tasks: the researcher's prompt carries `CC_TIERS_COVERS: <slug>, <slug>`, and a pass marks all of them.
+It returns a brief of under about 30 lines in three blocks, **Version and docs**, **In the repo**, and **Outside the repo**, with a source for every fact. The orchestrator pastes the whole report, trailer included, into the writer's prompt between two lines that hold only `CC_TIERS_RESEARCH_BEGIN` and `CC_TIERS_RESEARCH_END`, and adds `CC_TIERS_RESEARCH: done`. A task that touches no library, framework, or external API says why instead: `CC_TIERS_RESEARCH: none - <reason>`. One brief can serve several tasks: the researcher's prompt carries `CC_TIERS_COVERS: <slug>, <slug>`, and a pass marks all of them.
 
 The PreToolUse hook enforces this. It refuses a call to the implementer or the architect that has neither a finished research for that task nor a `none` line. A research is not an attempt, and a failed research does not count against the task. The worker is exempt. The Opus ceiling and the dispatcher's own task are researched by prompt, with no hook check. `research: off` removes the step and the check.
 
@@ -98,6 +98,7 @@ A hook on the Agent tool keeps the counter. When it reports `cc-tiers counted a 
 The hooks enforce what the prompts ask for:
 
 - **Before a delegation** (PreToolUse), a call to a cc-tiers agent is refused when it passes `model`, has no `CC_TIERS_TASK` header, or sends an escalated task back down a tier. Sending a task up early (`/cc-tiers:escalate`) moves the counter with the notes carried.
+- **Research** (`research: on`, the default): a call to the implementer or the architect is refused when its task has neither a researcher pass nor a `CC_TIERS_RESEARCH: none - <reason>` line.
 - **Background agents** are counted too. The launch records the agent id, and SubagentStop counts the report when it finishes. The note reaches the orchestrator on its next delegation, or at the end of the turn.
 - **The Opus ceiling** has no Agent call, so the orchestrator marks its own attempt with a `CC_TIERS_TASK` / `CC_TIERS_TIER: opus` / `CC_TIERS_ROLE: orchestrator` header and closes it with `CC_TIERS_STATUS`. The hook counts that trailer like any other report.
 - Parallel agents share one counter file per session, behind a lock, written atomically.
@@ -107,7 +108,7 @@ The hooks enforce what the prompts ask for:
 
 ## 🪜 Effort
 
-Each tier also has an effort ladder. A retry at the same tier runs one effort level higher before the task changes model, because more thinking on Sonnet often fixes what a new model would, and the notes stay in one context:
+Each tier also has an effort ladder. A retry at the same tier runs one effort level higher before the task changes model, on the bet that more thinking on Sonnet can fix what would otherwise take a new model, and so the notes stay in one context:
 
 | Tier | Attempt 1 | Attempt 2 | Attempt 3+ |
 | --- | --- | --- | --- |
@@ -256,20 +257,20 @@ The escalation order is fixed. Routing phrases and keywords, the retry limit, th
 ## 📊 Benchmark
 
 > [!IMPORTANT]
-> **The benchmark measures quality first.** A run spends tokens, and cc-tiers spends more of them than one model alone, because plan, research, build, and review are separate contexts. The table reports that as the price of what it buys: tasks that pass and keep passing. A configuration is judged on the quality columns before it is judged on tokens.
+> **The benchmark measures quality first.** A run spends tokens, and cc-tiers spends more of them than one model alone, because plan, research, build, and review are separate contexts. Those extra tokens are meant to buy tasks that pass and keep passing; the table shows whether they do. A configuration is judged on the quality columns before it is judged on tokens.
 
 `bench/` grades each run by hidden checks and reports metrics that come from published work:
 
 | Metric | Meaning | Where it comes from |
 | --- | --- | --- |
-| `pass@1` | Share of tasks the first attempt solves | pass@k, HumanEval (Chen et al., 2021) |
+| `pass@1` | Share of runs that resolve the task, averaged over tasks | pass@k, HumanEval (Chen et al., 2021) |
 | `pass^k` | Share of tasks solved in all `k` repetitions. It drops when a configuration is lucky, not reliable. The table shows it as `(k=N)` | pass^k, τ-bench (Yao et al., 2024) |
 | FAIL_TO_PASS | The hidden check that fails on the untouched fixture must pass after the change | SWE-bench (Jimenez et al., 2024) |
 | PASS_TO_PASS | Test files that passed before the step must still pass: each is re-run in its before-form, one file at a time | SWE-bench (Jimenez et al., 2024) |
 | Resolved | FAIL_TO_PASS passed and no PASS_TO_PASS file regressed | SWE-bench |
 | Tokens per resolved task | Fresh tokens (input + cache write + output) of the whole run divided by resolved tasks | cc-tiers |
 
-Tests the model wrote do not count toward resolved; they are kept in the raw JSON as `ownTests`. Each task also records `changesTests`, whether the run edited an existing test file.
+Tests the model wrote do not count toward resolved; they are kept in the raw JSON as `ownTests`. A task in a tasks file may also list `changesTests`: the original test files that task legitimately changes. They are left out of PASS_TO_PASS. Nothing is recorded per run.
 
 **Three suites.**
 
