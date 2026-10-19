@@ -1430,7 +1430,7 @@ test('the benchmark fixture is green, and every hidden check fails before the ta
   ]
   const text = table(rows)
   assert.ok(text.includes('| Configuration | pass@1 | pass^k | Resolved | Regressions | Tokens per resolved task | Δ tokens vs Opus only |'))
-  assert.ok(text.includes('| Opus only | 50% | 0% | 1/2 | 1 | 20.0k | — |'))
+  assert.ok(text.includes('| Opus only | 50% | 0% (k=2) | 1/2 | 1 | 20.0k | — |'))
   assert.ok(text.includes('| `typo` (trivial) | 🟡 1/2 |'))
   assert.equal(text.includes('$'), false)
 })
@@ -1495,24 +1495,54 @@ test('quality metrics: pass@1, pass^k, regressions, tokens', async () => {
   assert.deepEqual(metrics(rows.filter((r) => r.config === 'opus')), { pass1: 0.75, passK: 0.5, k: 2, resolved: 3, runs: 4, regressions: 0, tokensPerResolved: 30000 })
   assert.deepEqual(metrics(rows.filter((r) => r.config === 'cc-tiers')), { pass1: 0.75, passK: 0.5, k: 2, resolved: 3, runs: 4, regressions: 1, tokensPerResolved: 45000 })
   const text = table(rows)
-  assert.ok(text.includes('| Opus only | 75% | 50% | 3/4 | 0 | 30.0k | — |'))
-  assert.ok(text.includes('| cc-tiers (Opus orchestrator) | 75% | 50% | 3/4 | 1 | 45.0k | +50% |'))
-  assert.ok(text.includes('| Sonnet only | 100% | 100% | 4/4 | 0 | 27.6k | −8% |'))
+  assert.ok(text.includes('| Opus only | 75% | 50% (k=2) | 3/4 | 0 | 30.0k | — |'))
+  assert.ok(text.includes('| cc-tiers (Opus orchestrator) | 75% | 50% (k=2) | 3/4 | 1 | 45.0k | +50% |'))
+  assert.ok(text.includes('| Sonnet only | 100% | 100% (k=2) | 4/4 | 0 | 27.6k | −8% |'))
   assert.ok(text.includes('| `b` (normal) | 🟡 1/2 | 🟡 1/2 | ✅ 2/2 |'))
   assert.equal(text.includes('$'), false)
-  assert.ok(table(rows.filter((r) => r.config !== 'opus')).includes('| cc-tiers (Opus orchestrator) | 75% | 50% | 3/4 | 1 | 45.0k | — |'))
+  assert.ok(table(rows.filter((r) => r.config !== 'opus')).includes('| cc-tiers (Opus orchestrator) | 75% | 50% (k=2) | 3/4 | 1 | 45.0k | — |'))
 })
 
 test('old result rows render with pass as resolved', async () => {
-  const { table } = await import(pathToFileURL(path.join(ROOT, 'bench', 'run.mjs')).href)
+  const { metrics, table } = await import(pathToFileURL(path.join(ROOT, 'bench', 'run.mjs')).href)
+  const usage = (input, output, cacheRead, cacheWrite) => ({ 'claude-opus-5-5': { input, output, cacheRead, cacheWrite } })
   const rows = [
-    { config: 'opus', task: 'typo', kind: 'trivial', pass: true, cost: 0.1, models: { 'claude-opus-5-5': 0.1 } },
-    { config: 'opus', task: 'typo', kind: 'trivial', pass: false, cost: 0.3, models: { 'claude-opus-5-5': 0.3 } },
+    { config: 'opus', task: 'typo', kind: 'trivial', pass: true, cost: 0.1, models: { 'claude-opus-5-5': 0.1 }, tokens: usage(1000, 2000, 50000, 3000) },
+    { config: 'opus', task: 'typo', kind: 'trivial', pass: false, cost: 0.3, models: { 'claude-opus-5-5': 0.3 }, tokens: usage(1000, 1000, 90000, 2000) },
+    { config: 'sonnet', task: 'typo', kind: 'trivial', pass: true, cost: 0.1, models: {} },
+    { config: 'sonnet', task: 'typo', kind: 'trivial', pass: false, cost: 0.1, models: {} },
   ]
   const text = table(rows)
-  assert.ok(text.includes('| Opus only | 50% | 0% | 1/2 | 0 | — | — |'))
-  assert.ok(text.includes('| `typo` (trivial) | 🟡 1/2 |'))
+  assert.ok(text.includes('| Opus only | 50% | 0% (k=2) | 1/2 | — | 10.0k | — |'))
+  assert.ok(text.includes('| Sonnet only | 50% | 0% (k=2) | 1/2 | — | — | — |'))
+  assert.ok(text.includes('| `typo` (trivial) | 🟡 1/2 | 🟡 1/2 |'))
   assert.equal(text.includes('$'), false)
+  const mixed = [
+    { task: 'a', resolved: true, f2p: true, p2p: true, freshTokens: 10000 },
+    { task: 'b', pass: true },
+  ]
+  assert.equal(metrics(mixed).tokensPerResolved, 10000)
+  assert.equal(metrics(mixed).regressions, 0)
+})
+
+test('session steps keep their own usage, not the running total', async () => {
+  const { stepUsage } = await import(pathToFileURL(path.join(ROOT, 'bench', 'run.mjs')).href)
+  const usage = (input, output, cacheRead, cacheWrite, costUSD) => ({
+    inputTokens: input, outputTokens: output, cacheReadInputTokens: cacheRead, cacheCreationInputTokens: cacheWrite, costUSD, contextWindow: 200000,
+  })
+  const first = { session_id: 's1', total_cost_usd: 0.07, modelUsage: { opus: usage(6, 336, 44637, 6778, 0.07) } }
+  const second = {
+    session_id: 's1',
+    total_cost_usd: 0.1,
+    modelUsage: { opus: usage(10, 563, 60000, 7000, 0.09), haiku: usage(100, 50, 0, 200, 0.01) },
+  }
+  const step = stepUsage(second, first)
+  assert.deepEqual(step.modelUsage.opus, usage(4, 227, 15363, 222, 0.09 - 0.07))
+  assert.deepEqual(step.modelUsage.haiku, usage(100, 50, 0, 200, 0.01))
+  assert.equal(step.total_cost_usd, 0.1 - 0.07)
+  assert.equal(stepUsage(first, null), first)
+  const fresh = { ...second, session_id: 's2' }
+  assert.equal(stepUsage(fresh, first), fresh)
 })
 
 test('the hard benchmark fixture is green, and every hidden check fails before its task and passes with the reference fix', async () => {

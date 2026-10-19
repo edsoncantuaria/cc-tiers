@@ -267,6 +267,24 @@ function readLines(file) {
   return file ? readFileSync(file, 'utf8').split('\n').filter(Boolean) : []
 }
 
+const STEP_FIELDS = ['inputTokens', 'outputTokens', 'cacheReadInputTokens', 'cacheCreationInputTokens', 'costUSD']
+
+/**
+ * `claude -p --resume` reports usage and cost for the whole session so far.
+ * This subtracts the previous step of the same session, so a row holds its own
+ * step only. A different session id means a new session: nothing to subtract.
+ */
+export function stepUsage(json, previous) {
+  if (!json || !previous || previous.session_id !== json.session_id) return json
+  const modelUsage = {}
+  for (const [model, usage] of Object.entries(json.modelUsage || {})) {
+    const before = previous.modelUsage?.[model] || {}
+    modelUsage[model] = { ...usage }
+    for (const field of STEP_FIELDS) if (field in usage) modelUsage[model][field] = (Number(usage[field]) || 0) - (Number(before[field]) || 0)
+  }
+  return { ...json, modelUsage, total_cost_usd: (Number(json.total_cost_usd) || 0) - (Number(previous.total_cost_usd) || 0) }
+}
+
 function summarize(config, task, rep, run, verdict, escalations = null, route = null) {
   const json = run.json || {}
   const models = {}
@@ -334,6 +352,13 @@ const resolvedOf = (row) => Boolean(row.resolved ?? row.pass)
 const percent = (share) => `${Math.round(share * 100)}%`
 const kilo = (tokens) => `${(tokens / 1000).toFixed(1)}k`
 
+/** Fresh tokens of a row; older result files only have the per-model `tokens`. Null when the row has neither. */
+function freshOf(row) {
+  if (row.freshTokens != null) return row.freshTokens
+  if (!row.tokens) return null
+  return Object.values(row.tokens).reduce((sum, t) => sum + (t.input || 0) + (t.cacheWrite || 0) + (t.output || 0), 0)
+}
+
 /**
  * pass@1 (HumanEval): mean over tasks of the share of runs resolved. pass^k
  * (τ-bench): share of tasks resolved in every one of their k runs. Regressions:
@@ -346,16 +371,17 @@ export function metrics(rows) {
     return { runs: mine.length, resolved: mine.filter(resolvedOf).length }
   })
   const resolved = rows.filter(resolvedOf).length
-  const counted = rows.some((row) => row.freshTokens != null)
-  const tokens = rows.reduce((sum, row) => sum + (row.freshTokens || 0), 0)
+  const counted = rows.filter((row) => freshOf(row) != null)
+  const tokens = counted.reduce((sum, row) => sum + freshOf(row), 0)
+  const resolvedCounted = counted.filter(resolvedOf).length
   return {
     pass1: perTask.length ? perTask.reduce((sum, task) => sum + task.resolved / task.runs, 0) / perTask.length : 0,
     passK: perTask.length ? perTask.filter((task) => task.resolved === task.runs).length / perTask.length : 0,
     k: perTask.length ? Math.min(...perTask.map((task) => task.runs)) : 0,
     resolved,
     runs: rows.length,
-    regressions: rows.filter((row) => row.f2p && row.p2p === false).length,
-    tokensPerResolved: counted && resolved ? tokens / resolved : null,
+    regressions: rows.some((row) => 'p2p' in row) ? rows.filter((row) => row.f2p && row.p2p === false).length : null,
+    tokensPerResolved: resolvedCounted ? tokens / resolvedCounted : null,
   }
 }
 
@@ -375,7 +401,7 @@ export function table(results) {
       delta = change < 0 ? `−${-change}%` : `+${change}%`
     }
     const tokens = m.tokensPerResolved == null ? '—' : kilo(m.tokensPerResolved)
-    lines.push(`| ${label(config)} | ${percent(m.pass1)} | ${percent(m.passK)} | ${m.resolved}/${m.runs} | ${m.regressions} | ${tokens} | ${delta} |`)
+    lines.push(`| ${label(config)} | ${percent(m.pass1)} | ${percent(m.passK)} (k=${m.k}) | ${m.resolved}/${m.runs} | ${m.regressions ?? '—'} | ${tokens} | ${delta} |`)
   }
   lines.push('')
   const tasks = [...new Set(results.map((row) => row.task))]
@@ -488,6 +514,7 @@ async function main() {
     const rows = []
     let id = ''
     let seen = 0
+    let previous = null
     try {
       for (const task of tasks) {
         const before = passingTests(dir)
@@ -498,7 +525,9 @@ async function main() {
         seen = read.seen
         const verdict = grade(dir, task, run.json?.result, checks, before)
         rmSync(path.join(dir, '.bench-check'), { recursive: true, force: true })
-        const row = { ...summarize(nameOf(config), task, rep, run, verdict, read.found, read.route), mode: 'session' }
+        const step = { ...run, json: stepUsage(run.json, previous) }
+        if (run.json) previous = run.json
+        const row = { ...summarize(nameOf(config), task, rep, step, verdict, read.found, read.route), mode: 'session' }
         process.stderr.write(`${progress(row)} ${row.config} ${task.id} ${kilo(row.freshTokens)} tokens ${row.seconds}s${row.escalations ? ` escalations ${row.escalationPath.join(', ')}` : ''}${row.route ? ` route ${row.route}${row.routedAsDocumented === false ? ' (off)' : ''}` : ''}\n`)
         rows.push(row)
       }
