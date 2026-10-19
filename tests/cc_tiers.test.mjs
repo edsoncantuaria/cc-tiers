@@ -1699,6 +1699,27 @@ test('the gate refuses an implementer without research', () => {
   assert.equal(tiers.checkDelegation(tiers.emptyState('s'), { subagent_type: 'cc-tiers:researcher', prompt: 'CC_TIERS_TASK: csv\nlook' }, routing).deny, '')
 })
 
+test('a slug named like an Object.prototype key needs its own research mark', () => {
+  const routing = riskyRouting()
+  const call = (state) =>
+    tiers.checkDelegation(
+      state,
+      { subagent_type: 'cc-tiers:implementer', prompt: `${HEADER('constructor', 'sonnet', 'implementer')}CC_TIERS_RESEARCH: done\nBuild it.` },
+      routing,
+    )
+  assert.ok(call(tiers.emptyState('s')).deny.includes('constructor has no finished research'))
+})
+
+test('an unclosed research block in the prompt does not hide the report trailer', () => {
+  const routing = defaultRouting({ review_policy: 'cheap' })
+  const prompt = `${HEADER('csv', 'sonnet', 'implementer')}CC_TIERS_RESEARCH: done\n${BRIEF_BEGIN}\n- users table`
+  const text = 'Done. Touched the login middleware.\nCC_TIERS_TASK: csv\nCC_TIERS_TIER: sonnet\nCC_TIERS_ROLE: implementer\nCC_TIERS_STATUS: pass'
+  const result = apply(tiers.emptyState('s'), routing, 'i1', 'implementer', text, prompt)
+  assert.equal(result.meta.task, 'csv')
+  assert.equal(result.meta.outcome, 'review')
+  assert.ok(result.message.includes('cc-tiers:reviewer'))
+})
+
 test('a researcher pass marks the task and its covers', () => {
   const routing = riskyRouting()
   const prompt = 'CC_TIERS_TASK: csv\nCC_TIERS_COVERS: date-filter, cancel\nResearch the export.'

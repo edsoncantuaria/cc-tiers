@@ -1138,7 +1138,7 @@ export function applyEvent(state, event, routing) {
     const next = selectReviewer({
       policy: routing.reviewPolicy,
       writerTier: tier,
-      risky: isRisky(`${event.prompt || ''}\n${event.text || ''}`, routing),
+      risky: isRisky(event.prompt || '', routing) || isRisky(event.text || '', routing),
       conserve: routing.conserve === true,
     })
     if (next == null) {
@@ -1310,7 +1310,7 @@ export function checkDelegation(state, toolInput, routing, { history = null, pro
   if (routing.research && (role === 'implementer' || role === 'architect')) {
     const research = (headers.RESEARCH || '').toLowerCase()
     if (research === 'done') {
-      if (!state.researched?.[task]) {
+      if (!Object.hasOwn(state.researched || {}, task)) {
         return refuse(
           `cc-tiers: ${task} has no finished research. Wait for cc-tiers:researcher to report pass, or use CC_TIERS_RESEARCH: none - <reason>.`,
         )

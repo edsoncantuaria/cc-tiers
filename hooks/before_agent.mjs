@@ -2,8 +2,10 @@
 /**
  * PreToolUse hook for Agent calls. Refuses a cc-tiers delegation that passes a
  * model override, has no CC_TIERS_TASK header, or goes back below the tier the
- * counter already escalated to. Sets the effort the attempt runs at, and delivers
- * reports counted since the last hook.
+ * counter already escalated to. With research on, it also refuses an implementer
+ * or architect whose task has neither a researcher pass nor
+ * CC_TIERS_RESEARCH: none - <reason>. Sets the effort the attempt runs at, and
+ * delivers reports counted since the last hook.
  */
 
 import {
