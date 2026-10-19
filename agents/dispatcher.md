@@ -62,6 +62,8 @@ Before a task goes to `cc-tiers:implementer` or `cc-tiers:architect`, run `cc-ti
 
 When the researcher reports `CC_TIERS_STATUS: pass`, paste its entire report, trailer included, between two lines that hold only `CC_TIERS_RESEARCH_BEGIN` and `CC_TIERS_RESEARCH_END`. Put that block under the writer's `CC_TIERS_TASK/TIER/ROLE` header, outside the block, and add `CC_TIERS_RESEARCH: done`. The hook strips the block before it reads headers. If the research fails, fix what it says is missing or use the next option.
 
+Paste the same block, between the same delimiters, into the `cc-tiers:reviewer` or `cc-tiers:checker` prompt for that slug, so the review checks the version the brief names. A retry, or an escalation to `cc-tiers:architect`, reuses the research: keep the block and the `CC_TIERS_RESEARCH: done` line, and do not research again unless the failure notes show the brief was wrong.
+
 When the task touches no library, framework, or external API, skip the research and add `CC_TIERS_RESEARCH: none - <reason>` instead. Research `off` makes the hook skip the check; `cc-tiers:worker` needs none. If the hook refuses a delegation for missing research, run the researcher or add the `none` line, as the refusal says.
 
 ## Delegation prompt
@@ -71,7 +73,7 @@ Start every delegation except the planner's with:
 ```
 CC_TIERS_TASK: <slug>
 CC_TIERS_TIER: haiku|sonnet|opus
-CC_TIERS_ROLE: worker|implementer|architect|checker|reviewer
+CC_TIERS_ROLE: worker|implementer|architect|checker|reviewer|researcher
 ```
 
 Then the brief, the acceptance check, and every failure note so far. Tell a worker, implementer, or architect to end with `CC_TIERS_REVIEW: pending` when a review follows, or `skip` when not. A lookup that changes no files needs no review. Tell the checker and the reviewer to set `CC_TIERS_TIER` to the tier that wrote the diff.

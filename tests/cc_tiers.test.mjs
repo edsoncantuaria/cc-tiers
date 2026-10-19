@@ -201,8 +201,14 @@ test('agents pin family aliases, including the Sonnet checker', () => {
   assert.equal(researcher.maxTurns, '25')
   for (const file of ['agents/orchestrator.md', 'agents/dispatcher.md', 'skills/tiers/SKILL.md']) {
     const text = readFileSync(path.join(ROOT, file), 'utf8')
-    for (const needle of ['cc-tiers:researcher', 'CC_TIERS_RESEARCH_BEGIN', 'CC_TIERS_RESEARCH: none - ']) assert.ok(text.includes(needle), `${file} mentions ${needle}`)
+    for (const needle of ['cc-tiers:researcher', 'CC_TIERS_RESEARCH_BEGIN', 'CC_TIERS_RESEARCH: none - ', 'into the `cc-tiers:reviewer` or `cc-tiers:checker` prompt', 'reuses the research']) {
+      assert.ok(text.includes(needle), `${file} mentions ${needle}`)
+    }
+    assert.ok(text.includes('|reviewer|researcher\n'), `${file} header lists the researcher role`)
   }
+  const brief = readFileSync(path.join(ROOT, 'agents', 'researcher.md'), 'utf8')
+  for (const needle of ['Version and docs:', 'In the repo:', 'Outside the repo:', 'under about 30 lines']) assert.ok(brief.includes(needle), `researcher mentions ${needle}`)
+  assert.equal(brief.includes('CC_TIERS_COVERS: <slugs'), false)
   const defaults = tiers.loadJson(path.join(ROOT, 'config/routing.default.json'))
   for (const tier of tiers.TIERS) assert.equal(defaults.effort[tier][0], efforts[tiers.IMPLEMENTERS[tier]] || 'high')
 })
