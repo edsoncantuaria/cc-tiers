@@ -1,5 +1,3 @@
 .claude-plugin/types/
-__pycache__/
-*.pyc
-.pytest_cache/
+.claude/cc-tiers-history.json
 agent-tools/

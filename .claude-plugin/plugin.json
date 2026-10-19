@@ -1,7 +1,7 @@
 {
   "name": "cc-tiers",
-  "version": "0.1.0",
-  "description": "Tiered Opus, Sonnet, and Haiku workflow: plan, delegate, retry, then escalate",
+  "version": "0.2.0",
+  "description": "Tiered Opus, Sonnet, and Haiku workflow with cheaper review, budget routing, and cc-cost spend",
   "author": {
     "name": "edsoncantuaria",
     "url": "https://github.com/edsoncantuaria"
@@ -21,10 +21,33 @@
     },
     "review_policy": {
       "type": "string",
-      "title": "Opus review",
-      "description": "When finished work goes to the Opus reviewer. risky: non-trivial or risky changes. always: every passing task. never: no review pass.",
-      "default": "risky",
-      "options": ["risky", "always", "never"]
+      "title": "Review policy",
+      "description": "cheap: Sonnet reviews Haiku output, and Opus reviews only risky or non-trivial work. risky: Opus reviews non-trivial work and skips a trivial Haiku pass. always: review every pass, Haiku on Sonnet and the rest on Opus. never: no review pass.",
+      "default": "cheap",
+      "options": ["cheap", "risky", "always", "never"]
+    },
+    "learn": {
+      "type": "string",
+      "title": "Learn from Haiku failures",
+      "description": "When on, a task similar to one that already failed on Haiku starts on Sonnet. The record is .claude/cc-tiers-history.json, gitignored when it is first written. off writes nothing and leaves routing alone.",
+      "default": "on",
+      "options": ["on", "off"]
+    },
+    "budget_5h": {
+      "type": "number",
+      "title": "5h conserve threshold",
+      "description": "When the 5-hour usage window reaches this percent, new work stays on Haiku or Sonnet. Opus remains for the escalation ceiling and critical review. Default 80.",
+      "default": 80,
+      "min": 1,
+      "max": 100
+    },
+    "budget_7d": {
+      "type": "number",
+      "title": "7d conserve threshold",
+      "description": "When the 7-day usage window reaches this percent, routing conserves the same way as the 5-hour threshold. Default 80.",
+      "default": 80,
+      "min": 1,
+      "max": 100
     },
     "trivial_extra": {
       "type": "string",
