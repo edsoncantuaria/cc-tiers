@@ -1,6 +1,9 @@
 {
   "maxAttempts": 2,
-  "reviewPolicy": "risky",
+  "reviewPolicy": "cheap",
+  "learn": true,
+  "budget5h": 80,
+  "budget7d": 80,
   "escalation": ["haiku", "sonnet", "opus"],
   "tiers": {
     "haiku": {

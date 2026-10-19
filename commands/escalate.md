@@ -7,7 +7,7 @@ Escalate `$ARGUMENTS` by one tier. If the argument is empty, escalate the task t
 
 Order is fixed: Haiku (`cc-tiers:worker`) to Sonnet (`cc-tiers:implementer`) to Opus (the orchestrator implements it). Opus is the last tier. If the task is already on Opus, stop and report the notes instead of delegating.
 
-The attempt limit is ${user_config.max_attempts} (default 2). Escalating early is allowed when the user asks for it. Say that the user asked, and still carry the failure notes.
+The attempt limit is ${user_config.max_attempts} (default 2). Escalating early is allowed when the user asks for it. Say that the user asked, and still carry the failure notes. A conserve line from budget routing does not block this escalation: Opus is the ceiling.
 
 Look for a `cc-tiers counted a failure` note in the conversation. If you need the stored counter, read `${CLAUDE_PLUGIN_DATA}/latest.json` and use the entry for this slug. Include every failure note, and any carried notes, in the next delegation prompt. The new tier starts at zero.
 

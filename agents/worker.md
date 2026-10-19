@@ -27,4 +27,4 @@ CC_TIERS_REVIEW: skip
 CC_TIERS_REASON: <one line>
 ```
 
-Use `fail` when the edit cannot be finished or the check fails. Use `CC_TIERS_REVIEW: pending` only when the prompt says the reviewer will see the result; otherwise `skip`. Keep `CC_TIERS_REASON` to one line.
+Use `fail` when the edit cannot be finished or the check fails. Use `CC_TIERS_REVIEW: pending` only when the prompt says the checker or the reviewer will see the result; otherwise `skip`. Keep `CC_TIERS_REASON` to one line.

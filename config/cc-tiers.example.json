@@ -1,4 +1,7 @@
 {
+  "learn": "on",
+  "budget5h": 80,
+  "budget7d": 80,
   "trivialExtra": ["changelog edits", "license year bumps"],
   "riskyExtra": ["terraform", "billing"],
   "tiers": {

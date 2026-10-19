@@ -27,4 +27,4 @@ CC_TIERS_REVIEW: pending
 CC_TIERS_REASON: <one line>
 ```
 
-Use `fail` when tests fail, the change does not meet the prompt, or you hit an error you cannot fix in this attempt. Set `CC_TIERS_REVIEW` to `pending` or `skip` exactly as the prompt asks. On failure, put the useful error on the reason line (test name, assertion, or command).
+Use `fail` when tests fail, the change does not meet the prompt, or you hit an error you cannot fix in this attempt. Set `CC_TIERS_REVIEW` to `pending` or `skip` exactly as the prompt asks. On failure, put the useful error on the reason line (test name, assertion, or command). A pending review of ordinary Sonnet work is not your decision: the orchestrator only asks for `cc-tiers:reviewer` when the work is risky, non-trivial, or at the Opus ceiling.
