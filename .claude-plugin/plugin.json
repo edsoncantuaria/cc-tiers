@@ -1,0 +1,42 @@
+{
+  "name": "cc-tiers",
+  "version": "0.1.0",
+  "description": "Tiered Opus, Sonnet, and Haiku workflow: plan, delegate, retry, then escalate",
+  "author": {
+    "name": "edsoncantuaria",
+    "url": "https://github.com/edsoncantuaria"
+  },
+  "homepage": "https://github.com/edsoncantuaria/cc-tiers",
+  "repository": "https://github.com/edsoncantuaria/cc-tiers",
+  "license": "MIT",
+  "keywords": ["workflow", "subagents", "opus", "sonnet", "haiku", "models"],
+  "userConfig": {
+    "max_attempts": {
+      "type": "number",
+      "title": "Max attempts per tier",
+      "description": "How many failures a task may have at one tier before it escalates (Haiku to Sonnet to Opus). A failure is a failed test, a rejected review, or a subagent error. Default 2.",
+      "default": 2,
+      "min": 1,
+      "max": 5
+    },
+    "review_policy": {
+      "type": "string",
+      "title": "Opus review",
+      "description": "When finished work goes to the Opus reviewer. risky: non-trivial or risky changes. always: every passing task. never: no review pass.",
+      "default": "risky",
+      "options": ["risky", "always", "never"]
+    },
+    "trivial_extra": {
+      "type": "string",
+      "title": "Extra Haiku phrases",
+      "description": "Comma-separated phrases that also count as trivial Haiku work, added to the built-in list. Example: changelog edits, license year bumps.",
+      "default": ""
+    },
+    "risky_extra": {
+      "type": "string",
+      "title": "Extra review phrases",
+      "description": "Comma-separated phrases that also require an Opus review, added to the built-in risky list. Example: terraform, billing.",
+      "default": ""
+    }
+  }
+}

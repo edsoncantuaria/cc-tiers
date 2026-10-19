@@ -1,0 +1,13 @@
+{
+  "name": "cc-tiers",
+  "description": "cc-tiers: Opus plans, Sonnet implements, Haiku handles the trivial work, and failures escalate",
+  "owner": {
+    "name": "edsoncantuaria"
+  },
+  "plugins": [
+    {
+      "name": "cc-tiers",
+      "source": "./"
+    }
+  ]
+}

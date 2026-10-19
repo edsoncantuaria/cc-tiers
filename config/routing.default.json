@@ -1,0 +1,46 @@
+{
+  "maxAttempts": 2,
+  "reviewPolicy": "risky",
+  "escalation": ["haiku", "sonnet", "opus"],
+  "tiers": {
+    "haiku": {
+      "model": "haiku",
+      "agent": "worker",
+      "when": [
+        "rename a symbol in one or two files",
+        "fix a typo, comment, or string",
+        "format, lint, or apply a mechanical codemod",
+        "look up where a symbol is defined or who calls it",
+        "a simple search that only reports what it finds",
+        "a mechanical edit of about 15 lines or fewer in one file"
+      ]
+    },
+    "sonnet": {
+      "model": "sonnet",
+      "agent": "implementer",
+      "when": [
+        "a feature with a clear expected result",
+        "a bug fix that stays inside one subsystem",
+        "tests for behavior that already exists",
+        "a refactor that does not change architecture or public contracts"
+      ]
+    },
+    "opus": {
+      "model": "opus",
+      "agent": "orchestrator",
+      "reviewAgent": "reviewer",
+      "when": [
+        "planning and splitting work into tasks",
+        "a task that already used its attempts on Sonnet",
+        "cross-cutting work the orchestrator cannot hand off cleanly"
+      ],
+      "reviewWhen": [
+        "authentication, payments, migrations, or data loss",
+        "a public API, schema, or persisted contract",
+        "concurrency, security, or a change across packages",
+        "a large diff, or the implementer is unsure",
+        "anything the orchestrator judges non-trivial"
+      ]
+    }
+  }
+}
