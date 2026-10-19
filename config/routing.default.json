@@ -7,6 +7,7 @@
   "classifier": "haiku",
   "lightPath": true,
   "showCost": false,
+  "research": true,
   "effort": {
     "on": true,
     "haiku": [

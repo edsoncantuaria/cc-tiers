@@ -88,6 +88,13 @@
       "description": "inline: when a request is one trivial task, the session agent does it itself, with no subagent and no checker; that is cheaper than a fresh worker context. delegate: skip the plan and send it to the worker in one call. off: every request is planned the usual way.",
       "default": "inline",
       "options": ["inline", "delegate", "off"]
+    },
+    "research": {
+      "type": "string",
+      "title": "Research gate",
+      "description": "on (default): before code goes to cc-tiers:implementer or cc-tiers:architect, cc-tiers:researcher must report pass for that task and the prompt must say CC_TIERS_RESEARCH: done, or the prompt must say CC_TIERS_RESEARCH: none - <reason>. Otherwise cc-tiers refuses the call. off: no research step is required.",
+      "default": "on",
+      "options": ["on", "off"]
     }
   }
 }

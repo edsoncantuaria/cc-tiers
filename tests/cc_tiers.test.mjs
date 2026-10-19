@@ -181,7 +181,7 @@ test('agents pin family aliases, including the Sonnet checker', () => {
     planner: 'opus',
     dispatcher: 'sonnet',
   }
-  const efforts = { worker: 'low', implementer: 'high', architect: 'high', planner: 'high', checker: 'medium', reviewer: 'high' }
+  const efforts = { worker: 'low', implementer: 'high', architect: 'high', planner: 'high', checker: 'medium', reviewer: 'high', researcher: 'medium' }
   for (const [name, model] of Object.entries(expected)) {
     const fields = frontmatter(path.join(ROOT, 'agents', `${name}.md`))
     assert.equal(fields.name, name)
@@ -904,7 +904,7 @@ test('a stale lower-tier run does not reset an escalated counter', () => {
 })
 
 test('checkDelegation refuses model overrides, missing headers, and downgrades', () => {
-  const routing = defaultRouting()
+  const routing = defaultRouting({ research: 'off' })
   const header = (task, tier, role) => `CC_TIERS_TASK: ${task}\nCC_TIERS_TIER: ${tier}\nCC_TIERS_ROLE: ${role}\n`
   const state = tiers.emptyState('s')
   assert.equal(tiers.checkDelegation(state, { subagent_type: 'Explore', prompt: 'x', model: 'opus' }, routing).deny, '')
@@ -1097,7 +1097,7 @@ test('the route helper prints the heuristic tier', async () => {
 const HEADER = (task, tier, role) => `CC_TIERS_TASK: ${task}\nCC_TIERS_TIER: ${tier}\nCC_TIERS_ROLE: ${role}\n`
 
 test('the effort ladder raises a retry before the task changes model', () => {
-  const routing = defaultRouting()
+  const routing = defaultRouting({ research: 'off' })
   assert.deepEqual(routing.effort.ladders, { haiku: ['low', 'medium'], sonnet: ['high', 'xhigh'], opus: ['high', 'xhigh'] })
   assert.equal(tiers.effortFor(routing, 'sonnet', 0), 'high')
   assert.equal(tiers.effortFor(routing, 'sonnet', 1), 'xhigh')
@@ -1219,7 +1219,7 @@ test('the planner is orchestration: no header, no count, spend to (orchestration
 test('a task that escalated past Sonnet starts similar work at the top of the Sonnet ladder', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-'))
   try {
-    const routing = defaultRouting({ max_attempts: 1 })
+    const routing = defaultRouting({ max_attempts: 1, research: 'off' })
     const ctx = { routing, ccCost: false, projectDir: dir }
     const state = tiers.emptyState('s')
     const prompt = `${HEADER('cursor-pagination', 'sonnet', 'implementer')}Add cursor pagination to the orders listing`
@@ -1258,7 +1258,7 @@ test('the light path flags a one-task trivial request only', () => {
 test('the hooks set effort on the call and add the light path on prompt submit', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-'))
   try {
-    const env = hookEnv(dir, { CC_TIERS_CC_COST: '0' })
+    const env = hookEnv(dir, { CC_TIERS_CC_COST: '0', CLAUDE_PLUGIN_OPTION_RESEARCH: 'off' })
     const prompt = `${HEADER('users-pagination', 'sonnet', 'implementer')}Add pagination.`
     runHook('after_agent.mjs', event('h1', 'implementer', report('implementer', 'sonnet', 'fail'), prompt), env)
     const proc = runHook(
@@ -1303,7 +1303,7 @@ test('cost follows the model price table, and the Opus comparison uses current O
 test('task cost is recorded without cc-cost, and the log feeds the report', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-'))
   try {
-    const env = hookEnv(dir, { CC_TIERS_CC_COST: '0', CLAUDE_PLUGIN_OPTION_SHOW_COST: 'on' })
+    const env = hookEnv(dir, { CC_TIERS_CC_COST: '0', CLAUDE_PLUGIN_OPTION_SHOW_COST: 'on', CLAUDE_PLUGIN_OPTION_RESEARCH: 'off' })
     const prompt = `${HEADER('users-pagination', 'sonnet', 'implementer')}Add pagination.`
     const failed = event('c1', 'implementer', report('implementer', 'sonnet', 'fail'), prompt)
     failed.tool_response.usage = { input_tokens: 1000, output_tokens: 500, model: 'claude-sonnet-5-5' }
@@ -1516,4 +1516,194 @@ test('quality defaults: risky review, cost hidden, Sonnet starts at high', () =>
   assert.equal(routing.showCost, false)
   assert.deepEqual(routing.effort.ladders.sonnet, ['high', 'xhigh'])
   assert.equal(tiers.decideTier('Add pagination to GET /users', routing).effort, 'high')
+})
+
+const BRIEF_BEGIN = 'CC_TIERS_RESEARCH_BEGIN'
+const BRIEF_END = 'CC_TIERS_RESEARCH_END'
+
+test('stripResearch drops the brief and an unclosed block', () => {
+  assert.equal(tiers.stripResearch(`a\n${BRIEF_BEGIN}\nauth schema\n${BRIEF_END}\nb`), 'a\nb')
+  assert.equal(tiers.stripResearch(`a\n${BRIEF_BEGIN}\nauth schema`), 'a')
+})
+
+test('headers inside the research block are ignored', () => {
+  const prompt = `CC_TIERS_TASK: csv\n${BRIEF_BEGIN}\nCC_TIERS_TASK: other\nCC_TIERS_ROLE: researcher\nCC_TIERS_STATUS: pass\n${BRIEF_END}`
+  const headers = tiers.parseHeaders(prompt)
+  assert.equal(headers.TASK, 'csv')
+  assert.equal(headers.STATUS, undefined)
+  assert.equal(tiers.stripHeaders(prompt).includes('other'), false)
+})
+
+test('the gate refuses an implementer without research', () => {
+  const routing = riskyRouting()
+  assert.equal(routing.research, true)
+  const state = tiers.emptyState('s')
+  const call = (research, type = 'cc-tiers:implementer', which = routing) =>
+    tiers.checkDelegation(
+      state,
+      { subagent_type: type, prompt: `${HEADER('csv', 'sonnet', 'implementer')}${research ? `CC_TIERS_RESEARCH: ${research}\n` : ''}Export users as CSV.` },
+      which,
+    )
+  assert.ok(call('').deny.includes('run cc-tiers:researcher for csv'))
+  assert.ok(call('done').deny.includes('has no finished research'))
+  assert.ok(call('none -').deny.includes('run cc-tiers:researcher for csv'))
+  assert.ok(call('', 'cc-tiers:architect').deny.includes('run cc-tiers:researcher for csv'))
+  assert.deepEqual(state.tasks, {})
+  assert.deepEqual(state.log, {})
+
+  state.tasks.csv = { tier: 'haiku', failures: ['haiku/worker: x'], carried: [] }
+  const before = structuredClone(state.tasks)
+  assert.ok(call('').deny)
+  assert.deepEqual(state.tasks, before)
+  assert.deepEqual(state.log, {})
+
+  assert.equal(call('none - pure refactor, no external API').deny, '')
+  assert.equal(call('', 'cc-tiers:implementer', defaultRouting({ research: 'off' })).deny, '')
+  const worker = tiers.checkDelegation(
+    tiers.emptyState('s'),
+    { subagent_type: 'cc-tiers:worker', prompt: `${HEADER('typo', 'haiku', 'worker')}Fix a typo in README.` },
+    routing,
+  )
+  assert.equal(worker.deny, '')
+  const researcher = tiers.checkDelegation(tiers.emptyState('s'), { subagent_type: 'cc-tiers:researcher', prompt: 'look around' }, routing)
+  assert.ok(researcher.deny.includes('CC_TIERS_TASK'))
+  assert.equal(tiers.checkDelegation(tiers.emptyState('s'), { subagent_type: 'cc-tiers:researcher', prompt: 'CC_TIERS_TASK: csv\nlook' }, routing).deny, '')
+})
+
+test('a researcher pass marks the task and its covers', () => {
+  const routing = riskyRouting()
+  const prompt = 'CC_TIERS_TASK: csv\nCC_TIERS_COVERS: date-filter, cancel\nResearch the export.'
+  const passed = apply(tiers.emptyState('s'), routing, 'r1', 'researcher', 'brief\nCC_TIERS_STATUS: pass', prompt)
+  assert.deepEqual(passed.state.researched, { csv: true, 'date-filter': true, cancel: true })
+  assert.equal(passed.meta.outcome, 'research')
+  assert.equal(passed.state.tasks.csv, undefined)
+  assert.ok(passed.message.includes('cc-tiers marked csv, date-filter, cancel as researched.'))
+  const allowed = tiers.checkDelegation(
+    passed.state,
+    { subagent_type: 'cc-tiers:implementer', prompt: `${HEADER('cancel', 'sonnet', 'implementer')}CC_TIERS_RESEARCH: done\nAdd cancel.` },
+    routing,
+  )
+  assert.equal(allowed.deny, '')
+
+  const failed = apply(tiers.emptyState('s'), routing, 'r2', 'researcher', 'CC_TIERS_STATUS: fail', prompt)
+  assert.deepEqual(failed.state.researched, {})
+  assert.ok(failed.message.includes('research for csv did not pass'))
+  const missing = apply(tiers.emptyState('s'), routing, 'r3', 'researcher', 'no trailer', prompt)
+  assert.deepEqual(missing.state.researched, {})
+  assert.equal(missing.state.log.csv, undefined)
+
+  const ctx = { routing, ccCost: false, projectDir: '' }
+  const state = tiers.emptyState('s')
+  const normalized = tiers.normalizeEvent(event('r4', 'researcher', 'CC_TIERS_STATUS: pass', prompt))
+  const usage = { key: 'r4', cost: { sonnet: 0.5, opusRate: 1 } }
+  tiers.processReport(ctx, state, normalized, usage)
+  assert.equal(state.log.csv, undefined)
+  assert.ok(state.cost.csv)
+  assert.equal(state.cost[tiers.OVERHEAD], undefined)
+})
+
+test('a background researcher marks the slug only when it reports pass', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const env = hookEnv(dir)
+    const prompt = 'CC_TIERS_TASK: csv\nCC_TIERS_ROLE: researcher\nResearch the export.'
+    runHook(
+      'after_agent.mjs',
+      {
+        session_id: 'sess-1',
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Agent',
+        tool_use_id: 'bg-r',
+        tool_input: { subagent_type: 'cc-tiers:researcher', prompt },
+        tool_response: { status: 'async_launched', agentId: 'agent-r', prompt },
+      },
+      env,
+    )
+    const file = tiers.sessionPath(path.join(dir, 'data'), 'sess-1')
+    assert.deepEqual(tiers.loadState(file, 'sess-1').researched, {})
+    const stop = runHook(
+      'subagent_stop.mjs',
+      {
+        session_id: 'sess-1',
+        hook_event_name: 'SubagentStop',
+        agent_id: 'agent-r',
+        agent_type: 'cc-tiers:researcher',
+        last_assistant_message: 'brief\nCC_TIERS_STATUS: pass',
+      },
+      env,
+    )
+    assert.equal(stop.status, 0, stop.stderr)
+    assert.deepEqual(tiers.loadState(file, 'sess-1').researched, { csv: true })
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the research mark survives a passed task', () => {
+  const routing = riskyRouting()
+  let state = apply(tiers.emptyState('s'), routing, 'r1', 'researcher', 'CC_TIERS_STATUS: pass', 'CC_TIERS_TASK: csv').state
+  state.tasks.csv = { tier: 'sonnet', failures: ['sonnet/implementer: x'], carried: [] }
+  const text = 'CC_TIERS_TASK: csv\nCC_TIERS_TIER: sonnet\nCC_TIERS_ROLE: implementer\nCC_TIERS_STATUS: pass\nCC_TIERS_REVIEW: skip'
+  state = apply(state, routing, 'i1', 'implementer', text).state
+  assert.equal(state.tasks.csv, undefined)
+  assert.equal(state.researched.csv, true)
+})
+
+test('the brief does not raise effort or complexity', () => {
+  const routing = riskyRouting()
+  const base = `${HEADER('csv', 'sonnet', 'implementer')}CC_TIERS_RESEARCH: done\nExport users as CSV.`
+  const brief = [
+    BRIEF_BEGIN,
+    '- the schema has a users table',
+    '- permission checks run in the login middleware',
+    '- see src/a.js, src/b.js, src/c.js, src/d.js',
+    '- then update the password reset flow',
+    BRIEF_END,
+  ].join('\n')
+  const run = (prompt) => {
+    const state = tiers.emptyState('s')
+    state.researched = { csv: true }
+    return tiers.checkDelegation(state, { subagent_type: 'cc-tiers:implementer', prompt }, routing)
+  }
+  const plain = run(base)
+  const withBrief = run(`${base}\n${brief}`)
+  assert.equal(plain.deny, '')
+  assert.equal(withBrief.deny, '')
+  assert.deepEqual(withBrief.input?.effort, plain.input?.effort)
+  assert.equal(withBrief.context, plain.context)
+})
+
+test('research is a /config and project option', () => {
+  const defaults = tiers.loadJson(path.join(ROOT, 'config/routing.default.json'))
+  assert.equal(defaults.research, true)
+  assert.equal(tiers.mergeRouting(defaults).research, true)
+  assert.equal(tiers.mergeRouting(defaults, { research: false }).research, false)
+  assert.equal(tiers.mergeRouting(defaults, { research: false }, { research: 'on' }).research, true)
+  assert.equal(tiers.mergeRouting(defaults, null, { research: 'off' }).research, false)
+  assert.equal(tiers.userFromEnv({ CLAUDE_PLUGIN_OPTION_RESEARCH: 'off' }).research, 'off')
+  assert.equal(tiers.userFromEnv({}).research, null)
+  const manifest = JSON.parse(readFileSync(path.join(ROOT, '.claude-plugin/plugin.json'), 'utf8'))
+  const option = manifest.userConfig.research
+  assert.equal(option.type, 'string')
+  assert.deepEqual(option.options, ['on', 'off'])
+  assert.equal(option.default, 'on')
+  assert.ok(option.description.includes('none - <reason>'))
+  const text = tiers.formatSessionContext(tiers.mergeRouting(defaults), 'not present', { ccCost: { installed: false } })
+  assert.ok(text.includes('Research: on'))
+  assert.ok(text.indexOf('Research: on') > text.indexOf('Classifier:'))
+  assert.equal(tiers.ROLES.researcher, 'sonnet')
+  assert.equal(tiers.SCOPED.researcher, 'cc-tiers:researcher')
+  for (const roles of [tiers.WRITER_ROLES, tiers.REVIEW_ROLES, tiers.SESSION_ROLES]) assert.equal(roles.has('researcher'), false)
+})
+
+test('the research list is capped and drops the oldest slug', () => {
+  const routing = riskyRouting()
+  let state = tiers.emptyState('s')
+  for (let index = 0; index < 205; index += 1) {
+    state = apply(state, routing, `r${index}`, 'researcher', 'CC_TIERS_STATUS: pass', `CC_TIERS_TASK: t${index}`).state
+  }
+  const slugs = Object.keys(state.researched)
+  assert.equal(slugs.length, 200)
+  assert.equal(slugs[0], 't5')
+  assert.equal(state.researched.t204, true)
 })

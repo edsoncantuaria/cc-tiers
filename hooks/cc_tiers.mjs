@@ -31,6 +31,7 @@ export const SCOPED = {
   checker: 'cc-tiers:checker',
   orchestrator: 'cc-tiers:orchestrator',
   dispatcher: 'cc-tiers:dispatcher',
+  researcher: 'cc-tiers:researcher',
 }
 export const ROLES = {
   worker: 'haiku',
@@ -41,6 +42,7 @@ export const ROLES = {
   checker: 'sonnet',
   orchestrator: 'opus',
   dispatcher: 'sonnet',
+  researcher: 'sonnet',
 }
 /** Session agents count their own attempts from a trailer in their text, since there is no Agent call. */
 export const SESSION_ROLES = new Set(['orchestrator', 'dispatcher'])
@@ -53,7 +55,7 @@ export const LIGHT_MODES = new Set(['inline', 'delegate', 'off'])
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 export const DEFAULT_LADDERS = { haiku: ['low', 'medium'], sonnet: ['high', 'xhigh'], opus: ['high', 'xhigh'] }
 /** The effort each agent file pins, so the hook only rewrites a call that needs a different level. */
-export const AGENT_EFFORT = { worker: 'low', implementer: 'high', architect: 'high', planner: 'high', checker: 'medium', reviewer: 'high' }
+export const AGENT_EFFORT = { worker: 'low', implementer: 'high', architect: 'high', planner: 'high', checker: 'medium', reviewer: 'high', researcher: 'medium' }
 export const COMPLEX_THRESHOLD = 2
 export const OPUS_CEILING = 'the Opus ceiling (the orchestrator implements it; from cc-tiers:dispatcher, delegate to cc-tiers:architect)'
 export const DEFAULT_MAX_ATTEMPTS = 2
@@ -73,6 +75,9 @@ const SCAN_FIRST_CAP = 32 * 1024 * 1024
 const LOCK_WAIT_MS = 3000
 const LOCK_STALE_MS = 10000
 const HEADER_RE = /^CC_TIERS_([A-Z]+):\s*(.*?)\s*$/
+const RESEARCH_BEGIN = 'CC_TIERS_RESEARCH_BEGIN'
+const RESEARCH_END = 'CC_TIERS_RESEARCH_END'
+const RESEARCH_NONE_RE = /^none\s*-\s*\S/
 const ORCHESTRATION_PHRASE = 'planning and splitting work into tasks'
 const STOP = new Set(
   `a an the to of and or for in on with from by at as is are was were be this that it its into over under out up down do does
@@ -272,6 +277,7 @@ export function mergeRouting(defaults, project = null, user = null) {
   }
   const light = parseLightPath(config.light_path, parseLightPath(defaults.lightPath, 'inline'))
   const showCost = parseLearn(config.show_cost, parseLearn(defaults.showCost, true))
+  const research = parseLearn(config.research, parseLearn(source.research, parseLearn(defaults.research, true)))
   const prices = defaults.prices && typeof defaults.prices === 'object' ? defaults.prices : { families: {}, models: {} }
   const largeFileBytes = Number(source.largeFileBytes) > 0 ? Number(source.largeFileBytes) : Number(defaults.largeFileBytes) || 400000
 
@@ -298,6 +304,7 @@ export function mergeRouting(defaults, project = null, user = null) {
     classifier,
     light,
     showCost,
+    research,
     prices,
     largeFileBytes,
     notes,
@@ -475,8 +482,21 @@ export function tokenize(text) {
   return tokens
 }
 
+/** The research brief rides in the prompt for the implementer; routing and headers ignore it. */
+export function stripResearch(text) {
+  const kept = []
+  let inside = false
+  for (const line of String(text || '').split(/\n/)) {
+    const marker = line.trim()
+    if (!inside && marker === RESEARCH_BEGIN) inside = true
+    else if (inside && marker === RESEARCH_END) inside = false
+    else if (!inside) kept.push(line)
+  }
+  return kept.join('\n')
+}
+
 export function stripHeaders(text) {
-  return String(text || '')
+  return stripResearch(text)
     .split(/\n/)
     .filter((line) => !/^CC_TIERS_[A-Z]+:/.test(line.trim()))
     .join('\n')
@@ -668,6 +688,16 @@ export function classifierLine(routing) {
   )
 }
 
+export function researchLine(routing) {
+  if (!routing.research) return 'Research: off. Code goes to cc-tiers:implementer or cc-tiers:architect without a research step.'
+  return (
+    'Research: on. Before code goes to cc-tiers:implementer or cc-tiers:architect, run cc-tiers:researcher with the same CC_TIERS_TASK ' +
+    '(CC_TIERS_COVERS lists other slugs the same research covers) and wait for its pass. Then add CC_TIERS_RESEARCH: done to the prompt, ' +
+    'with the brief between CC_TIERS_RESEARCH_BEGIN and CC_TIERS_RESEARCH_END lines; cc-tiers ignores the brief for routing. ' +
+    'When a task needs no research, add CC_TIERS_RESEARCH: none - <reason> instead.'
+  )
+}
+
 export function formatSessionContext(routing, projectNote, snapshot = {}) {
   const tiers = routing.tiers
   const lines = [
@@ -680,6 +710,7 @@ export function formatSessionContext(routing, projectNote, snapshot = {}) {
     'Delegated agents select haiku, sonnet, or opus from their own definitions. cc-tiers blocks a per-invocation model override, because it would replace that choice.',
     effortLine(routing, snapshot.budget?.conserve === true),
     classifierLine(routing),
+    researchLine(routing),
     `A Haiku-looking task with a complexity score of ${COMPLEX_THRESHOLD} or more (several steps, many files, design or investigation wording, a long brief) starts on Sonnet.`,
     routing.light === 'inline'
       ? 'Light path: inline. When a request is one trivial task, cc-tiers says so as it arrives: do it yourself in this session, with no delegation and no checker.'
@@ -771,6 +802,7 @@ export function emptyState(sessionId) {
     log: {},
     spent: [],
     background: {},
+    researched: {},
     pending: [],
     cursor: freshCursor(),
   }
@@ -788,7 +820,7 @@ export function loadState(file, sessionId) {
     if (!data || typeof data !== 'object' || !data.tasks || typeof data.tasks !== 'object') return emptyState(sessionId)
     const base = emptyState(sessionId)
     for (const key of ['seen', 'spent', 'pending']) if (!Array.isArray(data[key])) data[key] = base[key]
-    for (const key of ['spend', 'cost', 'log', 'background']) {
+    for (const key of ['spend', 'cost', 'log', 'background', 'researched']) {
       if (!data[key] || typeof data[key] !== 'object' || Array.isArray(data[key])) data[key] = base[key]
     }
     if (!data.cursor || typeof data.cursor !== 'object') data.cursor = base.cursor
@@ -889,7 +921,7 @@ export function withLock(file, fn) {
 
 export function parseHeaders(text) {
   const found = {}
-  for (const line of String(text || '').split(/\n/)) {
+  for (const line of stripResearch(text).split(/\n/)) {
     const match = HEADER_RE.exec(line.trim())
     if (match) found[match[1]] = match[2].trim()
   }
@@ -1032,6 +1064,7 @@ export function applyEvent(state, event, routing) {
   }
 
   const role = event.role
+  if (role === 'researcher') return applyResearch(state, meta, task, headers, event)
   let tier = (headers.TIER || '').toLowerCase()
   const defaultTier = role === 'checker' ? 'haiku' : role === 'reviewer' ? 'sonnet' : ROLES[role]
   if (!TIERS.includes(tier)) tier = defaultTier
@@ -1129,6 +1162,29 @@ export function applyEvent(state, event, routing) {
     meta.sonnetEscalated = applied.sonnetEscalated
   }
   return { state, message: `${note}${message}`, meta }
+}
+
+/** A research run counts no attempt. A pass marks the task and the slugs it covers. */
+function applyResearch(state, meta, task, headers, event) {
+  meta.outcome = 'research'
+  const status = event.kind === 'error' ? 'fail' : (headers.STATUS || '').toLowerCase()
+  if (status !== 'pass') {
+    return {
+      state,
+      meta,
+      message: `cc-tiers: research for ${task} did not pass; research again or use CC_TIERS_RESEARCH: none - <reason>.`,
+    }
+  }
+  const covers = String(headers.COVERS || '').split(',').map(slug).filter(Boolean)
+  const slugs = [...new Set([task, ...covers])]
+  const researched = state.researched || (state.researched = {})
+  for (const name of slugs) {
+    delete researched[name]
+    researched[name] = true
+  }
+  const names = Object.keys(researched)
+  names.slice(0, Math.max(0, names.length - MAX_SEEN)).forEach((name) => delete researched[name])
+  return { state, meta, message: `cc-tiers marked ${slugs.join(', ')} as researched.` }
 }
 
 function applyReview(tasks, task, current, tier, status, reason, routing, role) {
@@ -1250,7 +1306,19 @@ export function checkDelegation(state, toolInput, routing, { history = null, pro
         'so the attempt counter can follow the task. Call it again with that header.',
     )
   }
-  if (REVIEW_ROLES.has(role)) return pass
+  if (REVIEW_ROLES.has(role) || role === 'researcher') return pass
+  if (routing.research && (role === 'implementer' || role === 'architect')) {
+    const research = (headers.RESEARCH || '').toLowerCase()
+    if (research === 'done') {
+      if (!state.researched?.[task]) {
+        return refuse(
+          `cc-tiers: ${task} has no finished research. Wait for cc-tiers:researcher to report pass, or use CC_TIERS_RESEARCH: none - <reason>.`,
+        )
+      }
+    } else if (!RESEARCH_NONE_RE.test(research)) {
+      return refuse(`cc-tiers: run cc-tiers:researcher for ${task} before delegating it, or add CC_TIERS_RESEARCH: none - <reason>.`)
+    }
+  }
   if (role === 'worker' && routing.classifier === 'haiku' && (headers.CLASSIFY || '').toLowerCase() === 'skip') {
     return refuse(
       'cc-tiers: the classifier is haiku, so a cc-tiers:worker prompt may not carry CC_TIERS_CLASSIFY: skip. Remove that line and call it again.',
@@ -1261,6 +1329,7 @@ export function checkDelegation(state, toolInput, routing, { history = null, pro
   const tasks = state.tasks || (state.tasks = {})
   let current = tasks[task]
   const notes = []
+  const routed = stripResearch(prompt)
   if (current && typeof current === 'object' && TIERS.includes(current.tier)) {
     if (TIER_RANK[tier] < TIER_RANK[current.tier]) {
       return refuse(
@@ -1279,18 +1348,18 @@ export function checkDelegation(state, toolInput, routing, { history = null, pro
     }
   } else {
     current = null
-    const decision = decideTier(prompt, routing, { history, conserve: routing.conserve === true, projectDir })
+    const decision = decideTier(routed, routing, { history, conserve: routing.conserve === true, projectDir })
     if (role === 'worker' && ['history', 'risky', 'complex'].includes(decision.because)) {
       const why = {
         history: 'a similar task already failed on Haiku in this project',
         risky: 'it matches an Opus review keyword',
-        complex: `its complexity score is ${assessComplexity(prompt, routing, { projectDir }).signals.join(', ')}`,
+        complex: `its complexity score is ${assessComplexity(routed, routing, { projectDir }).signals.join(', ')}`,
       }[decision.because]
       notes.push(`cc-tiers routing hint: ${task} looks like Sonnet work because ${why}. Prefer cc-tiers:implementer next time.`)
     }
   }
 
-  const effort = attemptEffort(routing, role, tier, current, prompt, history, input.effort)
+  const effort = attemptEffort(routing, role, tier, current, routed, history, input.effort)
   if (effort.note) notes.push(effort.note)
   logEffort(state, task, tier, effort.level || parseEffort(input.effort) || AGENT_EFFORT[role])
   return { deny: '', context: notes.join('\n'), input: effort.level ? { ...input, effort: effort.level } : null }
@@ -1936,6 +2005,7 @@ export function userFromEnv(env = process.env) {
     classifier: env.CLAUDE_PLUGIN_OPTION_CLASSIFIER || null,
     light_path: env.CLAUDE_PLUGIN_OPTION_LIGHT_PATH || null,
     show_cost: env.CLAUDE_PLUGIN_OPTION_SHOW_COST || null,
+    research: env.CLAUDE_PLUGIN_OPTION_RESEARCH || null,
   }
 }
 
@@ -2056,7 +2126,7 @@ export function processReport(ctx, state, event, usage = null) {
       if (usage.cost) mergeCost(state.cost || (state.cost = {}), { [task]: usage.cost })
     }
   }
-  if (!applied.meta.planner) logReport(state, applied.meta)
+  if (!applied.meta.planner && applied.meta.outcome !== 'research') logReport(state, applied.meta)
   if (applied.meta.haikuFailure && ctx.routing.learn && ctx.projectDir) {
     const file = historyPath(ctx.projectDir)
     withLock(file, () => {
