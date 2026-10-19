@@ -236,6 +236,9 @@ A ordem de escalonamento é fixa. As frases e palavras-chave de roteamento, o li
 
 ## 📊 Benchmark
 
+> [!IMPORTANT]
+> **O que o cc-tiers entrega é roteamento, não uma conta menor em toda tarefa.** A sessão decide para onde vai cada parte do trabalho: Haiku para o trivial, Sonnet para o comum, Opus para o plano, o teto e a revisão arriscada. Uma falha sobe a tarefa um tier, com as notas junto. Essa decisão tem custo próprio (a thread que roteia e um contexto novo por subagente). Em tarefas pequenas esse custo é maior que o que os tiers mais baratos economizam, como mostram os números abaixo. Compensa quando o trabalho é grande, variado ou com chance de falhar num modelo barato. O benchmark mede esse custo; não mede o valor do roteamento.
+
 `bench/` roda sete tarefas (3 triviais, 2 normais, 1 mista, 1 difícil) num pequeno projeto Node, cada uma corrigida por um teste oculto. Medido em 19/10/2026 com Claude Code 2.1.303 e cc-tiers 0.5.0, duas rodadas por tarefa, a preços de tabela da API. Todas as configurações passaram em todas as tarefas (112/112).
 
 | Configuração | Uma tarefa por sessão | As sete numa sessão | vs só Opus (sessão) |

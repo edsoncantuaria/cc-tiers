@@ -236,6 +236,9 @@ The escalation order is fixed. Routing phrases and keywords, the retry limit, th
 
 ## 📊 Benchmark
 
+> [!IMPORTANT]
+> **What cc-tiers gives you is routing, not a lower bill on every task.** The session decides where each piece of work goes: Haiku for the trivial, Sonnet for the ordinary, Opus for the plan, the ceiling, and risky review. A failure moves the task up one tier with its notes attached. That decision has a cost of its own (the routing thread and a fresh context per subagent). On small tasks that cost is larger than what cheaper tiers save, as the numbers below show. It pays back when the work is large, varied, or likely to fail on a cheap model. The benchmark measures that cost; it does not measure the value of routing.
+
 `bench/` runs seven tasks (3 trivial, 2 normal, 1 mixed, 1 hard) on a small Node project, each graded by a hidden test. Measured on 2026-10-19 with Claude Code 2.1.303 and cc-tiers 0.5.0, two runs per task, at API list prices. Every configuration passed every task (112/112).
 
 | Configuration | One task per session | All seven in one session | vs Opus only (session) |
