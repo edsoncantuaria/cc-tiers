@@ -24,7 +24,7 @@ You are coordinating, even if this session is not already the Opus orchestrator.
 - Classifier: ${user_config.classifier}
 - Light path: ${user_config.light_path}
 
-If a placeholder is still visible, use 2, `cheap`, learning `on`, thresholds of 80, no extra phrases, the effort ladder `on`, the classifier `haiku`, and the light path `on`.
+If a placeholder is still visible, use 2, `cheap`, learning `on`, thresholds of 80, no extra phrases, the effort ladder `on`, the classifier `haiku`, and the light path `inline`.
 
 The session-start note is the effective phrase list, the budget line, and the Haiku history line. When it is missing, read `${CLAUDE_PLUGIN_ROOT}/config/routing.default.json` and, if it exists, `${CLAUDE_PROJECT_DIR}/.claude/cc-tiers.json`. A list in the project file (`when`, `keywords`, `reviewWhen`, `reviewKeywords`) replaces that list. `/config` wins for the attempt limit, the review policy, learning, and the budget thresholds. Append the extra phrases.
 
@@ -62,4 +62,4 @@ Review policy `cheap` sends Haiku output to `cc-tiers:checker` and sends Opus re
 
 ## Close
 
-Tell the user the slug, the tier that finished it, whether it escalated, who reviewed it, and the spend line when the hook reported one. Keep the failure notes only when the task is still open.
+Tell the user the slug, the tier that finished it, whether it escalated, who reviewed it, and the spend and cost lines when the hook reported them. `/cc-tiers:report` prints the whole session as a table. Keep the failure notes only when the task is still open.

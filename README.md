@@ -109,6 +109,7 @@ The PreToolUse hook sets `effort` on the Agent call (Claude Code's per-call `eff
 The keyword lists are a first guess. Two checks stand behind them before a task reaches Haiku:
 
 - **Complexity score**, local and free. Several steps (bullets, "and then", "e depois"), three or more files, design or investigation wording (refactor, architecture, debug, flaky, memory leak), or a long brief add points. At 2 points a trivial-looking task starts on Sonnet. `/cc-tiers:route` prints the score and its signals.
+- **Large files.** When the task names files in the project that add up to 400 KB or more (`largeFileBytes`), it starts on Sonnet. This is cc-tiers' take on long-context routing: every current model has a 1M window, but a huge file is still a lot for one cheap pass, and Haiku 4.5, if your `haiku` alias still points there, has only 200K.
 - **Haiku classifier**, a `prompt` hook that runs only on `cc-tiers:worker` calls. A quick Haiku pass reads the task, and when it is not really trivial the call is refused with the reason, and the orchestrator sends the same slug to Sonnet. That is a routing correction, not a failure. `classifier: local` turns it off: the orchestrator then marks worker prompts `CC_TIERS_CLASSIFY: skip`, which the command hook only accepts in that mode.
 
 ---
@@ -124,13 +125,15 @@ Turn on light mode for one session with `claude --agent cc-tiers:dispatcher`, or
 
 ---
 
-## 💸 Spend, with cc-cost
+## 💸 Spend and cost
 
 When [cc-cost](https://github.com/edsoncantuaria/cc-cost) is installed, the session summary and each finished task report **fresh tokens per model tier**. Fresh tokens are input + cache write + output. Cache reads stay out, the same rule cc-cost uses. A subagent's tokens come from the Agent result, or from its own transcript when it ran in the background, and go to its `CC_TIERS_TASK` slug. The orchestrator's message that delegates a task counts toward that task, and so do its turns inside a ceiling attempt. Its other turns are listed as `(orchestration)`. The hook reads the session transcript incrementally, from where the last hook stopped, so totals only grow and long sessions stay cheap.
 
 The 5h and 7d windows use cc-cost's kinds, `five_hour` and `seven_day`. The hook reads them from the hook payload when Claude Code includes them, from the transcript as it is scanned, and from `limits.json` or `store.json` in cc-cost's plugin data directory (`~/.claude/plugins/data/cc-cost/`). A daily total is reported when that directory holds cc-cost's `novos:<day>:<sessionId>` keys.
 
 If cc-cost is not installed, those lines are omitted. Routing, retries, and review keep working. A missing window reading does not invent a percent.
+
+Cost needs no other plugin. Each finished task gets a `cc-tiers cost` line, an estimate at Anthropic API list prices from the price table in `config/routing.default.json`. It prices each model by its own id (Opus 5.5 at $4/$20 per million, Sonnet 5.5 at $2/$10, Haiku 5.5 at $0.10/$0.50, older models at theirs), with cache reads at the model's rate and cache writes at 1.25x input, or 2x for the 1-hour cache. Next to it is the same tokens at Opus rates, so you see what tiering saved. A subscription is not billed this way; read it as a comparison. `/cc-tiers:report` shows the whole session as a table: tiers, attempts, escalations, effort, review, status, and cost per task. `show_cost: off` hides the lines.
 
 ---
 
@@ -139,6 +142,17 @@ If cc-cost is not installed, those lines are omitted. Routing, retries, and revi
 `budget_5h` and `budget_7d` default to 80. When either window is at or above its threshold, the session says `Budget routing: conserve`. New work stays on Haiku or Sonnet. Opus still plans, still takes a task that already used its attempts on Sonnet, and still reviews critical work.
 
 A window whose reset time is already past counts as 0, the same way cc-cost draws it. No reading yet means the hook says routing does not conserve.
+
+---
+
+## 🧑‍🏫 With the advisor
+
+Claude Code's [advisor tool](https://code.claude.com/docs/en/advisor) lets a model consult a stronger one at decision points, with the whole conversation in view. It is a session setting (`/advisor opus`), not something a plugin can switch on per agent, and subagents inherit it. That decides where it pays:
+
+- **Light mode + Opus advisor** is the good pairing. The Sonnet dispatcher asks Opus at the hard moments without a fresh `cc-tiers:planner` context, and Sonnet and Haiku subagents can ask too. Expect fewer planner calls and escalations; each consultation reads the full transcript at Opus rates.
+- **Orchestrator + Opus advisor** doubles Opus: an Opus main thread consulting another Opus. Leave the advisor off there unless the work is high-stakes.
+
+The advisor's tokens count toward `/usage`. cc-tiers does not see them per task, so `/cc-tiers:report` leaves them out.
 
 ---
 
@@ -157,6 +171,7 @@ The first write adds the file to `.git/info/exclude` when the project is a git c
 | `/cc-tiers:tiers [task]` | Plan, route, and run the work |
 | `/cc-tiers:route [task]` | Name the tier and stop. Runs the same heuristic as the hooks. No edits |
 | `/cc-tiers:escalate [slug]` | Move that task up one tier now, notes included |
+| `/cc-tiers:report [--all]` | Per-task table for this session: tiers, attempts, effort, review, status, and cost next to Opus rates |
 
 You can also ask in plain language. The `tiers` skill loads for an implement, fix, rename, or review request. Mention an agent directly with `@agent-cc-tiers:worker`, `@agent-cc-tiers:implementer`, `@agent-cc-tiers:checker`, or `@agent-cc-tiers:reviewer`.
 
@@ -193,6 +208,7 @@ Open `/config` and set the cc-tiers rows. They apply on the next session (the Se
 | `effort_ladder` | `on` | Raise effort on a retry before changing model. `off` keeps each agent's own effort |
 | `classifier` | `haiku` | `haiku` adds the Haiku check on worker calls. `local` uses only keywords and the complexity score |
 | `light_path` | `on` | Tell the orchestrator when a request is one trivial task. `off` plans every request |
+| `show_cost` | `on` | Show the estimated cost of each task and the session next to Opus rates. `off` hides it |
 
 `cheap` sends Haiku output to the Sonnet checker and sends Opus review only for a review phrase or the ceiling. `risky` is the 0.1.0 behavior: Opus reviews non-trivial work and skips a trivial Haiku pass. `always` reviews every pass (Haiku on Sonnet, the rest on Opus). `never` skips review. While a budget window is conserving, Opus review is reserved for critical work even under `risky` or `always`.
 
@@ -251,6 +267,9 @@ claude --plugin-dir .
 | `hooks/hooks.json` | SessionStart summary, the Agent checks, effort, Haiku classifier, and counter, SubagentStop, Stop, and UserPromptSubmit |
 | `hooks/cc_tiers.mjs` | Merge rules, the counter, spend, budget, and history |
 | `hooks/route.mjs` | The heuristic behind `/cc-tiers:route` |
+| `hooks/report.mjs` | The table behind `/cc-tiers:report` |
+| `commands/report.md` | `/cc-tiers:report` |
+| `bench/` | The benchmark: fixture project, tasks, hidden checks, runner, and results |
 | `.github/workflows/ci.yml` | Tests on Linux, macOS, and Windows, and `claude plugin validate` |
 | `CHANGELOG.md` | Release notes |
 

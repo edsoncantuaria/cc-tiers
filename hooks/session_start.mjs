@@ -36,6 +36,7 @@ function main() {
       ccCost: { installed },
       spend: installed ? state.spend || {} : null,
       today: installed ? readTodayTotal(ctx.env) : null,
+      cost: state.cost || {},
     }),
   }))
   const body = pending ? `${text}\n\n${pending}` : text

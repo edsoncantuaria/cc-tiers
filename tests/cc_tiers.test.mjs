@@ -79,6 +79,8 @@ test('required files are present and Python hooks are gone', () => {
     'hooks/subagent_stop.mjs',
     'hooks/stop.mjs',
     'hooks/route.mjs',
+    'hooks/report.mjs',
+    'commands/report.md',
     '.gitattributes',
     '.github/workflows/ci.yml',
     'skills/tiers/SKILL.md',
@@ -101,10 +103,10 @@ test('required files are present and Python hooks are gone', () => {
   }
 })
 
-test('manifest declares the 0.4.0 knobs', () => {
+test('manifest declares the 0.5.0 knobs', () => {
   const manifest = JSON.parse(readFileSync(path.join(ROOT, '.claude-plugin/plugin.json'), 'utf8'))
   assert.equal(manifest.name, 'cc-tiers')
-  assert.equal(manifest.version, '0.4.0')
+  assert.equal(manifest.version, '0.5.0')
   assert.equal(/\s|@|:|\/|\\/.test(manifest.name), false)
   assert.equal(RESERVED_PREFIXES.some((prefix) => manifest.name.startsWith(prefix)), false)
   assert.equal(manifest.license, 'MIT')
@@ -120,6 +122,7 @@ test('manifest declares the 0.4.0 knobs', () => {
     ['effort_ladder', 'string'],
     ['classifier', 'string'],
     ['light_path', 'string'],
+    ['show_cost', 'string'],
   ]) {
     const option = manifest.userConfig[key]
     assert.equal(option.type, expected)
@@ -142,7 +145,8 @@ test('manifest declares the 0.4.0 knobs', () => {
   assert.equal(manifest.userConfig.effort_ladder.default, 'on')
   assert.deepEqual(manifest.userConfig.classifier.options, ['haiku', 'local'])
   assert.equal(manifest.userConfig.classifier.default, 'haiku')
-  assert.deepEqual(manifest.userConfig.light_path.options, ['on', 'off'])
+  assert.deepEqual(manifest.userConfig.light_path.options, ['inline', 'delegate', 'off'])
+  assert.equal(manifest.userConfig.light_path.default, 'inline')
   assert.equal(readdirSync(ROOT).includes('CLAUDE.md'), false)
 })
 
@@ -159,6 +163,7 @@ test('marketplace and settings stay pointed at this plugin', () => {
   assert.ok(changelog.includes('0.2.0'))
   assert.ok(changelog.includes('0.3.0'))
   assert.ok(changelog.includes('0.4.0'))
+  assert.ok(changelog.includes('0.5.0'))
   assert.ok(changelog.includes('cc-cost'))
 })
 
@@ -185,7 +190,6 @@ test('agents pin family aliases, including the Sonnet checker', () => {
     if (name in efforts) assert.equal(fields.effort, efforts[name], `${name} effort matches AGENT_EFFORT`)
   }
   assert.deepEqual(tiers.AGENT_EFFORT, efforts)
-  assert.match(frontmatter(path.join(ROOT, 'agents', 'dispatcher.md')).disallowedTools, /Edit/)
   assert.match(frontmatter(path.join(ROOT, 'agents', 'planner.md')).tools, /^Read, Grep, Glob, Bash$/)
   const defaults = tiers.loadJson(path.join(ROOT, 'config/routing.default.json'))
   for (const tier of tiers.TIERS) assert.equal(defaults.effort[tier][0], efforts[tiers.IMPLEMENTERS[tier]] || 'high')
@@ -200,7 +204,7 @@ test('skill and commands keep their frontmatter', () => {
   assert.ok(body.includes('${user_config.review_policy}'))
   assert.ok(body.includes('${user_config.learn}'))
   assert.ok(body.includes('cc-tiers:checker'))
-  for (const command of ['route.md', 'escalate.md']) {
+  for (const command of ['route.md', 'escalate.md', 'report.md']) {
     const fields = frontmatter(path.join(ROOT, 'commands', command))
     assert.equal('name' in fields, false)
     assert.ok(fields.description)
@@ -1236,8 +1240,11 @@ test('a task that escalated past Sonnet starts similar work at the top of the So
 
 test('the light path flags a one-task trivial request only', () => {
   const routing = defaultRouting()
-  assert.ok(tiers.lightHint('fix a typo in README', routing).includes('cc-tiers light path'))
-  assert.ok(tiers.lightHint('where is fetchUser defined?', routing).includes('no checker pass'))
+  assert.ok(tiers.lightHint('fix a typo in README', routing).includes('Do it yourself in this session'))
+  const delegate = defaultRouting({ light_path: 'delegate' })
+  assert.ok(tiers.lightHint('where is fetchUser defined?', delegate).includes('no checker pass'))
+  assert.equal(defaultRouting({ light_path: 'on' }).light, 'inline')
+  assert.equal(defaultRouting({ light_path: 'weird' }).light, 'inline')
   assert.equal(tiers.lightHint('Add pagination to GET /users', routing), '')
   assert.equal(tiers.lightHint('Rename fetchUser and then update the docs', routing), '')
   assert.equal(tiers.lightHint('Rename the login handler', routing), '')
@@ -1265,6 +1272,115 @@ test('the hooks set effort on the call and add the light path on prompt submit',
     assert.ok(JSON.parse(submit.stdout).hookSpecificOutput.additionalContext.includes('cc-tiers light path'))
     const plain = runHook('stop.mjs', { session_id: 'sess-2', hook_event_name: 'UserPromptSubmit', prompt: 'Add pagination to GET /users' }, env)
     assert.equal(plain.stdout, '')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('cost follows the model price table, and the Opus comparison uses current Opus rates', () => {
+  const routing = defaultRouting()
+  assert.equal(tiers.normalizeModel('us.anthropic.claude-sonnet-5-5-20260301[1m]'), 'claude-sonnet-5-5')
+  assert.equal(tiers.priceFor('claude-opus-5-5', routing).input, 4)
+  assert.equal(tiers.priceFor('claude-opus-5', routing).input, 5)
+  assert.equal(tiers.priceFor('claude-haiku-4-5-20251001', routing).input, 1)
+  assert.equal(tiers.priceFor('claude-sonnet-4-5', routing).model, 'claude-sonnet-5-5')
+  assert.equal(tiers.priceFor('gpt-5', routing), null)
+  const usage = { input_tokens: 1e6, output_tokens: 1e6, cache_read_input_tokens: 1e6, cache_creation_input_tokens: 1e6 }
+  assert.equal(tiers.usageDollars(usage, tiers.priceFor('claude-sonnet-5-5', routing)).toFixed(2), '14.70')
+  const split = { input_tokens: 0, cache_creation: { ephemeral_5m_input_tokens: 1e6, ephemeral_1h_input_tokens: 1e6 } }
+  assert.equal(tiers.usageDollars(split, tiers.priceFor('claude-opus-5-5', routing)), 13)
+  const cost = tiers.usageCost(usage, 'claude-haiku-5-5', routing)
+  assert.equal(cost.tier, 'haiku')
+  assert.ok(cost.opus > cost.usd * 30)
+  const line = tiers.formatTaskCost('t', { haiku: 0.01, sonnet: 0.02, opus: 0, opusRate: 0.1 })
+  assert.ok(line.includes('about $0.030 at API list prices (haiku $0.010, sonnet $0.020)'))
+  assert.ok(line.includes('70% less'))
+})
+
+test('task cost is recorded without cc-cost, and the log feeds the report', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const env = hookEnv(dir, { CC_TIERS_CC_COST: '0' })
+    const prompt = `${HEADER('users-pagination', 'sonnet', 'implementer')}Add pagination.`
+    const failed = event('c1', 'implementer', report('implementer', 'sonnet', 'fail'), prompt)
+    failed.tool_response.usage = { input_tokens: 1000, output_tokens: 500, model: 'claude-sonnet-5-5' }
+    const first = runHook('after_agent.mjs', failed, env)
+    const text = JSON.parse(first.stdout).hookSpecificOutput.additionalContext
+    assert.ok(text.includes('cc-tiers cost for users-pagination: about $0.0070'))
+    assert.equal(text.includes('fresh tokens'), false)
+    runHook(
+      'before_agent.mjs',
+      { session_id: 'sess-1', hook_event_name: 'PreToolUse', tool_name: 'Agent', tool_input: { subagent_type: 'cc-tiers:implementer', prompt } },
+      env,
+    )
+    const passed = event('c2', 'implementer', report('implementer', 'sonnet', 'pass', 'skip', 'green'), prompt)
+    passed.tool_response.usage = { input_tokens: 1000, output_tokens: 500, model: 'claude-sonnet-5-5' }
+    runHook('after_agent.mjs', passed, env)
+
+    const state = JSON.parse(readFileSync(path.join(dir, 'data', 'latest.json'), 'utf8'))
+    assert.deepEqual(state.log['users-pagination'].tiers, ['sonnet'])
+    assert.equal(state.log['users-pagination'].attempts, 2)
+    assert.equal(state.log['users-pagination'].failures, 1)
+    assert.equal(state.log['users-pagination'].status, 'done')
+    assert.equal(state.log['users-pagination'].effort.sonnet, 'high')
+    assert.ok(Math.abs(state.cost['users-pagination'].sonnet - 0.014) < 1e-9)
+
+    const proc = spawnSync(process.execPath, [path.join(ROOT, 'hooks', 'report.mjs'), path.join(dir, 'data')], { encoding: 'utf8' })
+    assert.equal(proc.status, 0, proc.stderr)
+    assert.ok(proc.stdout.includes('| users-pagination | sonnet | 2 | 0 | sonnet high | — | done on sonnet | $0.014 |'))
+    assert.ok(proc.stdout.includes('% less'))
+    const empty = spawnSync(process.execPath, [path.join(ROOT, 'hooks', 'report.mjs'), path.join(dir, 'nothing')], { encoding: 'utf8' })
+    assert.equal(empty.stdout, 'cc-tiers has no session data yet.\n')
+    const off = runHook('after_agent.mjs', { ...failed, tool_use_id: 'c3' }, { ...env, CLAUDE_PLUGIN_OPTION_SHOW_COST: 'off' })
+    assert.equal(JSON.parse(off.stdout).hookSpecificOutput.additionalContext.includes('cc-tiers cost'), false)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('large files named in a task keep it off Haiku', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    writeFileSync(path.join(dir, 'big.ts'), 'x'.repeat(500000))
+    writeFileSync(path.join(dir, 'small.ts'), 'x')
+    const routing = defaultRouting()
+    const big = tiers.decideTier('Rename fetchUser in big.ts', routing, { projectDir: dir })
+    assert.deepEqual([big.tier, big.because], ['sonnet', 'complex'])
+    assert.ok(tiers.assessComplexity('Rename fetchUser in big.ts', routing, { projectDir: dir }).signals[0].startsWith('large files'))
+    assert.equal(tiers.decideTier('Rename fetchUser in small.ts', routing, { projectDir: dir }).tier, 'haiku')
+    assert.equal(tiers.decideTier('Rename fetchUser in big.ts', routing).tier, 'haiku')
+    assert.equal(tiers.assessComplexity('Rename x in ../big.ts', routing, { projectDir: path.join(dir, 'sub') }).score, 0)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a dispatcher doing a task itself is counted from its trailer and escalates to the architect', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const env = hookEnv(dir, { CC_TIERS_CC_COST: '0' })
+    const transcript = path.join(dir, 'main.jsonl')
+    const trailer = (status, reason) =>
+      `CC_TIERS_TASK: users-pagination\nCC_TIERS_TIER: sonnet\nCC_TIERS_ROLE: dispatcher\nCC_TIERS_STATUS: ${status}\nCC_TIERS_REASON: ${reason}`
+    const open = 'CC_TIERS_TASK: users-pagination\nCC_TIERS_TIER: sonnet\nCC_TIERS_ROLE: dispatcher\nWorking on it.'
+    writeFileSync(
+      transcript,
+      [
+        assistantRow('claude-sonnet-5-5', { input_tokens: 1000, output_tokens: 100 }, [{ type: 'text', text: open }], { id: 'd0', uuid: 'v0' }),
+        assistantRow('claude-sonnet-5-5', { input_tokens: 10, output_tokens: 10 }, [{ type: 'text', text: trailer('fail', 'cursor test red') }], { id: 'd1', uuid: 'v1' }),
+        assistantRow('claude-sonnet-5-5', { input_tokens: 10, output_tokens: 10 }, [{ type: 'text', text: trailer('fail', 'still red') }], { id: 'd2', uuid: 'v2' }),
+      ].join('\n') + '\n',
+    )
+    const proc = runHook('stop.mjs', { session_id: 'sess-1', hook_event_name: 'Stop', transcript_path: transcript, stop_hook_active: false }, env)
+    assert.equal(proc.status, 0, proc.stderr)
+    const reason = JSON.parse(proc.stdout).reason
+    assert.ok(reason.includes('Retry on sonnet'))
+    assert.ok(reason.includes('The next tier is opus'))
+    assert.ok(reason.includes('cc-tiers:architect'))
+    const state = JSON.parse(readFileSync(path.join(dir, 'data', 'latest.json'), 'utf8'))
+    assert.equal(state.tasks['users-pagination'].tier, 'opus')
+    assert.equal(state.log['users-pagination'].attempts, 2)
+    assert.ok(state.cost['users-pagination'].sonnet > 0)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

@@ -40,12 +40,16 @@ export const ROLES = {
   reviewer: 'opus',
   checker: 'sonnet',
   orchestrator: 'opus',
+  dispatcher: 'sonnet',
 }
+/** Session agents count their own attempts from a trailer in their text, since there is no Agent call. */
+export const SESSION_ROLES = new Set(['orchestrator', 'dispatcher'])
 export const REVIEW_ROLES = new Set(['reviewer', 'checker'])
 /** Roles whose run writes the change and so counts an attempt at its tier. */
-export const WRITER_ROLES = new Set(['worker', 'implementer', 'architect'])
+export const WRITER_ROLES = new Set(['worker', 'implementer', 'architect', 'dispatcher'])
 export const REVIEW_POLICIES = new Set(['cheap', 'risky', 'always', 'never'])
 export const CLASSIFIERS = new Set(['haiku', 'local'])
+export const LIGHT_MODES = new Set(['inline', 'delegate', 'off'])
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 export const DEFAULT_LADDERS = { haiku: ['low', 'medium'], sonnet: ['medium', 'high', 'xhigh'], opus: ['high', 'xhigh'] }
 /** The effort each agent file pins, so the hook only rewrites a call that needs a different level. */
@@ -121,6 +125,17 @@ export function parseLearn(value, fallback = true) {
   if (['on', 'true', 'yes', '1'].includes(text)) return true
   if (['off', 'false', 'no', '0'].includes(text)) return false
   return fallback
+}
+
+/** inline (also on/true): do a one-task trivial request in the session. delegate: one worker call. off. */
+export function parseLightPath(value, fallback = 'inline') {
+  if (value == null || value === '') return fallback
+  if (value === true) return 'inline'
+  if (value === false) return 'off'
+  const text = String(value).trim().toLowerCase()
+  if (text === 'on' || text === 'true') return 'inline'
+  if (text === 'false' || text === 'no') return 'off'
+  return LIGHT_MODES.has(text) ? text : fallback
 }
 
 export function parseEffort(value) {
@@ -255,7 +270,10 @@ export function mergeRouting(defaults, project = null, user = null) {
     const lowered = String(config.classifier).trim().toLowerCase()
     if (CLASSIFIERS.has(lowered)) classifier = lowered
   }
-  const light = parseLearn(config.light_path, parseLearn(defaults.lightPath, true))
+  const light = parseLightPath(config.light_path, parseLightPath(defaults.lightPath, 'inline'))
+  const showCost = parseLearn(config.show_cost, parseLearn(defaults.showCost, true))
+  const prices = defaults.prices && typeof defaults.prices === 'object' ? defaults.prices : { families: {}, models: {} }
+  const largeFileBytes = Number(source.largeFileBytes) > 0 ? Number(source.largeFileBytes) : Number(defaults.largeFileBytes) || 400000
 
   let haikuWhen = list('haiku', 'when')
   const haikuKeywords = list('haiku', 'keywords')
@@ -279,6 +297,9 @@ export function mergeRouting(defaults, project = null, user = null) {
     effort: { on: effortOn, ladders, conserveCap },
     classifier,
     light,
+    showCost,
+    prices,
+    largeFileBytes,
     notes,
     tiers: {
       haiku: { model: 'haiku', agent: 'worker', scoped: SCOPED.worker, when: haikuWhen, keywords: haikuKeywords },
@@ -341,7 +362,7 @@ const SEQUENCE_RE = /\b(?:and then|then|after that|afterwards|e depois|depois di
  * than one mechanical edit. Each signal adds to the score; at COMPLEX_THRESHOLD
  * a trivial-looking task starts on Sonnet instead of Haiku.
  */
-export function assessComplexity(text, routing) {
+export function assessComplexity(text, routing, { projectDir = '' } = {}) {
   const body = stripHeaders(text)
   const hay = fold(body)
   const signals = []
@@ -365,6 +386,22 @@ export function assessComplexity(text, routing) {
   else if (files.size >= 3) add(1, `${files.size} files`)
 
   if (matchesKeyword(body, routing?.tiers?.sonnet?.complexKeywords)) add(2, 'design or investigation wording')
+
+  // The Claude-only take on long-context routing: files this large are a lot to hold in one cheap pass.
+  if (projectDir && files.size) {
+    let bytes = 0
+    for (const file of files) {
+      try {
+        const root = path.resolve(projectDir)
+        const full = path.resolve(root, file)
+        if (full.startsWith(root + path.sep) && existsSync(full)) bytes += statSync(full).size
+      } catch {
+        // A path the hook cannot stat adds nothing.
+      }
+    }
+    const limit = Number(routing?.largeFileBytes) || 400000
+    if (bytes >= limit) add(2, `large files (${Math.round(bytes / 1024)} KB)`)
+  }
   return { score, signals, complex: score >= COMPLEX_THRESHOLD }
 }
 
@@ -506,15 +543,15 @@ export function noteFailure(history, { tier = 'haiku', task, prompt, reason, now
  * because is one of: ceiling, orchestration, trivial, default, opus-phrase, history, risky, complex, budget.
  * effort is the level the first attempt runs at, or null when the ladder is off.
  */
-export function decideTier(text, routing, { history = null, conserve = false, ceiling = false } = {}) {
-  const decided = classify(text, routing, { history, conserve, ceiling })
+export function decideTier(text, routing, { history = null, conserve = false, ceiling = false, projectDir = '' } = {}) {
+  const decided = classify(text, routing, { history, conserve, ceiling, projectDir })
   let boost = 0
   if (decided.tier === 'sonnet' && isRisky(text, routing)) boost = 1
   if (decided.tier === 'sonnet' && history && historyMatches(text, history, 'sonnet')) boost = EFFORTS.length
   return { ...decided, effort: effortFor(routing, decided.tier, 0, { conserve, boost }) }
 }
 
-function classify(text, routing, { history, conserve, ceiling }) {
+function classify(text, routing, { history, conserve, ceiling, projectDir }) {
   if (ceiling) return { tier: 'opus', agent: SCOPED.orchestrator, because: 'ceiling' }
   let tier = 'sonnet'
   let because = 'default'
@@ -537,7 +574,7 @@ function classify(text, routing, { history, conserve, ceiling }) {
     tier = 'sonnet'
     because = 'risky'
   }
-  if (tier === 'haiku' && assessComplexity(text, routing).complex) {
+  if (tier === 'haiku' && assessComplexity(text, routing, { projectDir }).complex) {
     tier = 'sonnet'
     because = 'complex'
   }
@@ -644,9 +681,11 @@ export function formatSessionContext(routing, projectNote, snapshot = {}) {
     effortLine(routing, snapshot.budget?.conserve === true),
     classifierLine(routing),
     `A Haiku-looking task with a complexity score of ${COMPLEX_THRESHOLD} or more (several steps, many files, design or investigation wording, a long brief) starts on Sonnet.`,
-    routing.light
-      ? 'Light path: on. When a request is one trivial task, cc-tiers says so as it arrives: skip the written plan and delegate it in one call.'
-      : 'Light path: off.',
+    routing.light === 'inline'
+      ? 'Light path: inline. When a request is one trivial task, cc-tiers says so as it arrives: do it yourself in this session, with no delegation and no checker.'
+      : routing.light === 'delegate'
+        ? 'Light path: delegate. When a request is one trivial task, cc-tiers says so as it arrives: skip the written plan and delegate it in one call.'
+        : 'Light path: off.',
     `Haiku when: ${tiers.haiku.when.join('; ')}.`,
   ]
   if (tiers.haiku.keywords?.length) lines.push(`Haiku keywords: ${tiers.haiku.keywords.join(', ')}.`)
@@ -665,7 +704,26 @@ export function formatSessionContext(routing, projectNote, snapshot = {}) {
   )
   lines.push(...guidance(routing, snapshot.budget, snapshot.history))
   lines.push(snapshot.ccCost?.installed ? ccCostLine(snapshot) : 'cc-cost: not installed. Per-task spend is omitted.')
+  if (routing.showCost) lines.push(costLine(snapshot.cost))
   return lines.join('\n')
+}
+
+export function costSummary(cost) {
+  const rows = Object.entries(cost || {})
+  const total = rows.reduce((sum, [, row]) => sum + costTotal(row), 0)
+  const opus = rows.reduce((sum, [, row]) => sum + (Number(row?.opusRate) || 0), 0)
+  return { total, opus, saved: opus > 0 ? Math.max(0, 1 - total / opus) : 0 }
+}
+
+function costLine(cost) {
+  const { total, opus, saved } = costSummary(cost)
+  if (!total) {
+    return 'Cost: estimated at Anthropic API list prices for each finished task, next to the same tokens at Opus rates. Nothing recorded yet this session. Subscription plans are not billed this way; it is a comparison.'
+  }
+  return (
+    `Cost so far this session: about ${dollars(total)} at API list prices; the same tokens at Opus rates about ${dollars(opus)} (${Math.round(saved * 100)}% less). ` +
+    'Subscription plans are not billed this way; it is a comparison. /cc-tiers:report breaks it down per task.'
+  )
 }
 
 function ccCostLine(snapshot) {
@@ -709,6 +767,8 @@ export function emptyState(sessionId) {
     seen: [],
     tasks: {},
     spend: {},
+    cost: {},
+    log: {},
     spent: [],
     background: {},
     pending: [],
@@ -728,7 +788,7 @@ export function loadState(file, sessionId) {
     if (!data || typeof data !== 'object' || !data.tasks || typeof data.tasks !== 'object') return emptyState(sessionId)
     const base = emptyState(sessionId)
     for (const key of ['seen', 'spent', 'pending']) if (!Array.isArray(data[key])) data[key] = base[key]
-    for (const key of ['spend', 'background']) {
+    for (const key of ['spend', 'cost', 'log', 'background']) {
       if (!data[key] || typeof data[key] !== 'object' || Array.isArray(data[key])) data[key] = base[key]
     }
     if (!data.cursor || typeof data.cursor !== 'object') data.cursor = base.cursor
@@ -906,6 +966,7 @@ export function implementerFor(tier) {
 
 function emptyMeta(event) {
   return {
+    outcome: 'uncounted',
     haikuFailure: false,
     sonnetEscalated: false,
     duplicate: false,
@@ -953,7 +1014,7 @@ export function applyEvent(state, event, routing) {
     state.seen = seen.slice(-MAX_SEEN)
   }
   // A plan is orchestration, not an attempt: nothing to count, and its spend goes to (orchestration).
-  if (event.role === 'planner') return { state, meta: { ...meta, planner: true }, message: '' }
+  if (event.role === 'planner') return { state, meta: { ...meta, planner: true, outcome: 'plan' }, message: '' }
 
   const headers = parseHeaders(event.prompt || '')
   Object.assign(headers, parseHeaders(event.text || ''))
@@ -1032,10 +1093,12 @@ export function applyEvent(state, event, routing) {
   let message
   if (REVIEW_ROLES.has(role)) {
     const applied = applyReview(tasks, task, current, tier, status, reason, routing, role)
+    meta.outcome = applied.outcome
     message = applied.message
     meta.haikuFailure = applied.haikuFailure
     meta.sonnetEscalated = applied.sonnetEscalated === true
   } else if (status === 'pass' && review === 'skip') {
+    meta.outcome = 'pass'
     delete tasks[task]
     message = `Task ${task} passed on ${tier} and review was skipped. cc-tiers cleared its attempt counter.`
   } else if (status === 'pass') {
@@ -1046,9 +1109,11 @@ export function applyEvent(state, event, routing) {
       conserve: routing.conserve === true,
     })
     if (next == null) {
+      meta.outcome = 'pass'
       delete tasks[task]
       message = `Task ${task} passed on ${tier}. Review policy is ${routing.reviewPolicy} and no review is due. cc-tiers cleared its attempt counter.`
     } else {
+      meta.outcome = 'review'
       current.tier = tier
       tasks[task] = current
       const who = next === 'checker' ? 'cc-tiers:checker (Sonnet)' : 'cc-tiers:reviewer (Opus)'
@@ -1058,6 +1123,7 @@ export function applyEvent(state, event, routing) {
     }
   } else {
     const applied = applyFailure(tasks, task, current, tier, role, reason, routing)
+    meta.outcome = applied.outcome
     message = applied.message
     meta.haikuFailure = applied.haikuFailure
     meta.sonnetEscalated = applied.sonnetEscalated
@@ -1069,7 +1135,7 @@ function applyReview(tasks, task, current, tier, status, reason, routing, role) 
   if (status === 'pass') {
     delete tasks[task]
     const who = role === 'checker' ? 'Sonnet' : 'Opus'
-    return { message: `Task ${task} passed ${who} review. cc-tiers cleared its attempt counter.`, haikuFailure: false }
+    return { outcome: 'pass', message: `Task ${task} passed ${who} review. cc-tiers cleared its attempt counter.`, haikuFailure: false }
   }
   return applyFailure(tasks, task, current, tier, role, reason, routing)
 }
@@ -1091,6 +1157,7 @@ function applyFailure(tasks, task, current, tier, role, reason, routing) {
     tasks[task] = current
     const raised = tier === 'opus' ? '' : effortNote(routing, tier, failures.length)
     return {
+      outcome: 'retry',
       haikuFailure,
       sonnetEscalated: false,
       message: formatCount(
@@ -1110,6 +1177,7 @@ function applyFailure(tasks, task, current, tier, role, reason, routing) {
   if (next == null) {
     tasks[task] = { tier, failures, carried }
     return {
+      outcome: 'stop',
       haikuFailure,
       sonnetEscalated: false,
       message: formatCount(
@@ -1125,6 +1193,7 @@ function applyFailure(tasks, task, current, tier, role, reason, routing) {
   tasks[task] = { tier: next, failures: [], carried: carriedForward }
   const start = next === 'opus' ? '' : effortNote(routing, next, 0)
   return {
+    outcome: 'escalate',
     haikuFailure,
     sonnetEscalated: tier === 'sonnet',
     message: formatCount(
@@ -1156,7 +1225,7 @@ function formatCount(task, tier, count, maximum, decision, history) {
  * when set, replaces the call's input (the effort the attempt should run at).
  * An upward move past the counter (an early escalation) moves the counter too.
  */
-export function checkDelegation(state, toolInput, routing, { history = null } = {}) {
+export function checkDelegation(state, toolInput, routing, { history = null, projectDir = '' } = {}) {
   const input = toolInput && typeof toolInput === 'object' ? toolInput : {}
   const pass = { deny: '', context: '', input: null }
   // Only this plugin's agents: another plugin may also ship a `worker` or `reviewer`.
@@ -1210,12 +1279,12 @@ export function checkDelegation(state, toolInput, routing, { history = null } = 
     }
   } else {
     current = null
-    const decision = decideTier(prompt, routing, { history, conserve: routing.conserve === true })
+    const decision = decideTier(prompt, routing, { history, conserve: routing.conserve === true, projectDir })
     if (role === 'worker' && ['history', 'risky', 'complex'].includes(decision.because)) {
       const why = {
         history: 'a similar task already failed on Haiku in this project',
         risky: 'it matches an Opus review keyword',
-        complex: `its complexity score is ${assessComplexity(prompt, routing).signals.join(', ')}`,
+        complex: `its complexity score is ${assessComplexity(prompt, routing, { projectDir }).signals.join(', ')}`,
       }[decision.because]
       notes.push(`cc-tiers routing hint: ${task} looks like Sonnet work because ${why}. Prefer cc-tiers:implementer next time.`)
     }
@@ -1223,6 +1292,7 @@ export function checkDelegation(state, toolInput, routing, { history = null } = 
 
   const effort = attemptEffort(routing, role, tier, current, prompt, history, input.effort)
   if (effort.note) notes.push(effort.note)
+  logEffort(state, task, tier, effort.level || parseEffort(input.effort) || AGENT_EFFORT[role])
   return { deny: '', context: notes.join('\n'), input: effort.level ? { ...input, effort: effort.level } : null }
 }
 
@@ -1357,6 +1427,106 @@ export function freshTokens(usage) {
     num(usage.cache_creation_input_tokens ?? usage.cacheWrite ?? usage.cache_creation) +
     num(usage.output_tokens ?? usage.output)
   return Math.round(total)
+}
+
+/** `us.anthropic.claude-opus-5-5-20260101[1m]` and friends reduce to `claude-opus-5-5`. */
+export function normalizeModel(model) {
+  let id = String(model || '').toLowerCase().trim()
+  const at = id.indexOf('claude-')
+  if (at > 0) id = id.slice(at)
+  return id.replace(/\[[^\]]*\]$/, '').replace(/[-@]\d{8}$/, '').replace(/-v\d+(:\d+)?$/, '')
+}
+
+/** Per-million prices for a model: the longest listed id it starts with, else its family's current model. */
+export function priceFor(model, routing) {
+  const prices = routing?.prices
+  if (!prices || typeof prices.models !== 'object') return null
+  const id = normalizeModel(model)
+  let best = ''
+  for (const key of Object.keys(prices.models)) {
+    if ((id === key || id.startsWith(`${key}-`)) && key.length > best.length) best = key
+  }
+  if (!best) {
+    const tier = tierOfModel(id)
+    best = tier ? prices.families?.[tier] || '' : ''
+  }
+  const entry = prices.models[best]
+  if (!entry) return null
+  return { model: best, input: Number(entry.input) || 0, output: Number(entry.output) || 0, cacheRead: Number(entry.cacheRead) || 0 }
+}
+
+/**
+ * Dollars for one usage record at a price. Cache writes are 1.25x input for the
+ * 5-minute TTL and 2x for the 1-hour TTL; a record that does not split them is
+ * priced as 5-minute writes.
+ */
+export function usageDollars(usage, price) {
+  if (!usage || typeof usage !== 'object' || !price) return 0
+  const num = (value) => {
+    const number = Number(value ?? 0)
+    return Number.isFinite(number) && number > 0 ? number : 0
+  }
+  const split = usage.cache_creation && typeof usage.cache_creation === 'object' ? usage.cache_creation : null
+  let write5 = num(split?.ephemeral_5m_input_tokens)
+  const write1h = num(split?.ephemeral_1h_input_tokens)
+  if (!write5 && !write1h) write5 = num(usage.cache_creation_input_tokens ?? usage.cacheWrite)
+  const dollars =
+    num(usage.input_tokens ?? usage.input) * price.input +
+    num(usage.output_tokens ?? usage.output) * price.output +
+    num(usage.cache_read_input_tokens ?? usage.cacheRead) * price.cacheRead +
+    write5 * price.input * 1.25 +
+    write1h * price.input * 2
+  return dollars / 1e6
+}
+
+/** { tier, usd, opus } for one usage record: its own cost, and the same tokens at the current Opus price. */
+export function usageCost(usage, model, routing) {
+  const price = priceFor(model, routing)
+  const tier = tierOfModel(model)
+  if (!price || !tier) return null
+  const opusPrice = priceFor(routing.prices?.families?.opus || 'claude-opus', routing)
+  return { tier, usd: usageDollars(usage, price), opus: usageDollars(usage, opusPrice) }
+}
+
+export function addCost(cost, task, entry) {
+  if (!task || !entry || !TIERS.includes(entry.tier)) return cost
+  const current = cost[task] || { haiku: 0, sonnet: 0, opus: 0, opusRate: 0 }
+  current[entry.tier] = (Number(current[entry.tier]) || 0) + (Number(entry.usd) || 0)
+  current.opusRate = (Number(current.opusRate) || 0) + (Number(entry.opus) || 0)
+  cost[task] = current
+  return cost
+}
+
+export function mergeCost(target, delta) {
+  for (const [task, row] of Object.entries(delta || {})) {
+    const current = target[task] || { haiku: 0, sonnet: 0, opus: 0, opusRate: 0 }
+    for (const key of [...TIERS, 'opusRate']) current[key] = (Number(current[key]) || 0) + (Number(row?.[key]) || 0)
+    target[task] = current
+  }
+  return target
+}
+
+export function dollars(value) {
+  const number = Number(value) || 0
+  if (number >= 1) return `$${number.toFixed(2)}`
+  if (number >= 0.01) return `$${number.toFixed(3)}`
+  return `$${number.toFixed(4)}`
+}
+
+export function costTotal(row) {
+  return TIERS.reduce((sum, tier) => sum + (Number(row?.[tier]) || 0), 0)
+}
+
+export function formatTaskCost(task, row) {
+  const total = costTotal(row)
+  if (!total) return ''
+  const parts = TIERS.filter((tier) => Number(row[tier]) > 0).map((tier) => `${tier} ${dollars(row[tier])}`)
+  const opus = Number(row.opusRate) || 0
+  const saved = opus > total ? `, ${Math.round((1 - total / opus) * 100)}% less` : ''
+  return (
+    `cc-tiers cost for ${task}: about ${dollars(total)} at API list prices (${parts.join(', ')}). ` +
+    `The same tokens at Opus rates: about ${dollars(opus)}${saved}.`
+  )
 }
 
 export function tierOfModel(model) {
@@ -1569,14 +1739,15 @@ function lineId(line) {
 
 /**
  * Fold one main-transcript row into the cursor.
- * - The orchestrator's own text opens a task with CC_TIERS_TASK + CC_TIERS_ROLE: orchestrator
- *   (the Opus ceiling) and closes it with CC_TIERS_STATUS. That closing trailer is a report.
+ * - The session agent's own text opens a task with CC_TIERS_TASK + CC_TIERS_ROLE: orchestrator
+ *   (the Opus ceiling) or dispatcher (Sonnet doing a task itself) and closes it with
+ *   CC_TIERS_STATUS. That closing trailer is a report.
  * - An Agent call whose prompt carries CC_TIERS_TASK charges that one message to the task.
  * - Every other main-chain message is orchestration overhead.
  * Sidechain rows are skipped: subagent usage comes from the Agent result or its own transcript.
  * Rows that repeat a message id (one row per content block) are counted once.
  */
-function foldRow(row, line, cursor, sink) {
+function foldRow(row, line, cursor, sink, routing = null) {
   const limits = extractLimitEntries(row)
   if (limits.five_hour) cursor.limits.five_hour = limits.five_hour
   if (limits.seven_day) cursor.limits.seven_day = limits.seven_day
@@ -1593,11 +1764,12 @@ function foldRow(row, line, cursor, sink) {
         cursor.task = ''
         continue
       }
-      if ((headers.ROLE || '').toLowerCase() !== 'orchestrator') continue
+      const role = (headers.ROLE || '').toLowerCase()
+      if (!SESSION_ROLES.has(role)) continue
       cursor.task = slug(headers.TASK)
       const status = (headers.STATUS || '').toLowerCase()
       if (cursor.task && (status === 'pass' || status === 'fail')) {
-        sink.reports.push({ id: `row:${row.uuid || lineId(line)}`, text: block.text })
+        sink.reports.push({ id: `row:${row.uuid || lineId(line)}`, text: block.text, role })
         closing = true
       }
     } else if (block.type === 'tool_use' && block.input && typeof block.input === 'object' && !delegated) {
@@ -1609,7 +1781,9 @@ function foldRow(row, line, cursor, sink) {
     if (id) cursor.ids = [...cursor.ids, id].slice(-MAX_MESSAGE_IDS)
     const tier = tierOfModel(message.model)
     const amount = freshTokens(message.usage)
-    if (tier && amount) addSpend(sink.spend, delegated || cursor.task || OVERHEAD, tier, amount)
+    const target = delegated || cursor.task || OVERHEAD
+    if (tier && amount) addSpend(sink.spend, target, tier, amount)
+    if (routing && message.usage) addCost(sink.cost, target, usageCost(message.usage, message.model, routing))
   }
   if (closing) cursor.task = ''
 }
@@ -1636,10 +1810,10 @@ function readRange(file, start, end) {
  * The first scan of a long transcript starts SCAN_FIRST_CAP bytes from the end.
  * Returns the spend added and any ceiling reports found.
  */
-export function scanTranscript(state, file) {
+export function scanTranscript(state, file, routing = null) {
   if (!state.cursor || typeof state.cursor !== 'object') state.cursor = freshCursor()
   const cursor = state.cursor
-  const sink = { spend: {}, reports: [] }
+  const sink = { spend: {}, cost: {}, reports: [] }
   if (!file || !existsSync(file)) return sink
   let size
   try {
@@ -1676,16 +1850,17 @@ export function scanTranscript(state, file) {
     } catch {
       continue
     }
-    if (row && typeof row === 'object') foldRow(row, line, cursor, sink)
+    if (row && typeof row === 'object') foldRow(row, line, cursor, sink, routing)
   }
   mergeSpend(state.spend || (state.spend = {}), sink.spend)
+  mergeCost(state.cost || (state.cost = {}), sink.cost)
   return sink
 }
 
 /** Spend and ceiling reports for a whole transcript text, the same way scanTranscript folds it. */
 export function attributeTranscript(text) {
   const cursor = freshCursor()
-  const sink = { spend: {}, reports: [] }
+  const sink = { spend: {}, cost: {}, reports: [] }
   for (const line of String(text || '').split(/\n/)) {
     if (!line.trim()) continue
     try {
@@ -1700,13 +1875,20 @@ export function attributeTranscript(text) {
 
 /** Fresh tokens per tier in one subagent transcript. Every row counts; repeated message ids count once. */
 export function agentTranscriptSpend(file) {
+  return agentTranscriptUsage(file).totals
+}
+
+/** Fresh tokens per tier, and with routing the dollar cost, of one subagent transcript. */
+export function agentTranscriptUsage(file, routing = null) {
   const totals = { haiku: 0, sonnet: 0, opus: 0 }
-  if (!file || !existsSync(file)) return totals
+  const cost = {}
+  const done = () => ({ totals, cost: cost.run || null })
+  if (!file || !existsSync(file)) return done()
   let text
   try {
     text = readFileSync(file, 'utf8')
   } catch {
-    return totals
+    return done()
   }
   const ids = new Set()
   for (const line of text.split(/\n/)) {
@@ -1724,17 +1906,21 @@ export function agentTranscriptSpend(file) {
     if (id) ids.add(id)
     const tier = tierOfModel(message.model)
     if (tier) totals[tier] += freshTokens(message.usage)
+    if (routing) addCost(cost, 'run', usageCost(message.usage, message.model, routing))
   }
-  return totals
+  return done()
 }
 
-export function usageFromToolResponse(response, role) {
+export function usageFromToolResponse(response, role, routing = null) {
   if (!response || typeof response !== 'object' || !response.usage) return null
   const amount = freshTokens(response.usage)
   if (!amount) return null
-  const tier = tierOfModel(response.usage.model || response.resolvedModel || response.model) || ROLES[role] || null
+  const model = response.usage.model || response.resolvedModel || response.model || ''
+  const tier = tierOfModel(model) || ROLES[role] || null
   if (!tier) return null
-  return { tier, tokens: amount }
+  const found = routing ? usageCost(response.usage, model || tier, routing) : null
+  const cost = found ? { [tier]: found.usd, opusRate: found.opus } : null
+  return { tier, tokens: amount, cost }
 }
 
 export function userFromEnv(env = process.env) {
@@ -1749,6 +1935,7 @@ export function userFromEnv(env = process.env) {
     effort_ladder: env.CLAUDE_PLUGIN_OPTION_EFFORT_LADDER || null,
     classifier: env.CLAUDE_PLUGIN_OPTION_CLASSIFIER || null,
     light_path: env.CLAUDE_PLUGIN_OPTION_LIGHT_PATH || null,
+    show_cost: env.CLAUDE_PLUGIN_OPTION_SHOW_COST || null,
   }
 }
 
@@ -1756,13 +1943,20 @@ export function userFromEnv(env = process.env) {
  * The note UserPromptSubmit adds when a request is one trivial task: no written
  * plan, one delegation, and no checker pass for a lookup. Empty otherwise.
  */
-export function lightHint(prompt, routing, { history = null, conserve = false } = {}) {
-  if (!routing.light) return ''
+export function lightHint(prompt, routing, { history = null, conserve = false, projectDir = '' } = {}) {
+  if (!routing.light || routing.light === 'off') return ''
   const text = String(prompt || '').trim()
   if (!text || text.startsWith('/') || /^CC_TIERS_[A-Z]+:/m.test(text)) return ''
   if (text.split(/\s+/).length > 40) return ''
-  const decision = decideTier(text, routing, { history, conserve })
-  if (decision.tier !== 'haiku' || assessComplexity(text, routing).score > 0) return ''
+  const decision = decideTier(text, routing, { history, conserve, projectDir })
+  if (decision.tier !== 'haiku' || assessComplexity(text, routing, { projectDir }).score > 0) return ''
+  if (routing.light === 'inline') {
+    return (
+      'cc-tiers light path: this request looks like one trivial task. Do it yourself in this session: a fresh worker context plus a checker pass ' +
+      'costs more than the edit. No plan, no slug, no delegation, no review. Make the change, run the smallest check that proves it, and reply in one or two lines. ' +
+      'If it turns out bigger than it looks, route it as usual.'
+    )
+  }
   return (
     'cc-tiers light path: this request looks like one trivial task. Skip the written plan and the cc-tiers:planner call: ' +
     'give it one slug and delegate it straight to cc-tiers:worker. A lookup or search that changes no files needs no checker pass ' +
@@ -1820,11 +2014,11 @@ export function openContext(payload, env = process.env) {
 export function withSession(ctx, payload, fn) {
   return withLock(ctx.file, () => {
     const state = ctx.file ? loadState(ctx.file, ctx.sessionId) : emptyState(ctx.sessionId)
-    const scan = scanTranscript(state, payload.transcript_path)
+    const scan = scanTranscript(state, payload.transcript_path, ctx.routing)
     const budget = budgetDecision(collectLimits({ payload, cursor: state.cursor, env: ctx.env }), ctx.routing)
     ctx.routing.conserve = budget.conserve
     for (const report of scan.reports) {
-      const message = processReport(ctx, state, { kind: 'report', id: report.id, role: 'orchestrator', prompt: '', text: report.text })
+      const message = processReport(ctx, state, { kind: 'report', id: report.id, role: report.role || 'orchestrator', prompt: '', text: report.text })
       if (message) queueMessage(state, message)
     }
     const result = fn(state, { budget })
@@ -1853,14 +2047,16 @@ export function processReport(ctx, state, event, usage = null) {
   if (applied.meta.duplicate) return ''
   let message = applied.message
   const task = applied.meta.planner ? OVERHEAD : applied.meta.task
-  if (ctx.ccCost && task && usage?.key) {
+  if (task && usage?.key) {
     state.spent = state.spent || []
     if (!state.spent.includes(usage.key)) {
       state.spent = [...state.spent, usage.key].slice(-MAX_SEEN)
-      if (usage.totals) mergeSpend(state.spend, { [task]: usage.totals })
-      else if (usage.tier && usage.tokens) addSpend(state.spend, task, usage.tier, usage.tokens)
+      if (ctx.ccCost && usage.totals) mergeSpend(state.spend, { [task]: usage.totals })
+      else if (ctx.ccCost && usage.tier && usage.tokens) addSpend(state.spend, task, usage.tier, usage.tokens)
+      if (usage.cost) mergeCost(state.cost || (state.cost = {}), { [task]: usage.cost })
     }
   }
+  if (!applied.meta.planner) logReport(state, applied.meta)
   if (applied.meta.haikuFailure && ctx.routing.learn && ctx.projectDir) {
     const file = historyPath(ctx.projectDir)
     withLock(file, () => {
@@ -1894,5 +2090,52 @@ export function processReport(ctx, state, event, usage = null) {
     const line = formatTaskSpend(task, state.spend[task])
     if (line) message = message ? `${message}\n${line}` : line
   }
+  if (ctx.routing.showCost && task && state.cost?.[task]) {
+    const line = formatTaskCost(task, state.cost[task])
+    if (line) message = message ? `${message}\n${line}` : line
+  }
   return message
+}
+
+const MAX_LOG = 60
+
+function logEntry(state, task) {
+  state.log = state.log && typeof state.log === 'object' ? state.log : {}
+  const entry = state.log[task] || { tiers: [], attempts: 0, failures: 0, escalations: 0, reviews: [], effort: {}, status: 'open', finished: '' }
+  state.log[task] = entry
+  const names = Object.keys(state.log)
+  if (names.length > MAX_LOG) {
+    names
+      .sort((a, b) => String(state.log[a].updated || '').localeCompare(String(state.log[b].updated || '')))
+      .slice(0, names.length - MAX_LOG)
+      .forEach((name) => delete state.log[name])
+  }
+  entry.updated = new Date().toISOString()
+  return entry
+}
+
+/** One line per task for /cc-tiers:report: which tiers ran it, how often it failed, who reviewed it, how it ended. */
+export function logReport(state, meta) {
+  if (!meta?.task || meta.outcome === 'uncounted' || meta.outcome === 'plan') return
+  const entry = logEntry(state, meta.task)
+  const writer = WRITER_ROLES.has(meta.role) || SESSION_ROLES.has(meta.role)
+  if (writer) {
+    entry.attempts += 1
+    if (meta.tier && !entry.tiers.includes(meta.tier)) entry.tiers.push(meta.tier)
+  } else if (REVIEW_ROLES.has(meta.role)) {
+    entry.reviews.push(meta.role)
+  }
+  if (['retry', 'escalate', 'stop'].includes(meta.outcome)) entry.failures += 1
+  if (meta.outcome === 'escalate') entry.escalations += 1
+  if (meta.outcome === 'stop') entry.status = 'stopped'
+  else if (meta.outcome === 'review') entry.status = 'in review'
+  else if (meta.outcome === 'pass') {
+    entry.status = 'done'
+    entry.finished = meta.tier || ''
+  } else entry.status = 'open'
+}
+
+export function logEffort(state, task, tier, level) {
+  if (!task || !level) return
+  logEntry(state, task).effort[tier] = level
 }

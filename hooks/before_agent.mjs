@@ -26,7 +26,7 @@ function main() {
   const history = ctx.routing.learn && ctx.projectDir ? loadHistory(historyPath(ctx.projectDir)) : null
 
   const { deny, context, input } = withSession(ctx, payload, (state) => {
-    const checked = checkDelegation(state, payload.tool_input, ctx.routing, { history })
+    const checked = checkDelegation(state, payload.tool_input, ctx.routing, { history, projectDir: ctx.projectDir })
     const pending = takePending(state)
     return { deny: checked.deny, input: checked.input, context: [pending, checked.context].filter(Boolean).join('\n\n') }
   })

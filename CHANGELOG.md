@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.5.0 - 2026-10-19
+
+### Added
+
+- Cost per task, with no other plugin needed. Each finished task gets a `cc-tiers cost` line at Anthropic API list prices, priced per model id from `prices` in `config/routing.default.json` (cache reads at the model's rate, cache writes at 1.25x or 2x input), next to the same tokens at Opus rates. The session summary carries the running total. `show_cost` (`on` / `off`).
+- `/cc-tiers:report [--all]` and `hooks/report.mjs`: one table per session with the tiers each task ran on, attempts, escalations, effort, review, status, and cost next to Opus rates.
+- Large files: a task that names project files adding up to `largeFileBytes` (400 KB) or more scores 2 on complexity and starts on Sonnet. This is the Claude-only take on long-context routing.
+- `bench/`: a benchmark with a fixture project, seven tasks with hidden checks, and a runner that compares Opus only, Sonnet only, the orchestrator, and light mode, one task per session or all tasks in one session. Results are in `bench/results/` and in the README.
+- The README covers pairing light mode with Claude Code's advisor tool.
+
+### Changed
+
+- The benchmark showed that a fresh subagent context costs more than a small task. `light_path` is now `inline` by default: a one-task trivial request is done by the session agent itself, with no worker and no checker. `delegate` keeps the 0.4 behavior; `off` turns it off. `on` reads as `inline`.
+- The light-mode dispatcher does one ordinary task itself on Sonnet instead of opening a Sonnet implementer, and marks the attempt with a `CC_TIERS_ROLE: dispatcher` trailer that the hooks count like the Opus ceiling trailer. Two failures still move the task to `cc-tiers:architect`. It delegates when a request has several tasks or a task is too big for its context.
+
 ## 0.4.0 - 2026-10-19
 
 ### Added

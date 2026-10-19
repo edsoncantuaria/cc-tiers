@@ -26,7 +26,7 @@ function main() {
       // Registers the agent id so SubagentStop can count the report later.
       text = processReport(ctx, state, event)
     } else {
-      const usage = usageFromToolResponse(payload.tool_response, event.role)
+      const usage = usageFromToolResponse(payload.tool_response, event.role, ctx.routing)
       const key = event.agent_id || event.tool_use_id
       text = processReport(ctx, state, event, usage ? { key, ...usage } : null)
     }

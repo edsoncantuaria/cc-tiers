@@ -7,7 +7,7 @@
  */
 
 import {
-  agentTranscriptSpend,
+  agentTranscriptUsage,
   matchRole,
   openContext,
   parsePayload,
@@ -37,8 +37,8 @@ function main() {
       text: String(payload.last_assistant_message || ''),
       error: '',
     }
-    const totals = agentTranscriptSpend(payload.agent_transcript_path)
-    const message = processReport(ctx, state, event, { key: agentId, totals })
+    const { totals, cost } = agentTranscriptUsage(payload.agent_transcript_path, ctx.routing)
+    const message = processReport(ctx, state, event, { key: agentId, totals, cost })
     if (message) queueMessage(state, message)
   })
 }

@@ -29,7 +29,7 @@ function main() {
   const message = withSession(ctx, payload, (state) => {
     const pending = takePending(state)
     if (!prompting) return pending
-    const hint = lightHint(payload.prompt, ctx.routing, { history, conserve: ctx.routing.conserve === true })
+    const hint = lightHint(payload.prompt, ctx.routing, { history, conserve: ctx.routing.conserve === true, projectDir: ctx.projectDir })
     return [pending, hint].filter(Boolean).join('\n\n')
   })
   if (!message) return

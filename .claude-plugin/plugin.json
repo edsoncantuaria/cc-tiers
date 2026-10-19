@@ -1,6 +1,6 @@
 {
   "name": "cc-tiers",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Tiered Opus, Sonnet, and Haiku workflow with an effort ladder, a Haiku classifier, a light mode, cheaper review, budget routing, and cc-cost spend",
   "author": {
     "name": "edsoncantuaria",
@@ -75,12 +75,19 @@
       "default": "haiku",
       "options": ["haiku", "local"]
     },
+    "show_cost": {
+      "type": "string",
+      "title": "Show cost",
+      "description": "on: each finished task and the session summary show an estimated cost at Anthropic API list prices, and what the same tokens would cost at Opus rates. Subscription plans are not billed this way; read it as a comparison. off: no cost lines.",
+      "default": "on",
+      "options": ["on", "off"]
+    },
     "light_path": {
       "type": "string",
       "title": "Light path",
-      "description": "on: when a request is one trivial task, cc-tiers tells the orchestrator to skip the written plan and delegate it in one call, with no checker pass for a lookup. off: every request is planned the usual way.",
-      "default": "on",
-      "options": ["on", "off"]
+      "description": "inline: when a request is one trivial task, the session agent does it itself, with no subagent and no checker; that is cheaper than a fresh worker context. delegate: skip the plan and send it to the worker in one call. off: every request is planned the usual way.",
+      "default": "inline",
+      "options": ["inline", "delegate", "off"]
     }
   }
 }

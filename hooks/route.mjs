@@ -30,9 +30,9 @@ const { project } = readProjectFile(projectDir)
 const routing = mergeRouting(loadJson(path.join(pluginRoot(env), 'config', 'routing.default.json')), project, userFromEnv(env))
 const budget = budgetDecision(collectLimits({ env }), routing)
 const history = routing.learn ? loadHistory(historyPath(projectDir)) : null
-const decision = decideTier(text, routing, { history, conserve: budget.conserve })
+const decision = decideTier(text, routing, { history, conserve: budget.conserve, projectDir })
 const risky = isRisky(text, routing)
-const complexity = assessComplexity(text, routing)
+const complexity = assessComplexity(text, routing, { projectDir })
 const review = selectReviewer({ policy: routing.reviewPolicy, writerTier: decision.tier, risky, conserve: budget.conserve })
 const result = {
   ...decision,
