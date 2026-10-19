@@ -15,6 +15,7 @@ You are coordinating, even if this session is not already the Opus orchestrator.
 
 - Max attempts per tier: ${user_config.max_attempts}
 - Review policy: ${user_config.review_policy}
+- Research: ${user_config.research}
 - Learn from Haiku failures: ${user_config.learn}
 - 5h conserve threshold: ${user_config.budget_5h}
 - 7d conserve threshold: ${user_config.budget_7d}
@@ -24,7 +25,7 @@ You are coordinating, even if this session is not already the Opus orchestrator.
 - Classifier: ${user_config.classifier}
 - Light path: ${user_config.light_path}
 
-If a placeholder is still visible, use 2, `cheap`, learning `on`, thresholds of 80, no extra phrases, the effort ladder `on`, the classifier `haiku`, and the light path `inline`.
+If a placeholder is still visible, use 2, `risky`, research `on`, learning `on`, thresholds of 80, no extra phrases, the effort ladder `on`, the classifier `haiku`, and the light path `inline`.
 
 The session-start note is the effective phrase list, the budget line, and the Haiku history line. When it is missing, read `${CLAUDE_PLUGIN_ROOT}/config/routing.default.json` and, if it exists, `${CLAUDE_PROJECT_DIR}/.claude/cc-tiers.json`. A list in the project file (`when`, `keywords`, `reviewWhen`, `reviewKeywords`) replaces that list. `/config` wins for the attempt limit, the review policy, learning, and the budget thresholds. Append the extra phrases.
 
@@ -37,6 +38,7 @@ The session-start note is the effective phrase list, the budget line, and the Ha
 | Normal feature, bug fix, test, or local refactor | `cc-tiers:implementer` (Sonnet) |
 | Planning, splitting tasks, or the attempt ceiling | Opus orchestrator, in this session |
 | The same, when this session is the light-mode `cc-tiers:dispatcher` | `cc-tiers:planner` for the plan, `cc-tiers:architect` for the ceiling (Opus) |
+| Research before code goes to the implementer or architect | `cc-tiers:researcher` (Sonnet) |
 | Review of Haiku output under `cheap` or `always` | `cc-tiers:checker` (Sonnet) |
 | Review of risky, non-trivial, or ceiling work | `cc-tiers:reviewer` (Opus) |
 
@@ -47,6 +49,14 @@ Default to Sonnet when a task is not clearly trivial, and when a trivial-looking
 A failure is a failed test, a rejected review, or a subagent error; an API or network error is not, and the same tier runs again. With the effort ladder on, a retry at the same tier runs one effort level higher, and the hook sets it on the call; leave `effort` unset or pass a higher level, never a lower one. After ${user_config.max_attempts} failures at one tier (default 2), escalate Haiku to Sonnet, then Sonnet to Opus. Paste every failure note into the next prompt. The new tier starts at zero. The Opus ceiling is `cc-tiers:orchestrator`: do the work in this session when that agent is already the session agent, and delegate to it (no `model` override, failure notes in the prompt) when it is not. If the Opus attempts also fail, stop and report the notes. Do not add a tier above Opus. Conserving budget does not block the ceiling. When you implement at the ceiling in this session, open the attempt with `CC_TIERS_TASK`, `CC_TIERS_TIER: opus`, and `CC_TIERS_ROLE: orchestrator` lines, and close it with the same lines plus `CC_TIERS_STATUS` and `CC_TIERS_REASON`, so the hook counts it.
 
 A hook note that begins `cc-tiers counted a failure` is the counter. Follow its next step. A note that begins `cc-tiers recorded a Haiku failure` means similar later tasks start on Sonnet. A `cc-tiers spend` note is the fresh-token cost of that task when cc-cost is installed. Do not invent one when the session says cc-cost is not installed.
+
+### Research
+
+Before a task goes to `cc-tiers:implementer` or `cc-tiers:architect`, run `cc-tiers:researcher` for it, with the same `CC_TIERS_TASK` slug. Send independent researches in parallel. One research may cover several slugs: add `CC_TIERS_COVERS: <slug>, <slug>` to its prompt, and a pass marks all of them. Do the same before your own ceiling attempt.
+
+When the researcher reports `CC_TIERS_STATUS: pass`, paste its entire report, trailer included, between two lines that hold only `CC_TIERS_RESEARCH_BEGIN` and `CC_TIERS_RESEARCH_END`. Put that block under the writer's `CC_TIERS_TASK/TIER/ROLE` header, outside the block, and add `CC_TIERS_RESEARCH: done`. The hook strips the block before it reads headers. If the research fails, fix what it says is missing or use the next option.
+
+When the task touches no library, framework, or external API, skip the research and add `CC_TIERS_RESEARCH: none - <reason>` instead. Research `off` makes the hook skip the check; `cc-tiers:worker` needs none. If the hook refuses a delegation for missing research, run the researcher or add the `none` line, as the refusal says.
 
 Start every delegation with:
 

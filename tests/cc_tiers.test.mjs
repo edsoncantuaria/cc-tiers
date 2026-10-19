@@ -180,6 +180,7 @@ test('agents pin family aliases, including the Sonnet checker', () => {
     architect: 'opus',
     planner: 'opus',
     dispatcher: 'sonnet',
+    researcher: 'sonnet',
   }
   const efforts = { worker: 'low', implementer: 'high', architect: 'high', planner: 'high', checker: 'medium', reviewer: 'high', researcher: 'medium' }
   for (const [name, model] of Object.entries(expected)) {
@@ -194,6 +195,13 @@ test('agents pin family aliases, including the Sonnet checker', () => {
   }
   assert.deepEqual(tiers.AGENT_EFFORT, efforts)
   assert.match(frontmatter(path.join(ROOT, 'agents', 'planner.md')).tools, /^Read, Grep, Glob, Bash$/)
+  const researcher = frontmatter(path.join(ROOT, 'agents', 'researcher.md'))
+  assert.match(researcher.tools, /^Read, Grep, Glob, Bash, WebSearch, WebFetch$/)
+  assert.equal(researcher.maxTurns, '25')
+  for (const file of ['agents/orchestrator.md', 'agents/dispatcher.md', 'skills/tiers/SKILL.md']) {
+    const text = readFileSync(path.join(ROOT, file), 'utf8')
+    for (const needle of ['cc-tiers:researcher', 'CC_TIERS_RESEARCH_BEGIN', 'CC_TIERS_RESEARCH: none - ']) assert.ok(text.includes(needle), `${file} mentions ${needle}`)
+  }
   const defaults = tiers.loadJson(path.join(ROOT, 'config/routing.default.json'))
   for (const tier of tiers.TIERS) assert.equal(defaults.effort[tier][0], efforts[tiers.IMPLEMENTERS[tier]] || 'high')
 })
