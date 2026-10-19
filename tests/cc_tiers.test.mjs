@@ -135,7 +135,8 @@ test('manifest declares the 0.5.0 knobs', () => {
   assert.equal(manifest.userConfig.max_attempts.max, 5)
   const review = manifest.userConfig.review_policy
   assert.deepEqual(review.options, ['cheap', 'risky', 'always', 'never'])
-  assert.equal(review.default, 'cheap')
+  assert.equal(review.default, 'risky')
+  assert.equal(manifest.userConfig.show_cost.default, 'off')
   assert.deepEqual(manifest.userConfig.learn.options, ['on', 'off'])
   assert.equal(manifest.userConfig.learn.default, 'on')
   assert.equal(manifest.userConfig.budget_5h.default, 80)
@@ -180,7 +181,7 @@ test('agents pin family aliases, including the Sonnet checker', () => {
     planner: 'opus',
     dispatcher: 'sonnet',
   }
-  const efforts = { worker: 'low', implementer: 'medium', architect: 'high', planner: 'high', checker: 'medium', reviewer: 'high' }
+  const efforts = { worker: 'low', implementer: 'high', architect: 'high', planner: 'high', checker: 'medium', reviewer: 'high' }
   for (const [name, model] of Object.entries(expected)) {
     const fields = frontmatter(path.join(ROOT, 'agents', `${name}.md`))
     assert.equal(fields.name, name)
@@ -300,7 +301,7 @@ test('bad attempts, policy, and thresholds fall back', () => {
     learn: 'maybe',
   })
   assert.equal(routing.maxAttempts, 2)
-  assert.equal(routing.reviewPolicy, 'cheap')
+  assert.equal(routing.reviewPolicy, 'risky')
   assert.equal(routing.budget5h, 80)
   assert.equal(routing.budget7d, 80)
   assert.equal(routing.learn, true)
@@ -1097,9 +1098,9 @@ const HEADER = (task, tier, role) => `CC_TIERS_TASK: ${task}\nCC_TIERS_TIER: ${t
 
 test('the effort ladder raises a retry before the task changes model', () => {
   const routing = defaultRouting()
-  assert.deepEqual(routing.effort.ladders, { haiku: ['low', 'medium'], sonnet: ['medium', 'high', 'xhigh'], opus: ['high', 'xhigh'] })
-  assert.equal(tiers.effortFor(routing, 'sonnet', 0), 'medium')
-  assert.equal(tiers.effortFor(routing, 'sonnet', 1), 'high')
+  assert.deepEqual(routing.effort.ladders, { haiku: ['low', 'medium'], sonnet: ['high', 'xhigh'], opus: ['high', 'xhigh'] })
+  assert.equal(tiers.effortFor(routing, 'sonnet', 0), 'high')
+  assert.equal(tiers.effortFor(routing, 'sonnet', 1), 'xhigh')
   assert.equal(tiers.effortFor(routing, 'sonnet', 9), 'xhigh')
   assert.equal(tiers.effortFor(routing, 'sonnet', 2, { conserve: true }), 'high')
   assert.equal(tiers.effortFor(routing, 'opus', 0, { conserve: true }), 'high')
@@ -1107,18 +1108,18 @@ test('the effort ladder raises a retry before the task changes model', () => {
 
   let state = tiers.emptyState('s')
   const first = apply(state, routing, 'e1', 'implementer', report('implementer', 'sonnet', 'fail', '', 'cursor off by one'))
-  assert.ok(first.message.includes('Retry on sonnet (cc-tiers:implementer) at effort high'))
+  assert.ok(first.message.includes('Retry on sonnet (cc-tiers:implementer) at effort xhigh'))
   state = first.state
   const prompt = `${HEADER('users-pagination', 'sonnet', 'implementer')}Add pagination to GET /users.`
   const retry = tiers.checkDelegation(state, { subagent_type: 'cc-tiers:implementer', prompt, description: 'retry' }, routing)
   assert.equal(retry.deny, '')
-  assert.deepEqual(retry.input, { subagent_type: 'cc-tiers:implementer', prompt, description: 'retry', effort: 'high' })
-  assert.ok(retry.context.includes('cc-tiers set effort high'))
+  assert.deepEqual(retry.input, { subagent_type: 'cc-tiers:implementer', prompt, description: 'retry', effort: 'xhigh' })
+  assert.ok(retry.context.includes('cc-tiers set effort xhigh'))
   const asked = tiers.checkDelegation(state, { subagent_type: 'cc-tiers:implementer', prompt, effort: 'max' }, routing)
   assert.equal(asked.input.effort, 'xhigh')
   const lower = tiers.checkDelegation(state, { subagent_type: 'cc-tiers:implementer', prompt, effort: 'low' }, routing)
-  assert.equal(lower.input.effort, 'high')
-  assert.equal(tiers.checkDelegation(state, { subagent_type: 'cc-tiers:implementer', prompt, effort: 'high' }, routing).input, null)
+  assert.equal(lower.input.effort, 'xhigh')
+  assert.equal(tiers.checkDelegation(state, { subagent_type: 'cc-tiers:implementer', prompt, effort: 'xhigh' }, routing).input, null)
 
   const fresh = tiers.checkDelegation(tiers.emptyState('s'), { subagent_type: 'cc-tiers:implementer', prompt }, routing)
   assert.equal(fresh.input, null)
@@ -1127,7 +1128,7 @@ test('the effort ladder raises a retry before the task changes model', () => {
     { subagent_type: 'cc-tiers:implementer', prompt: `${HEADER('login', 'sonnet', 'implementer')}Add OAuth login.` },
     routing,
   )
-  assert.equal(risky.input.effort, 'high')
+  assert.equal(risky.input.effort, 'xhigh')
   assert.ok(risky.context.includes('review keyword'))
 
   const second = apply(state, routing, 'e2', 'implementer', report('implementer', 'sonnet', 'fail', '', 'still wrong'))
@@ -1159,7 +1160,7 @@ test('the effort ladder can be turned off or replaced by the project', () => {
   assert.ok(project.notes.some((note) => note.includes('effort.haiku')))
   assert.equal(tiers.effortFor(project, 'sonnet', 1, { conserve: true }), 'high')
   const text = tiers.formatSessionContext(defaultRouting(), 'not present', { budget: { conserve: true, hits: ['5h 90%'] } })
-  assert.ok(text.includes('Effort ladder: on (haiku low -> medium, sonnet medium -> high -> xhigh, opus high -> xhigh)'))
+  assert.ok(text.includes('Effort ladder: on (haiku low -> medium, sonnet high -> xhigh, opus high -> xhigh)'))
   assert.ok(text.includes('effort stops at high'))
   assert.ok(text.includes('Classifier: haiku'))
 })
@@ -1268,7 +1269,7 @@ test('the hooks set effort on the call and add the light path on prompt submit',
     assert.equal(proc.status, 0, proc.stderr)
     const output = JSON.parse(proc.stdout).hookSpecificOutput
     assert.equal(output.permissionDecision, 'allow')
-    assert.deepEqual(output.updatedInput, { subagent_type: 'cc-tiers:implementer', prompt, effort: 'high' })
+    assert.deepEqual(output.updatedInput, { subagent_type: 'cc-tiers:implementer', prompt, effort: 'xhigh' })
 
     const submit = runHook('stop.mjs', { session_id: 'sess-2', hook_event_name: 'UserPromptSubmit', prompt: 'fix a typo in README' }, env)
     assert.ok(JSON.parse(submit.stdout).hookSpecificOutput.additionalContext.includes('cc-tiers light path'))
@@ -1302,7 +1303,7 @@ test('cost follows the model price table, and the Opus comparison uses current O
 test('task cost is recorded without cc-cost, and the log feeds the report', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-'))
   try {
-    const env = hookEnv(dir, { CC_TIERS_CC_COST: '0' })
+    const env = hookEnv(dir, { CC_TIERS_CC_COST: '0', CLAUDE_PLUGIN_OPTION_SHOW_COST: 'on' })
     const prompt = `${HEADER('users-pagination', 'sonnet', 'implementer')}Add pagination.`
     const failed = event('c1', 'implementer', report('implementer', 'sonnet', 'fail'), prompt)
     failed.tool_response.usage = { input_tokens: 1000, output_tokens: 500, model: 'claude-sonnet-5-5' }
@@ -1324,12 +1325,12 @@ test('task cost is recorded without cc-cost, and the log feeds the report', asyn
     assert.equal(state.log['users-pagination'].attempts, 2)
     assert.equal(state.log['users-pagination'].failures, 1)
     assert.equal(state.log['users-pagination'].status, 'done')
-    assert.equal(state.log['users-pagination'].effort.sonnet, 'high')
+    assert.equal(state.log['users-pagination'].effort.sonnet, 'xhigh')
     assert.ok(Math.abs(state.cost['users-pagination'].sonnet - 0.014) < 1e-9)
 
     const proc = spawnSync(process.execPath, [path.join(ROOT, 'hooks', 'report.mjs'), path.join(dir, 'data')], { encoding: 'utf8' })
     assert.equal(proc.status, 0, proc.stderr)
-    assert.ok(proc.stdout.includes('| users-pagination | sonnet | 2 | 0 | sonnet high | — | done on sonnet | $0.014 |'))
+    assert.ok(proc.stdout.includes('| users-pagination | sonnet | 2 | 0 | sonnet xhigh | — | done on sonnet | $0.014 |'))
     assert.ok(proc.stdout.includes('% less'))
     const empty = spawnSync(process.execPath, [path.join(ROOT, 'hooks', 'report.mjs'), path.join(dir, 'nothing')], { encoding: 'utf8' })
     assert.equal(empty.stdout, 'cc-tiers has no session data yet.\n')
@@ -1507,4 +1508,12 @@ test('the benchmark counts escalations from hook output only, and splits results
   assert.equal(routing('trivial', steps.slice(1), 'opus').ok, false)
   assert.equal(routing('hard', steps, 'opus').ok, false)
   assert.equal(routing('large', steps.slice(0, 1), 'opus').ok, false)
+})
+
+test('quality defaults: risky review, cost hidden, Sonnet starts at high', () => {
+  const routing = tiers.mergeRouting(tiers.loadJson(path.join(ROOT, 'config/routing.default.json')))
+  assert.equal(routing.reviewPolicy, 'risky')
+  assert.equal(routing.showCost, false)
+  assert.deepEqual(routing.effort.ladders.sonnet, ['high', 'xhigh'])
+  assert.equal(tiers.decideTier('Add pagination to GET /users', routing).effort, 'high')
 })

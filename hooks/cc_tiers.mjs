@@ -51,9 +51,9 @@ export const REVIEW_POLICIES = new Set(['cheap', 'risky', 'always', 'never'])
 export const CLASSIFIERS = new Set(['haiku', 'local'])
 export const LIGHT_MODES = new Set(['inline', 'delegate', 'off'])
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
-export const DEFAULT_LADDERS = { haiku: ['low', 'medium'], sonnet: ['medium', 'high', 'xhigh'], opus: ['high', 'xhigh'] }
+export const DEFAULT_LADDERS = { haiku: ['low', 'medium'], sonnet: ['high', 'xhigh'], opus: ['high', 'xhigh'] }
 /** The effort each agent file pins, so the hook only rewrites a call that needs a different level. */
-export const AGENT_EFFORT = { worker: 'low', implementer: 'medium', architect: 'high', planner: 'high', checker: 'medium', reviewer: 'high' }
+export const AGENT_EFFORT = { worker: 'low', implementer: 'high', architect: 'high', planner: 'high', checker: 'medium', reviewer: 'high' }
 export const COMPLEX_THRESHOLD = 2
 export const OPUS_CEILING = 'the Opus ceiling (the orchestrator implements it; from cc-tiers:dispatcher, delegate to cc-tiers:architect)'
 export const DEFAULT_MAX_ATTEMPTS = 2

@@ -1,11 +1,12 @@
 {
   "maxAttempts": 2,
-  "reviewPolicy": "cheap",
+  "reviewPolicy": "risky",
   "learn": true,
   "budget5h": 80,
   "budget7d": 80,
   "classifier": "haiku",
   "lightPath": true,
+  "showCost": false,
   "effort": {
     "on": true,
     "haiku": [
@@ -13,7 +14,6 @@
       "medium"
     ],
     "sonnet": [
-      "medium",
       "high",
       "xhigh"
     ],

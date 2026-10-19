@@ -2,7 +2,7 @@
 name: implementer
 description: "Implements one normal task on Sonnet: a feature, bug fix, test, or local refactor with a clear result. Use for the default tier, and for a Haiku task that already failed its attempts."
 model: sonnet
-effort: medium
+effort: high
 color: blue
 maxTurns: 40
 disallowedTools: Agent

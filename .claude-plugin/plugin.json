@@ -22,8 +22,8 @@
     "review_policy": {
       "type": "string",
       "title": "Review policy",
-      "description": "cheap: Sonnet reviews Haiku output, and Opus reviews only risky or non-trivial work. risky: Opus reviews non-trivial work and skips a trivial Haiku pass. always: review every pass, Haiku on Sonnet and the rest on Opus. never: no review pass.",
-      "default": "cheap",
+      "description": "risky (default): Opus reviews risky or non-trivial work and skips a trivial Haiku pass. cheap: Sonnet reviews Haiku output, and Opus reviews only risky or non-trivial work. always: review every pass, Haiku on Sonnet and the rest on Opus. never: no review pass.",
+      "default": "risky",
       "options": ["cheap", "risky", "always", "never"]
     },
     "learn": {
@@ -64,7 +64,7 @@
     "effort_ladder": {
       "type": "string",
       "title": "Effort ladder",
-      "description": "on: a retry at the same tier runs one effort level higher before the task changes model (Haiku low to medium, Sonnet medium to high to xhigh, Opus high to xhigh), and cc-tiers sets that effort on the Agent call. off: each agent keeps the effort its file pins.",
+      "description": "on: a retry at the same tier runs one effort level higher before the task changes model (Haiku low to medium, Sonnet high to xhigh, Opus high to xhigh), and cc-tiers sets that effort on the Agent call. off: each agent keeps the effort its file pins.",
       "default": "on",
       "options": ["on", "off"]
     },
@@ -78,8 +78,8 @@
     "show_cost": {
       "type": "string",
       "title": "Show cost",
-      "description": "on: each finished task and the session summary show an estimated cost at Anthropic API list prices, and what the same tokens would cost at Opus rates. Subscription plans are not billed this way; read it as a comparison. off: no cost lines.",
-      "default": "on",
+      "description": "on: each finished task and the session summary show an estimated cost at Anthropic API list prices, and what the same tokens would cost at Opus rates. Subscription plans are not billed this way; read it as a comparison. off (default): no cost lines.",
+      "default": "off",
       "options": ["on", "off"]
     },
     "light_path": {
