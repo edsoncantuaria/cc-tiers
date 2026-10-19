@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.6.0 - 2026-10-19
+
+### Added
+
+- `cc-tiers:researcher` (Sonnet, read-only): before code is written it finds the installed version of each library, that version's docs, how the repo already uses the API, and prior art, and returns a brief with a source per fact.
+- Research gate in the PreToolUse hook. A call to `cc-tiers:implementer` or `cc-tiers:architect` is refused unless the researcher reported pass for that task and the prompt says `CC_TIERS_RESEARCH: done`, or the prompt says `CC_TIERS_RESEARCH: none - <reason>`. The brief rides in the prompt between `CC_TIERS_RESEARCH_BEGIN` and `CC_TIERS_RESEARCH_END`, `CC_TIERS_COVERS` lets one research serve several tasks, and a research is not an attempt. The worker is exempt; the Opus ceiling and the dispatcher's own task are researched by prompt only.
+- `research` option (`on` / `off`, default `on`).
+- Quality metrics in the benchmark: FAIL_TO_PASS and PASS_TO_PASS (SWE-bench), pass@1 (HumanEval), pass^k (tau-bench), regressions, and fresh tokens per resolved task. `changesTests` is recorded per task, and session mode stores usage per step.
+- Calculator suite: `bench/tasks-calc.json`, `bench/fixture-calc/`, `bench/checks-calc/`, and `bench/solutions-calc/calc.js`, one task meant to be repeated (`npm run bench -- --tasks-file bench/tasks-calc.json --repeat 3`).
+
+### Changed
+
+- Defaults favor quality, so a session behaves differently after updating: `review_policy` is `risky` (was `cheap`), `show_cost` is `off` (was `on`), and the Sonnet effort ladder is `high`, `xhigh` (was `medium`, `high`, `xhigh`); a risky Sonnet task starts at `xhigh`. The implementer's own effort is `high`.
+- The README tells the quality-first story for Pro and Max: Opus plans and reviews, Sonnet researches and builds, review runs in a fresh context, and cost is optional. Light mode is for when the usage window is tight.
+- The benchmark tables no longer show dollars. The 0.5 dollar table is withdrawn: its session-mode column summed session-cumulative cost, and the 0.5 pass rates used the old criterion (hidden check plus the model's own tests, no before-form PASS_TO_PASS), so they are not like-for-like with 0.6. The quality results are marked not measured yet.
+
 ## 0.5.1 - 2026-10-19
 
 ### Added

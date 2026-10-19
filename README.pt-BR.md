@@ -1,8 +1,8 @@
 # 🎚️ cc-tiers
 
-### O Opus planeja. O Sonnet constrói. O Haiku faz o miúdo.
+### O Opus planeja e revisa. O Sonnet constrói. A pesquisa vem primeiro.
 
-Um plugin do Claude Code que deixa cada tarefa no nível mais barato que dá conta dela e sobe de nível com as notas da falha junto.
+Um plugin do Claude Code para assinantes Pro e Max que querem respostas melhores, não mais baratas. Plano, pesquisa, implementação e revisão rodam cada um no seu contexto: o Opus planeja, o Sonnet pesquisa e depois constrói, e o Opus revisa o resultado sem ter visto como ele foi escrito. Quando uma tarefa falha, o nível seguinte recebe as notas da falha. O [benchmark](#-benchmark) mede qualidade com métricas padrão; tokens são o preço dessa qualidade, não o objetivo.
 
 [![Claude Code](https://img.shields.io/badge/Claude_Code-2.1.295%2B-d97757?style=for-the-badge&logo=anthropic&logoColor=white)](https://claude.com/claude-code)
 [![Plugin](https://img.shields.io/badge/tipo-plugin-8a63d2?style=for-the-badge)](#-instala%C3%A7%C3%A3o)
@@ -10,7 +10,7 @@ Um plugin do Claude Code que deixa cada tarefa no nível mais barato que dá con
 
 [English](README.md) · **Português**
 
-⚡ Haiku, Sonnet e Opus  •  🪜 mais effort antes de um modelo maior  •  🔁 duas falhas, depois sobe  •  💸 cc-cost quando ele está instalado
+🔬 pesquisa antes do código  •  🧐 revisão independente  •  🪜 mais effort antes de um modelo maior  •  🔁 duas falhas, depois sobe  •  📏 qualidade medida
 
 ---
 
@@ -39,11 +39,12 @@ claude --plugin-dir /caminho/para/cc-tiers
 | Nível | Agente | Modelo | Faz |
 | :-: | --- | --- | --- |
 | Plano | `cc-tiers:orchestrator` | Opus | Divide o pedido, delega e só implementa o teto |
+| Pesquisa | `cc-tiers:researcher` | Sonnet | Acha a versão instalada, a documentação dessa versão e o uso existente antes de o código ser escrito. Não edita |
 | Padrão | `cc-tiers:implementer` | Sonnet | Features, bugs, testes, refactors locais |
 | Miúdo | `cc-tiers:worker` | Haiku | Renomear, typos, formatação, buscas simples, edições de ~15 linhas |
 | Checagem | `cc-tiers:checker` | Sonnet | Uma passada nova sobre a saída do Haiku. Não edita |
 | Revisão | `cc-tiers:reviewer` | Opus | Uma passada nova sobre trabalho arriscado ou não trivial. Não edita |
-| Modo leve | `cc-tiers:dispatcher` | Sonnet | Agente de sessão opcional que encaminha no Sonnet e só chama o Opus quando precisa |
+| Modo leve | `cc-tiers:dispatcher` | Sonnet | Agente de sessão opcional para quando a janela está apertada: encaminha no Sonnet e só chama o Opus quando precisa |
 | Plano leve | `cc-tiers:planner` | Opus | Planeja um pedido com várias tarefas para o dispatcher. Não edita |
 | Teto leve | `cc-tiers:architect` | Opus | Implementa o teto para o dispatcher |
 
@@ -55,7 +56,8 @@ Os agentes fixam `model: haiku`, `sonnet` ou `opus`. O orquestrador não passa m
 flowchart LR
     A[Orquestrador Opus] --> B{Tarefa}
     B -- miúda --> C[Worker Haiku]
-    B -- normal --> D[Implementer Sonnet]
+    B -- normal --> R[Researcher Sonnet]
+    R -- briefing --> D[Implementer Sonnet]
     C -- falha duas vezes --> D
     D -- falha duas vezes --> E[Opus implementa]
     C -- passa --> H[Checker Sonnet]
@@ -65,6 +67,21 @@ flowchart LR
     H -- aprova --> G[Pronto]
     F -- aprova --> G
 ```
+
+---
+
+## 🔬 Pesquisa primeiro
+
+Código escrito de memória, com uma versão antiga da API em mente, falha de jeitos que o teste nem sempre pega. Antes de uma tarefa ir para o `cc-tiers:implementer` ou o `cc-tiers:architect`, o `cc-tiers:researcher` (Sonnet, só leitura) confere quatro coisas:
+
+- A versão em uso, lida primeiro no arquivo de lock e depois no manifesto.
+- A documentação dessa versão, vinda de `vendor/` ou `node_modules/` quando instalada, nunca a da última release por padrão.
+- Como o repositório já chama a API, como `arquivo:linha`.
+- Referências fora do repositório, só quando se aplicam.
+
+Ele devolve um briefing com a fonte de cada fato. O orquestrador cola o relatório inteiro, trailer incluído, no prompt de quem vai escrever, entre duas linhas que só têm `CC_TIERS_RESEARCH_BEGIN` e `CC_TIERS_RESEARCH_END`, e acrescenta `CC_TIERS_RESEARCH: done`. Uma tarefa que não toca biblioteca, framework nem API externa diz o motivo no lugar: `CC_TIERS_RESEARCH: none - <motivo>`. Um briefing pode servir a várias tarefas: o prompt do pesquisador leva `CC_TIERS_COVERS: <slug>, <slug>`, e um pass marca todos.
+
+O hook PreToolUse garante isso. Ele recusa a chamada ao implementer ou ao architect que não tem nem pesquisa concluída para aquela tarefa nem a linha `none`. Pesquisa não é tentativa, e uma pesquisa que falha não conta contra a tarefa. O worker fica de fora. O teto Opus e a tarefa do próprio dispatcher são pesquisados por prompt, sem checagem do hook. `research: off` tira o passo e a checagem.
 
 ---
 
@@ -90,15 +107,15 @@ Os hooks garantem o que os prompts pedem:
 
 ## 🪜 Effort
 
-Cada nível também tem uma escada de effort. Uma nova tentativa no mesmo nível roda um nível de effort acima antes de a tarefa trocar de modelo, porque pensar mais no Sonnet sai mais barato que pular para o Opus:
+Cada nível também tem uma escada de effort. Uma nova tentativa no mesmo nível roda um nível de effort acima antes de a tarefa trocar de modelo, porque pensar mais no Sonnet muitas vezes resolve o que um modelo novo resolveria, e as notas ficam num contexto só:
 
 | Nível | Tentativa 1 | Tentativa 2 | Tentativa 3+ |
 | --- | --- | --- | --- |
 | Haiku | `low` | `medium` | `medium` |
-| Sonnet | `medium` | `high` | `xhigh` |
+| Sonnet | `high` | `xhigh` | `xhigh` |
 | Opus (`cc-tiers:architect`) | `high` | `xhigh` | `xhigh` |
 
-O hook PreToolUse define o `effort` na chamada Agent (o `effort` por chamada do Claude Code, 2.1.292+), então o orquestrador não tem como esquecer. Ele pode pedir um nível mais alto, nunca um mais baixo, e nunca acima do topo da escada. Uma tarefa do Sonnet que bate numa palavra-chave de revisão começa em `high`. Enquanto o orçamento está economizando, o effort para em `high`. Quando o orquestrador Opus implementa o teto ele mesmo, ele mantém o effort da própria sessão. `CLAUDE_CODE_EFFORT_LEVEL`, quando definido, ganha de tudo isso.
+O hook PreToolUse define o `effort` na chamada Agent (o `effort` por chamada do Claude Code, 2.1.292+), então o orquestrador não tem como esquecer. Ele pode pedir um nível mais alto, nunca um mais baixo, e nunca acima do topo da escada. Uma tarefa arriscada do Sonnet, que bate numa palavra-chave de revisão, começa em `xhigh`. Enquanto o orçamento está economizando, o effort para em `high`. Quando o orquestrador Opus implementa o teto ele mesmo, ele mantém o effort da própria sessão. `CLAUDE_CODE_EFFORT_LEVEL`, quando definido, ganha de tudo isso.
 
 `effort_ladder: off` deixa cada agente no effort que o arquivo dele fixa. Um projeto pode trocar uma escada em `.claude/cc-tiers.json` com `effort.haiku`, `effort.sonnet`, `effort.opus` e `effort.conserveCap`.
 
@@ -116,7 +133,7 @@ As listas de palavras-chave são um primeiro palpite. Duas checagens ficam atrá
 
 ## 🪶 Modo leve
 
-O orquestrador Opus lê todo pedido, até uma correção de typo, e todo subagente começa num contexto novo. O [benchmark](#-benchmark) mostrou que, numa tarefa pequena, esse custo fixo sai mais caro que a tarefa. Duas coisas cortam isso:
+Plano, pesquisa e revisão em contextos separados gastam mais da sua janela que uma thread só. O modo leve é para quando a janela está apertada. O orquestrador Opus lê todo pedido, até uma correção de typo, e todo subagente começa num contexto novo, então numa tarefa pequena esse custo fixo pode sair mais caro que a tarefa. Duas coisas cortam isso:
 
 - **Caminho leve** (`light_path: inline`, o padrão). Quando um pedido é uma tarefa miúda só, o hook UserPromptSubmit diz ao agente da sessão para fazer ele mesmo: sem plano, sem worker, sem checker. `delegate` manda para o worker numa chamada (o comportamento da 0.4), e `off` planeja todo pedido.
 - **Modo leve**, o agente de sessão `cc-tiers:dispatcher` no Sonnet. Ele faz sozinho uma tarefa comum, marcando a tentativa com um trailer `CC_TIERS_ROLE: dispatcher` que os hooks contam, então duas falhas ainda levam a tarefa para o Opus. Ele só chama o Opus para três coisas: `cc-tiers:planner` para um pedido com mais de uma tarefa ou uma decisão de design, `cc-tiers:architect` para uma tarefa que esgotou as tentativas no Sonnet, e `cc-tiers:reviewer` para trabalho arriscado.
@@ -127,19 +144,19 @@ Ligue o modo leve numa sessão com `claude --agent cc-tiers:dispatcher`, ou de v
 
 ## 💸 Gasto e custo
 
-Quando o [cc-cost](https://github.com/edsoncantuaria/cc-cost) está instalado, o resumo da sessão e cada tarefa terminada reportam **tokens novos por nível de modelo**. Tokens novos são entrada + escrita de cache + saída. Leituras de cache ficam de fora, a mesma regra do cc-cost. Os tokens de um subagente vêm do resultado do Agent, ou do próprio transcript dele quando rodou em background, e vão para o slug `CC_TIERS_TASK`. A mensagem do orquestrador que delega uma tarefa conta para essa tarefa, assim como os turnos dele dentro de uma tentativa no teto. Os outros turnos aparecem como `(orchestration)`. O hook lê o transcript da sessão de forma incremental, de onde o último hook parou, então os totais só crescem e sessões longas continuam baratas.
+Isto é opcional. Qualidade é o ponto do cc-tiers; esta seção só diz quanto ele gastou. Quando o [cc-cost](https://github.com/edsoncantuaria/cc-cost) está instalado, o resumo da sessão e cada tarefa terminada reportam **tokens novos por nível de modelo**. Tokens novos são entrada + escrita de cache + saída. Leituras de cache ficam de fora, a mesma regra do cc-cost. Os tokens de um subagente vêm do resultado do Agent, ou do próprio transcript dele quando rodou em background, e vão para o slug `CC_TIERS_TASK`. A mensagem do orquestrador que delega uma tarefa conta para essa tarefa, assim como os turnos dele dentro de uma tentativa no teto. Os outros turnos aparecem como `(orchestration)`. O hook lê o transcript da sessão de forma incremental, de onde o último hook parou, então os totais só crescem e sessões longas continuam baratas.
 
 As janelas de 5h e 7d usam os tipos do cc-cost, `five_hour` e `seven_day`. O hook lê esses valores do payload do hook quando o Claude Code os inclui, do transcript à medida que é lido, e de `limits.json` ou `store.json` no diretório de dados do cc-cost (`~/.claude/plugins/data/cc-cost/`). O total do dia aparece quando esse diretório tem as chaves `novos:<dia>:<sessionId>` do cc-cost.
 
 Se o cc-cost não está instalado, essas linhas somem. Roteamento, retentativas e revisão continuam. Uma janela sem leitura não inventa porcentagem.
 
-O custo não precisa de outro plugin. Cada tarefa terminada ganha uma linha `cc-tiers cost`, uma estimativa a preço de lista da API da Anthropic tirada da tabela de preços em `config/routing.default.json`. Cada modelo é cobrado pelo próprio id (Opus 5.5 a $4/$20 por milhão, Sonnet 5.5 a $2/$10, Haiku 5.5 a $0,10/$0,50, modelos antigos aos preços deles), com leitura de cache no preço do modelo e escrita de cache a 1,25x a entrada, ou 2x no cache de 1 hora. Ao lado vem o custo dos mesmos tokens no preço do Opus, para você ver quanto a divisão em níveis economizou. Uma assinatura não é cobrada assim; leia como comparação. O `/cc-tiers:report` mostra a sessão inteira numa tabela: níveis, tentativas, escalonamentos, effort, revisão, status e custo por tarefa. `show_cost: off` esconde essas linhas.
+O custo não precisa de outro plugin. Cada tarefa terminada ganha uma linha `cc-tiers cost`, uma estimativa a preço de lista da API da Anthropic tirada da tabela de preços em `config/routing.default.json`. Cada modelo é cobrado pelo próprio id (Opus 5.5 a $4/$20 por milhão, Sonnet 5.5 a $2/$10, Haiku 5.5 a $0,10/$0,50, modelos antigos aos preços deles), com leitura de cache no preço do modelo e escrita de cache a 1,25x a entrada, ou 2x no cache de 1 hora. Ao lado vem o custo dos mesmos tokens no preço do Opus, para comparação. Uma assinatura não é cobrada assim. `show_cost` vem `off` por padrão; ponha `on` para ver essas linhas. O `/cc-tiers:report` mostra a sessão inteira numa tabela: níveis, tentativas, escalonamentos, effort, revisão, status e custo por tarefa.
 
 ---
 
 ## 🧭 Orçamento
 
-`budget_5h` e `budget_7d` valem 80 por padrão. Quando uma das janelas chega no limiar, a sessão diz `Budget routing: conserve`. Trabalho novo fica no Haiku ou no Sonnet. O Opus ainda planeja, ainda pega a tarefa que já esgotou as tentativas no Sonnet, e ainda revisa o que é crítico.
+O roteamento de orçamento protege a sua janela Pro/Max. `budget_5h` e `budget_7d` valem 80 por padrão. Quando uma das janelas chega no limiar, a sessão diz `Budget routing: conserve`. Trabalho novo fica no Haiku ou no Sonnet. O Opus ainda planeja, ainda pega a tarefa que já esgotou as tentativas no Sonnet, e ainda revisa o que é crítico.
 
 Uma janela cujo horário de reset já passou conta como 0, do mesmo jeito que o cc-cost desenha. Sem leitura ainda, o hook diz que o roteamento não economiza.
 
@@ -182,11 +199,12 @@ Dá também para pedir em linguagem comum. A skill `tiers` entra quando o pedido
 Você: "Renomeia `fetchUser` para `loadUser` em `api.ts` e adiciona paginação no `GET /users`."
 
 1. O orquestrador Opus divide em `rename-fetch-user` (Haiku) e `users-pagination` (Sonnet).
-2. O Haiku renomeia o símbolo e a checagem passa. A política é `cheap`, então o `cc-tiers:checker` no Sonnet lê o rename de um arquivo e aprova. O Opus não é chamado.
-3. O Sonnet adiciona a paginação com effort `medium`. O teste do cursor falha. É a falha 1, então o Sonnet tenta de novo em `high` com o traceback no prompt. Os testes passam. Trabalho comum do Sonnet não vai para o Opus.
-4. A rota é API pública, então o revisor Opus lê o diff e rejeita: o cursor não é validado. É a falha 2 no Sonnet.
-5. O limite é 2, então a tarefa sobe para o Opus com as duas notas — o traceback e a revisão. O Opus corrige a validação. O revisor aprova na passada seguinte.
-6. O orquestrador reporta os dois slugs, o nível que fechou cada um, quem revisou, e que a paginação escalou. Com o cc-cost instalado, cada slug também traz a linha de tokens novos.
+2. O Haiku renomeia o símbolo e a checagem passa. A política é `risky`, e um rename de um arquivo não é arriscado, então ele não ganha passe de revisão.
+3. `users-pagination` é uma tarefa normal, então o pesquisador roda primeiro. Ele lê o lock, acha a versão do framework em uso, abre a documentação dessa versão em `node_modules/` e cita como o `GET /orders` já pagina. O briefing entra no prompt do Sonnet.
+4. O Sonnet adiciona a paginação com effort `high`. O teste do cursor falha. É a falha 1, então o Sonnet tenta de novo em `xhigh` com o traceback no prompt. Os testes passam.
+5. A rota é API pública, então o revisor Opus lê o diff num contexto novo e rejeita: o cursor não é validado. É a falha 2 no Sonnet.
+6. O limite é 2, então a tarefa sobe para o Opus com as duas notas, o traceback e a revisão. O orquestrador pesquisa essa tentativa ele mesmo, corrige a validação, e o revisor aprova na passada seguinte.
+7. O orquestrador reporta os dois slugs, o nível que fechou cada um, quem revisou, e que a paginação escalou. Com `show_cost` em `on`, cada slug também traz a linha de custo.
 
 Um "adiciona paginação para users" depois, neste repositório, começa no Sonnet, porque o Haiku já falhou nesse tipo e `learn` está `on`.
 
@@ -199,7 +217,7 @@ Abra `/config` e ajuste as linhas do cc-tiers. Valem na sessão seguinte (o hook
 | Chave | Padrão | Significado |
 | --- | --- | --- |
 | `max_attempts` | `2` | Falhas permitidas num nível antes de subir. 1–5 |
-| `review_policy` | `cheap` | `cheap`, `risky`, `always` ou `never` |
+| `review_policy` | `risky` | `risky`, `cheap`, `always` ou `never` |
 | `learn` | `on` | Grava falhas do Haiku e manda tarefas parecidas para o Sonnet. `off` desliga |
 | `budget_5h` | `80` | Porcentagem da janela `five_hour` que começa a economizar. 1–100 |
 | `budget_7d` | `80` | Porcentagem da janela `seven_day` que começa a economizar. 1–100 |
@@ -208,9 +226,10 @@ Abra `/config` e ajuste as linhas do cc-tiers. Valem na sessão seguinte (o hook
 | `effort_ladder` | `on` | Sobe o effort numa nova tentativa antes de trocar de modelo. `off` mantém o effort de cada agente |
 | `classifier` | `haiku` | `haiku` adiciona a checagem do Haiku nas chamadas ao worker. `local` usa só palavras-chave e a pontuação de complexidade |
 | `light_path` | `inline` | Uma tarefa miúda: `inline` faz na sessão, `delegate` manda para o worker, `off` planeja |
-| `show_cost` | `on` | Mostra o custo estimado de cada tarefa e da sessão ao lado do preço do Opus. `off` esconde |
+| `show_cost` | `off` | `on` mostra o custo estimado de cada tarefa e da sessão ao lado do preço do Opus |
+| `research` | `on` | Exige um briefing do pesquisador, ou uma linha `none - <motivo>`, antes de o código ir para o implementer ou o architect. `off` tira o passo |
 
-`cheap` manda a saída do Haiku para o checker Sonnet e só manda revisão Opus para uma frase de revisão ou para o teto. `risky` é o comportamento da 0.1.0: o Opus revisa trabalho não trivial e pula um passe trivial do Haiku. `always` revisa todo passe (Haiku no Sonnet, o resto no Opus). `never` pula a revisão. Enquanto uma janela de orçamento está economizando, a revisão Opus fica para o trabalho crítico mesmo em `risky` ou `always`.
+`risky` é o padrão: o Opus revisa trabalho não trivial num contexto novo e pula um passe trivial do Haiku. `cheap` manda a saída do Haiku para o checker Sonnet e só manda revisão Opus para uma frase de revisão ou para o teto. `always` revisa todo passe (Haiku no Sonnet, o resto no Opus). `never` pula a revisão. Enquanto uma janela de orçamento está economizando, a revisão Opus fica para o trabalho crítico mesmo em `risky` ou `always`.
 
 O roteamento usa dois tipos de lista. **Frases** (`when`, `reviewWhen` e as opções `_extra`) casam quando a frase inteira aparece na tarefa. **Palavras-chave** (`haiku.keywords`, `opus.reviewKeywords`) casam no começo de uma palavra, sem diferenciar maiúsculas nem acentos: `migra` acha "migration" e "migração", `authent` acha "authentication" mas não "author". As palavras-chave embutidas cobrem renomear, typos, formatação e buscas para o Haiku, e auth, pagamentos, migrações, schemas, APIs públicas, segurança e concorrência para a revisão Opus, em inglês e português. Uma tarefa que parece miúda mas bate numa palavra-chave de revisão, ou soma 2 de complexidade (`sonnet.complexKeywords` é um dos sinais), começa no Sonnet.
 
@@ -230,37 +249,64 @@ Para trocar uma lista inteira, crie `.claude/cc-tiers.json` no projeto. A lista 
 }
 ```
 
-A ordem de escalonamento é fixa. As frases e palavras-chave de roteamento, o limite de tentativas, as escadas de effort, a política de revisão, o classificador, o aprendizado e os dois limiares de orçamento são os controles.
+A ordem de escalonamento é fixa. As frases e palavras-chave de roteamento, o limite de tentativas, as escadas de effort, a política de revisão, o gate de pesquisa, o classificador, o aprendizado e os dois limiares de orçamento são os controles.
 
 ---
 
 ## 📊 Benchmark
 
 > [!IMPORTANT]
-> **O que o cc-tiers entrega é roteamento, não uma conta menor em toda tarefa.** A sessão decide para onde vai cada parte do trabalho: Haiku para o trivial, Sonnet para o comum, Opus para o plano, o teto e a revisão arriscada. Uma falha sobe a tarefa um tier, com as notas junto. Essa decisão tem custo próprio (a thread que roteia e um contexto novo por subagente). Em tarefas pequenas esse custo é maior que o que os tiers mais baratos economizam, como mostram os números abaixo. Compensa quando o trabalho é grande, variado ou com chance de falhar num modelo barato. O benchmark mede esse custo; não mede o valor do roteamento.
+> **O benchmark mede qualidade primeiro.** Uma rodada gasta tokens, e o cc-tiers gasta mais que um modelo sozinho, porque plano, pesquisa, construção e revisão são contextos separados. A tabela mostra isso como o preço do que ele compra: tarefas que passam e continuam passando. Uma configuração é julgada pelas colunas de qualidade antes de ser julgada por tokens.
 
-`bench/` roda sete tarefas (3 triviais, 2 normais, 1 mista, 1 difícil) num pequeno projeto Node, cada uma corrigida por um teste oculto. Medido em 19/10/2026 com Claude Code 2.1.303 e cc-tiers 0.5.0, duas rodadas por tarefa, a preços de tabela da API. Todas as configurações passaram em todas as tarefas (112/112).
+O `bench/` corrige cada rodada com checks ocultos e reporta métricas que vêm de trabalhos publicados:
 
-| Configuração | Uma tarefa por sessão | As sete numa sessão | vs só Opus (sessão) |
-| --- | --: | --: | --: |
-| Só Opus | $0.105 / tarefa | $0.209 / tarefa | — |
-| Só Sonnet | $0.050 / tarefa | $0.096 / tarefa | **−54%** |
-| cc-tiers (orquestrador Opus) | $0.190 / tarefa | $0.487 / tarefa | **+133%** |
-| cc-tiers light (dispatcher Sonnet) | $0.053 / tarefa | $0.163 / tarefa | **−22%** |
+| Métrica | Significado | De onde vem |
+| --- | --- | --- |
+| `pass@1` | Parcela das tarefas que a primeira tentativa resolve | pass@k, HumanEval (Chen et al., 2021) |
+| `pass^k` | Parcela das tarefas resolvidas em todas as `k` repetições. Cai quando a configuração tem sorte, mas não é confiável. A tabela mostra como `(k=N)` | pass^k, τ-bench (Yao et al., 2024) |
+| FAIL_TO_PASS | O check oculto que falha na fixture intocada precisa passar depois da mudança | SWE-bench (Jimenez et al., 2024) |
+| PASS_TO_PASS | Os arquivos de teste que passavam antes do passo precisam continuar passando: cada um roda de novo na forma de antes, um arquivo por vez | SWE-bench (Jimenez et al., 2024) |
+| Resolvida | FAIL_TO_PASS passou e nenhum arquivo PASS_TO_PASS regrediu | SWE-bench |
+| Tokens por tarefa resolvida | Tokens novos (entrada + escrita de cache + saída) da rodada inteira divididos pelas tarefas resolvidas | cc-tiers |
 
-- **O modo light é o que economiza:** cerca de metade do custo do só Opus em tarefas avulsas e 22% a menos numa sessão de trabalho, com o Opus ainda disponível para planejar, escalar e revisar o que é arriscado.
-- **O orquestrador Opus padrão custa mais que o Opus puro** em tarefas desse tamanho: a thread principal em Opus paga por cada pedido, e cada subagente paga um contexto novo. Só compensa quando boa parte do trabalho é longa o bastante para rodar em Sonnet ou Haiku. No dia a dia, use o modo light (`claude --agent cc-tiers:dispatcher`).
-- Sonnet puro foi o mais barato e passou em tudo aqui; essas tarefas nunca precisaram escalar. O valor dos tiers é a rede de segurança em trabalho mais difícil, que esta fixture não exercita.
+Testes que o modelo escreveu não contam para resolvida; ficam no JSON bruto como `ownTests`. Cada tarefa também registra `changesTests`, se a rodada editou um arquivo de teste já existente.
 
-Dados brutos: `bench/results/oneshot-all-0.5.json` e `bench/results/session-all-0.5.json`. Para rodar de novo: `npm run bench` (adicione `-- --session` para uma sessão só); gasta tokens de verdade.
+**Três suítes.**
 
-**Suíte difícil, pronta mas ainda não medida.** `bench/tasks-hard.json` roda doze tarefas em `bench/fixture-hard/`, um serviço Node de 1.600 linhas com estado compartilhado, fusos horários e reservas assíncronas. Ela serve para testar a promessa de roteamento, não só o preço.
+- `bench/tasks.json`: sete tarefas pequenas (3 triviais, 2 normais, 1 mista, 1 difícil) em `bench/fixture/`.
+- `bench/tasks-hard.json`: doze tarefas em `bench/fixture-hard/`, um serviço Node de 1.600 linhas com estado compartilhado, fusos horários e reservas assíncronas. São 4 triviais, 3 normais, 3 difíceis (uma condição de corrida que só aparece com requisições concorrentes, uma correção de path traversal cuja versão ingênua passa nos testes visíveis, uma refatoração multi-tenant que precisa manter a API pública) e 2 pedidos grandes, cada um misturando uma mudança trivial, uma normal e uma difícil. Cada check oculto em `bench/checks-hard/` falha na fixture intocada e passa com a correção de referência em `bench/solutions-hard/`.
+- `bench/tasks-calc.json`: uma tarefa normal em `bench/fixture-calc/`, um avaliador de expressões (`src/calc.js`) com precedência, menos unário e casos de erro. O check oculto fica em `bench/checks-calc/` e a referência em `bench/solutions-calc/calc.js`. É a vitrine: uma tarefa, repetida.
 
-- **Tarefas:** 4 triviais, 3 normais, 3 difíceis (uma condição de corrida que só aparece com requisições concorrentes, uma correção de path traversal cuja versão ingênua passa nos testes visíveis, uma refatoração multi-tenant que precisa manter a API pública) e 2 pedidos grandes, cada um misturando uma mudança trivial, uma normal e uma difícil.
-- **Checks:** cada check oculto em `bench/checks-hard/` falha na fixture intocada e passa com a correção de referência em `bench/solutions-hard/`; o `npm test` confere os dois lados.
-- **O que o runner registra:** se passou, custo por modelo e subagentes por tipo, em toda configuração. No cc-tiers ele também lê, do transcript da sessão, as escalações que os hooks anunciaram e se cada tarefa foi roteada como este README diz (trivial no Haiku ou inline, normal escrita no Sonnet, difícil nunca no Haiku, grande dividida entre tiers). Ele carrega só as configurações de projeto e locais, então seu CLAUDE.md, agentes e plugins ficam fora da medição.
-- **Calibração só com Sonnet** (`bench/results/calibration-sonnet-hard.json`): falhou no path traversal, porque ainda servia um arquivo por um symlink. Rodou a tarefa de corrida três vezes. As duas rodadas guardadas para reavaliação falham no check final, porque as duas correções enfileiram toda requisição atrás de um único lock. A primeira passou numa versão anterior do check e não foi guardada. A refatoração ele resolveu nas três rodadas; as duas avaliadas com o check final passaram.
-- **Ainda não rodado:** a rodada completa (4 configurações × 3 repetições) está estimada em cerca de US$ 65 a preço de tabela. As tarefas grandes e o check final de corrida só foram testados contra as correções de referência e as correções salvas do Sonnet, nunca contra um modelo ao vivo. Para rodar: `node bench/run.mjs --tasks-file bench/tasks-hard.json --session --repeat 3 --timeout 30`.
+O `npm test` confere os dois lados de cada check: falha na fixture e passa com a referência.
+
+**Como rodar.**
+
+```bash
+npm run bench -- --tasks-file bench/tasks-calc.json --repeat 3
+node bench/run.mjs --tasks-file bench/tasks-hard.json --session --repeat 3 --timeout 30
+```
+
+> [!WARNING]
+> Uma rodada usa o seu login real do Claude Code, então no Pro ou no Max ela gasta a sua janela de uso. Uma rodada com `--repeat 3` de quatro configurações são muitas sessões. Comece pela suíte da calculadora. `npm run bench:table -- <arquivos de resultado>` imprime a tabela a partir de resultados salvos.
+
+O runner carrega só as configurações de projeto e locais, então seu CLAUDE.md, agentes e plugins ficam fora da medição. No modo sessão ele guarda o uso por passo, porque o Claude Code reporta o uso acumulado da sessão no `--resume`. No cc-tiers ele também lê, do transcript da sessão, as escalações que os hooks anunciaram e se cada tarefa foi roteada como este README diz.
+
+**Resultados.** As colunas são `Configuração`, `pass@1`, `pass^k`, `Resolvidas`, `Regressões`, `Tokens por tarefa resolvida` e `Δ tokens vs só Opus`.
+
+| Configuração | pass@1 | pass^k | Resolvidas | Regressões | Tokens por tarefa resolvida | Δ tokens vs só Opus |
+| --- | --: | --: | --: | --: | --: | --: |
+| Só Opus | ainda não medido | ainda não medido | ainda não medido | ainda não medido | ainda não medido | — |
+| Só Sonnet | ainda não medido | ainda não medido | ainda não medido | ainda não medido | ainda não medido | ainda não medido |
+| cc-tiers (orquestrador Opus) | ainda não medido | ainda não medido | ainda não medido | ainda não medido | ainda não medido | ainda não medido |
+| cc-tiers light (dispatcher Sonnet) | ainda não medido | ainda não medido | ainda não medido | ainda não medido | ainda não medido | ainda não medido |
+
+**O que os dados da 0.5 podem e não podem dizer.**
+
+- Os arquivos de resultado da 0.5 (`bench/results/*-0.5.json`) foram corrigidos com o critério antigo: o check oculto mais os testes do próprio modelo, sem PASS_TO_PASS na forma de antes. As taxas de aprovação deles não são comparáveis com as da 0.6.
+- A coluna de dólares do modo sessão da 0.5 somava o custo acumulado da sessão, então superestimava o custo por tarefa. Essa tabela foi retirada deste README.
+- No modo sessão, um arquivo de teste que o modelo adicionou num passo anterior pode contar como regressão num passo posterior.
+- Calibração do Sonnet na suíte difícil (`bench/results/calibration-sonnet-hard.json`), corrigida com o critério antigo: o Sonnet sozinho falhou no path traversal, porque ainda servia um arquivo por um symlink. Rodou a tarefa de corrida três vezes; as duas rodadas guardadas para reavaliação falham no check final, porque as duas correções enfileiram toda requisição atrás de um único lock. A primeira passou numa versão anterior do check e não foi guardada. A refatoração ele resolveu nas três rodadas; as duas avaliadas com o check final passaram.
+- As tarefas grandes e o check final de corrida só foram testados contra as correções de referência e as correções salvas do Sonnet, nunca contra um modelo ao vivo.
 
 ---
 
@@ -289,7 +335,7 @@ claude --plugin-dir .
 | `.claude-plugin/plugin.json` | Nome, metadados e os controles do `/config` |
 | `.claude-plugin/marketplace.json` | Entrada do marketplace, source `./` |
 | `settings.json` | Agente da sessão: `orchestrator` |
-| `agents/*.md` | Orquestrador, revisor, planner e architect Opus, implementer, checker e dispatcher Sonnet, worker Haiku |
+| `agents/*.md` | Orquestrador, revisor, planner e architect Opus, researcher, implementer, checker e dispatcher Sonnet, worker Haiku |
 | `skills/tiers/SKILL.md` | `/cc-tiers:tiers` |
 | `commands/route.md` | `/cc-tiers:route` |
 | `commands/escalate.md` | `/cc-tiers:escalate` |
@@ -299,7 +345,7 @@ claude --plugin-dir .
 | `hooks/route.mjs` | A heurística por trás do `/cc-tiers:route` |
 | `hooks/report.mjs` | A tabela por trás do `/cc-tiers:report` |
 | `commands/report.md` | `/cc-tiers:report` |
-| `bench/` | O benchmark: projeto de teste, tarefas, checagens ocultas, executor e resultados |
+| `bench/` | O benchmark: três fixtures (com a suíte da calculadora), tarefas, checagens ocultas, executor e resultados |
 | `.github/workflows/ci.yml` | Testes no Linux, macOS e Windows, e `claude plugin validate` |
 | `CHANGELOG.md` | Notas da versão |
 
@@ -311,4 +357,4 @@ Sem telemetria, e os hooks de comando não fazem chamadas de rede. Com `classifi
 
 Feito com ☕ por [@edsoncantuaria](https://github.com/edsoncantuaria) · [MIT](LICENSE)
 
-Se ele tirou o Opus dos typos, deixa uma ⭐
+Se ele te deu respostas melhores, deixa uma ⭐
