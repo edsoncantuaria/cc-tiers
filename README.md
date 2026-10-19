@@ -116,10 +116,10 @@ The keyword lists are a first guess. Two checks stand behind them before a task 
 
 ## 🪶 Light mode
 
-The Opus orchestrator reads every request, even a typo fix. Two things cut that cost:
+The Opus orchestrator reads every request, even a typo fix, and every subagent starts a fresh context. The [benchmark](#-benchmark) showed that for a small task that overhead costs more than the task. Two things cut it:
 
-- **Light path** (`light_path: on`, the default). When a request is one trivial task, the UserPromptSubmit hook tells the orchestrator so: no written plan, one delegation, and no checker pass for a lookup that changes no files. Opus still reads the request, but writes much less.
-- **Light mode**, the `cc-tiers:dispatcher` session agent on Sonnet. It routes and delegates like the orchestrator, and calls Opus only for three things: `cc-tiers:planner` for a request with more than one task or a design decision, `cc-tiers:architect` for a task that used its attempts on Sonnet, and `cc-tiers:reviewer` for risky work. A single ordinary task never touches Opus.
+- **Light path** (`light_path: inline`, the default). When a request is one trivial task, the UserPromptSubmit hook tells the session agent to do it itself: no plan, no worker, no checker. `delegate` sends it to the worker in one call instead (the 0.4 behavior), and `off` plans every request.
+- **Light mode**, the `cc-tiers:dispatcher` session agent on Sonnet. It does one ordinary task itself, marking the attempt with a `CC_TIERS_ROLE: dispatcher` trailer that the hooks count, so two failures still move it to Opus. It calls Opus only for three things: `cc-tiers:planner` for a request with more than one task or a design decision, `cc-tiers:architect` for a task that used its attempts on Sonnet, and `cc-tiers:reviewer` for risky work.
 
 Turn on light mode for one session with `claude --agent cc-tiers:dispatcher`, or for good with `"agent": "cc-tiers:dispatcher"` in `~/.claude/settings.json`. The planner starts in a fresh context, so for a long conversation that keeps building on earlier turns, the orchestrator is the better fit.
 
@@ -207,7 +207,7 @@ Open `/config` and set the cc-tiers rows. They apply on the next session (the Se
 | `risky_extra` | empty | Comma-separated phrases added to the Opus review list |
 | `effort_ladder` | `on` | Raise effort on a retry before changing model. `off` keeps each agent's own effort |
 | `classifier` | `haiku` | `haiku` adds the Haiku check on worker calls. `local` uses only keywords and the complexity score |
-| `light_path` | `on` | Tell the orchestrator when a request is one trivial task. `off` plans every request |
+| `light_path` | `inline` | One trivial task: `inline` does it in the session, `delegate` sends it to the worker, `off` plans it |
 | `show_cost` | `on` | Show the estimated cost of each task and the session next to Opus rates. `off` hides it |
 
 `cheap` sends Haiku output to the Sonnet checker and sends Opus review only for a review phrase or the ceiling. `risky` is the 0.1.0 behavior: Opus reviews non-trivial work and skips a trivial Haiku pass. `always` reviews every pass (Haiku on Sonnet, the rest on Opus). `never` skips review. While a budget window is conserving, Opus review is reserved for critical work even under `risky` or `always`.

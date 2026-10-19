@@ -116,10 +116,10 @@ As listas de palavras-chave são um primeiro palpite. Duas checagens ficam atrá
 
 ## 🪶 Modo leve
 
-O orquestrador Opus lê todo pedido, até uma correção de typo. Duas coisas cortam esse custo:
+O orquestrador Opus lê todo pedido, até uma correção de typo, e todo subagente começa num contexto novo. O [benchmark](#-benchmark) mostrou que, numa tarefa pequena, esse custo fixo sai mais caro que a tarefa. Duas coisas cortam isso:
 
-- **Caminho leve** (`light_path: on`, o padrão). Quando um pedido é uma tarefa miúda só, o hook UserPromptSubmit avisa o orquestrador: sem plano escrito, uma delegação, e sem checker para uma busca que não muda arquivo. O Opus ainda lê o pedido, mas escreve bem menos.
-- **Modo leve**, o agente de sessão `cc-tiers:dispatcher` no Sonnet. Ele encaminha e delega como o orquestrador e só chama o Opus para três coisas: `cc-tiers:planner` para um pedido com mais de uma tarefa ou uma decisão de design, `cc-tiers:architect` para uma tarefa que esgotou as tentativas no Sonnet, e `cc-tiers:reviewer` para trabalho arriscado. Uma tarefa comum sozinha nunca encosta no Opus.
+- **Caminho leve** (`light_path: inline`, o padrão). Quando um pedido é uma tarefa miúda só, o hook UserPromptSubmit diz ao agente da sessão para fazer ele mesmo: sem plano, sem worker, sem checker. `delegate` manda para o worker numa chamada (o comportamento da 0.4), e `off` planeja todo pedido.
+- **Modo leve**, o agente de sessão `cc-tiers:dispatcher` no Sonnet. Ele faz sozinho uma tarefa comum, marcando a tentativa com um trailer `CC_TIERS_ROLE: dispatcher` que os hooks contam, então duas falhas ainda levam a tarefa para o Opus. Ele só chama o Opus para três coisas: `cc-tiers:planner` para um pedido com mais de uma tarefa ou uma decisão de design, `cc-tiers:architect` para uma tarefa que esgotou as tentativas no Sonnet, e `cc-tiers:reviewer` para trabalho arriscado.
 
 Ligue o modo leve numa sessão com `claude --agent cc-tiers:dispatcher`, ou de vez com `"agent": "cc-tiers:dispatcher"` em `~/.claude/settings.json`. O planner começa num contexto novo, então para uma conversa longa que vai construindo em cima dos turnos anteriores, o orquestrador é a escolha melhor.
 
@@ -207,7 +207,7 @@ Abra `/config` e ajuste as linhas do cc-tiers. Valem na sessão seguinte (o hook
 | `risky_extra` | vazio | Frases separadas por vírgula que entram na revisão do Opus |
 | `effort_ladder` | `on` | Sobe o effort numa nova tentativa antes de trocar de modelo. `off` mantém o effort de cada agente |
 | `classifier` | `haiku` | `haiku` adiciona a checagem do Haiku nas chamadas ao worker. `local` usa só palavras-chave e a pontuação de complexidade |
-| `light_path` | `on` | Avisa o orquestrador quando um pedido é uma tarefa miúda só. `off` planeja todo pedido |
+| `light_path` | `inline` | Uma tarefa miúda: `inline` faz na sessão, `delegate` manda para o worker, `off` planeja |
 | `show_cost` | `on` | Mostra o custo estimado de cada tarefa e da sessão ao lado do preço do Opus. `off` esconde |
 
 `cheap` manda a saída do Haiku para o checker Sonnet e só manda revisão Opus para uma frase de revisão ou para o teto. `risky` é o comportamento da 0.1.0: o Opus revisa trabalho não trivial e pula um passe trivial do Haiku. `always` revisa todo passe (Haiku no Sonnet, o resto no Opus). `never` pula a revisão. Enquanto uma janela de orçamento está economizando, a revisão Opus fica para o trabalho crítico mesmo em `risky` ou `always`.

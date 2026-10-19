@@ -1385,3 +1385,39 @@ test('a dispatcher doing a task itself is counted from its trailer and escalates
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('the benchmark fixture is green, and every hidden check fails before the task is done', async () => {
+  const bench = path.join(ROOT, 'bench')
+  const tasks = JSON.parse(readFileSync(path.join(bench, 'tasks.json'), 'utf8'))
+  assert.equal(tasks[0].id, 'lookup', 'the lookup runs first in session mode, while the tree is clean')
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-fixture-'))
+  try {
+    const { cpSync } = await import('node:fs')
+    cpSync(path.join(bench, 'fixture'), dir, { recursive: true })
+    const env = { ...process.env }
+    delete env.NODE_TEST_CONTEXT
+    const tests = readdirSync(path.join(dir, 'test')).map((name) => path.join('test', name))
+    assert.equal(spawnSync(process.execPath, ['--test', ...tests], { cwd: dir, encoding: 'utf8', env }).status, 0)
+    spawnSync('git', ['init', '-q'], { cwd: dir })
+    mkdirSync(path.join(dir, '.bench-check'))
+    for (const task of tasks) {
+      assert.ok(task.prompt && task.kind, task.id)
+      const check = path.join(bench, 'checks', `${task.id}.test.mjs`)
+      assert.ok(existsSync(check), task.id)
+      cpSync(check, path.join(dir, '.bench-check', `${task.id}.test.mjs`))
+      const proc = spawnSync(process.execPath, ['--test', `.bench-check/${task.id}.test.mjs`], { cwd: dir, encoding: 'utf8', env })
+      assert.notEqual(proc.status, 0, `${task.id} check passes on the untouched fixture`)
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+  const { table, label } = await import(pathToFileURL(path.join(bench, 'run.mjs')).href)
+  assert.equal(label('cc-tiers-light@0.5'), 'cc-tiers light (Sonnet dispatcher) 0.5')
+  const rows = [
+    { config: 'opus', task: 'typo', kind: 'trivial', pass: true, cost: 0.1, models: { 'claude-opus-5-5': 0.1 }, seconds: 5 },
+    { config: 'opus', task: 'typo', kind: 'trivial', pass: false, cost: 0.3, models: { 'claude-opus-5-5': 0.3 }, seconds: 9 },
+  ]
+  const text = table(rows)
+  assert.ok(text.includes('| Opus only | 1/2 | $0.200 | $0.400 | 9s | 100% |'))
+  assert.ok(text.includes('| `typo` (trivial) | 🟡 $0.200 |'))
+})

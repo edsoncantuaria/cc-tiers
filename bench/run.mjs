@@ -95,10 +95,12 @@ function check(dir, task, result) {
   const files = [`.bench-check/${task.id}.test.mjs`]
   const tests = spawnSync('git', ['ls-files', '--others', '--cached', '--exclude-standard', 'test'], { cwd: dir, encoding: 'utf8' })
   for (const file of tests.stdout.split('\n')) if (/\.test\.m?js$/.test(file)) files.push(file)
+  const env = { ...process.env, BENCH_RESULT: String(result || '') }
+  delete env.NODE_TEST_CONTEXT
   const proc = spawnSync(process.execPath, ['--test', ...files], {
     cwd: dir,
     encoding: 'utf8',
-    env: { ...process.env, BENCH_RESULT: String(result || '') },
+    env,
     timeout: 120000,
   })
   return { pass: proc.status === 0, output: `${proc.stdout}\n${proc.stderr}`.slice(-1500) }
@@ -155,7 +157,7 @@ function money(value) {
 export function table(results) {
   const configs = [...new Set(results.map((row) => row.config))]
   const lines = [
-    '| Configuration | Passed | Total cost | Cost per passed task | Median time | Opus share of cost |',
+    '| Configuration | Passed | Mean cost per task | Cost per passed task | Median time | Opus share of cost |',
     '| --- | --: | --: | --: | --: | --: |',
   ]
   for (const config of configs) {
@@ -166,7 +168,7 @@ export function table(results) {
     const times = rows.map((row) => row.seconds).sort((a, b) => a - b)
     const median = times[Math.floor(times.length / 2)] ?? 0
     lines.push(
-      `| ${label(config)} | ${passed}/${rows.length} | ${money(cost)} | ${passed ? money(cost / passed) : '—'} | ${median}s | ${cost ? Math.round((opus / cost) * 100) : 0}% |`,
+      `| ${label(config)} | ${passed}/${rows.length} | ${money(cost / rows.length)} | ${passed ? money(cost / passed) : '—'} | ${median}s | ${cost ? Math.round((opus / cost) * 100) : 0}% |`,
     )
   }
   lines.push('')
