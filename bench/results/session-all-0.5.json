@@ -1,0 +1,1522 @@
+{
+  "date": "2026-10-19T15:47:17.168Z",
+  "claudeCode": "2.1.303 (Claude Code)",
+  "plugin": "0.5.0",
+  "mode": "session",
+  "repeat": 2,
+  "configs": [
+    "opus",
+    "sonnet",
+    "cc-tiers",
+    "cc-tiers-light"
+  ],
+  "tasks": [
+    "lookup",
+    "typo",
+    "rename",
+    "bugfix",
+    "pagination",
+    "mixed",
+    "lru"
+  ],
+  "results": [
+    {
+      "config": "opus",
+      "task": "lookup",
+      "kind": "trivial",
+      "rep": 1,
+      "pass": true,
+      "cost": 0.06989540000000001,
+      "models": {
+        "claude-opus-5-5": 0.06989540000000001
+      },
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 6,
+          "output": 336,
+          "cacheRead": 44637,
+          "cacheWrite": 6778
+        }
+      },
+      "turns": 3,
+      "seconds": 7,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "opus",
+      "task": "typo",
+      "kind": "trivial",
+      "rep": 1,
+      "pass": true,
+      "cost": 0.08456280000000001,
+      "models": {
+        "claude-opus-5-5": 0.08456280000000001
+      },
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 10,
+          "output": 563,
+          "cacheRead": 79794,
+          "cacheWrite": 7163
+        }
+      },
+      "turns": 2,
+      "seconds": 5,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "opus",
+      "task": "rename",
+      "kind": "trivial",
+      "rep": 1,
+      "pass": true,
+      "cost": 0.11787680000000002,
+      "models": {
+        "claude-opus-5-5": 0.11787680000000002
+      },
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 16,
+          "output": 1187,
+          "cacheRead": 134204,
+          "cacheWrite": 8404
+        }
+      },
+      "turns": 3,
+      "seconds": 10,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "opus",
+      "task": "bugfix",
+      "kind": "normal",
+      "rep": 1,
+      "pass": true,
+      "cost": 0.15375380000000002,
+      "models": {
+        "claude-opus-5-5": 0.15375380000000002
+      },
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 22,
+          "output": 1917,
+          "cacheRead": 192669,
+          "cacheWrite": 9599
+        }
+      },
+      "turns": 3,
+      "seconds": 10,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "opus",
+      "task": "pagination",
+      "kind": "normal",
+      "rep": 1,
+      "pass": true,
+      "cost": 0.2504248,
+      "models": {
+        "claude-opus-5-5": 0.2504248
+      },
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 28,
+          "output": 4707,
+          "cacheRead": 255504,
+          "cacheWrite": 13134
+        }
+      },
+      "turns": 3,
+      "seconds": 26,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "opus",
+      "task": "mixed",
+      "kind": "mixed",
+      "rep": 1,
+      "pass": true,
+      "cost": 0.30537800000000004,
+      "models": {
+        "claude-opus-5-5": 0.30537800000000004
+      },
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 34,
+          "output": 5868,
+          "cacheRead": 329170,
+          "cacheWrite": 15256
+        }
+      },
+      "turns": 3,
+      "seconds": 14,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "opus",
+      "task": "lru",
+      "kind": "hard",
+      "rep": 1,
+      "pass": true,
+      "cost": 0.4148082,
+      "models": {
+        "claude-opus-5-5": 0.4148082
+      },
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 38,
+          "output": 9412,
+          "cacheRead": 381681,
+          "cacheWrite": 18760
+        }
+      },
+      "turns": 2,
+      "seconds": 31,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "sonnet",
+      "task": "lookup",
+      "kind": "trivial",
+      "rep": 1,
+      "pass": true,
+      "cost": 0.0334174,
+      "models": {
+        "claude-sonnet-5-5": 0.0334174
+      },
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 6,
+          "output": 275,
+          "cacheRead": 45714,
+          "cacheWrite": 6521
+        }
+      },
+      "turns": 3,
+      "seconds": 6,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "sonnet",
+      "task": "typo",
+      "kind": "trivial",
+      "rep": 1,
+      "pass": true,
+      "cost": 0.0404399,
+      "models": {
+        "claude-sonnet-5-5": 0.0404399
+      },
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 10,
+          "output": 469,
+          "cacheRead": 81379,
+          "cacheWrite": 6898
+        }
+      },
+      "turns": 2,
+      "seconds": 12,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "sonnet",
+      "task": "rename",
+      "kind": "trivial",
+      "rep": 1,
+      "pass": true,
+      "cost": 0.0539701,
+      "models": {
+        "claude-sonnet-5-5": 0.0539701
+      },
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 16,
+          "output": 826,
+          "cacheRead": 136381,
+          "cacheWrite": 8010
+        }
+      },
+      "turns": 3,
+      "seconds": 8,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "sonnet",
+      "task": "bugfix",
+      "kind": "normal",
+      "rep": 1,
+      "pass": true,
+      "cost": 0.07376100000000001,
+      "models": {
+        "claude-sonnet-5-5": 0.07376100000000001
+      },
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 22,
+          "output": 1601,
+          "cacheRead": 195190,
+          "cacheWrite": 9547
+        }
+      },
+      "turns": 6,
+      "seconds": 9,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "sonnet",
+      "task": "pagination",
+      "kind": "normal",
+      "rep": 1,
+      "pass": true,
+      "cost": 0.11729530000000002,
+      "models": {
+        "claude-sonnet-5-5": 0.11729530000000002
+      },
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 28,
+          "output": 3841,
+          "cacheRead": 259373,
+          "cacheWrite": 13223
+        }
+      },
+      "turns": 4,
+      "seconds": 24,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "sonnet",
+      "task": "mixed",
+      "kind": "mixed",
+      "rep": 1,
+      "pass": true,
+      "cost": 0.14491270000000003,
+      "models": {
+        "claude-sonnet-5-5": 0.14491270000000003
+      },
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 34,
+          "output": 4956,
+          "cacheRead": 333967,
+          "cacheWrite": 15472
+        }
+      },
+      "turns": 3,
+      "seconds": 15,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "sonnet",
+      "task": "lru",
+      "kind": "hard",
+      "rep": 1,
+      "pass": true,
+      "cost": 0.18962130000000002,
+      "models": {
+        "claude-sonnet-5-5": 0.18962130000000002
+      },
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 38,
+          "output": 7732,
+          "cacheRead": 387853,
+          "cacheWrite": 18360
+        }
+      },
+      "turns": 2,
+      "seconds": 19,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "cc-tiers@0.5",
+      "task": "lookup",
+      "kind": "trivial",
+      "rep": 1,
+      "pass": true,
+      "cost": 0.101298,
+      "models": {
+        "claude-opus-5-5": 0.101298
+      },
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 6,
+          "output": 310,
+          "cacheRead": 50530,
+          "cacheWrite": 10621
+        }
+      },
+      "turns": 3,
+      "seconds": 9,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "cc-tiers@0.5",
+      "task": "typo",
+      "kind": "trivial",
+      "rep": 1,
+      "pass": true,
+      "cost": 0.13125219999999999,
+      "models": {
+        "claude-opus-5-5": 0.13125219999999999
+      },
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 10,
+          "output": 530,
+          "cacheRead": 93861,
+          "cacheWrite": 12730
+        }
+      },
+      "turns": 2,
+      "seconds": 6,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "cc-tiers@0.5",
+      "task": "rename",
+      "kind": "trivial",
+      "rep": 1,
+      "pass": true,
+      "cost": 0.1798634,
+      "models": {
+        "claude-opus-5-5": 0.1798634
+      },
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 16,
+          "output": 1069,
+          "cacheRead": 166617,
+          "cacheWrite": 15637
+        }
+      },
+      "turns": 3,
+      "seconds": 10,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "cc-tiers@0.5",
+      "task": "bugfix",
+      "kind": "normal",
+      "rep": 1,
+      "pass": true,
+      "cost": 0.2763394,
+      "models": {
+        "claude-opus-5-5": 0.2510254,
+        "claude-sonnet-5-5": 0.025314
+      },
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 22,
+          "output": 2318,
+          "cacheRead": 249087,
+          "cacheWrite": 19345
+        },
+        "claude-sonnet-5-5": {
+          "input": 6,
+          "output": 931,
+          "cacheRead": 26995,
+          "cacheWrite": 5317
+        }
+      },
+      "turns": 3,
+      "seconds": 27,
+      "subagents": 1,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "cc-tiers@0.5",
+      "task": "pagination",
+      "kind": "normal",
+      "rep": 1,
+      "pass": true,
+      "cost": 0.8119762,
+      "models": {
+        "claude-opus-5-5": 0.6820858,
+        "claude-sonnet-5-5": 0.12989040000000002
+      },
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 46,
+          "output": 12418,
+          "cacheRead": 487969,
+          "cacheWrite": 48079
+        },
+        "claude-sonnet-5-5": {
+          "input": 20,
+          "output": 5992,
+          "cacheRead": 97304,
+          "cacheWrite": 24080
+        }
+      },
+      "turns": 6,
+      "seconds": 144,
+      "subagents": 4,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "cc-tiers@0.5",
+      "task": "mixed",
+      "kind": "mixed",
+      "rep": 1,
+      "pass": true,
+      "cost": 1.020235645,
+      "models": {
+        "claude-opus-5-5": 0.8306152,
+        "claude-sonnet-5-5": 0.1882599,
+        "claude-haiku-5-5": 0.001360545
+      },
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 52,
+          "output": 15384,
+          "cacheRead": 622576,
+          "cacheWrite": 55862
+        },
+        "claude-sonnet-5-5": {
+          "input": 30,
+          "output": 8039,
+          "cacheRead": 135999,
+          "cacheWrite": 37684
+        },
+        "claude-haiku-5-5": {
+          "input": 6,
+          "output": 887,
+          "cacheRead": 26507,
+          "cacheWrite": 5211
+        }
+      },
+      "turns": 4,
+      "seconds": 55,
+      "subagents": 3,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "cc-tiers@0.5",
+      "task": "lru",
+      "kind": "hard",
+      "rep": 1,
+      "pass": true,
+      "cost": 1.2030722450000002,
+      "models": {
+        "claude-opus-5-5": 0.9578076000000001,
+        "claude-sonnet-5-5": 0.2439041,
+        "claude-haiku-5-5": 0.001360545
+      },
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 58,
+          "output": 17901,
+          "cacheRead": 778918,
+          "cacheWrite": 61557
+        },
+        "claude-sonnet-5-5": {
+          "input": 34,
+          "output": 11366,
+          "cacheRead": 152836,
+          "cacheWrite": 45957
+        },
+        "claude-haiku-5-5": {
+          "input": 6,
+          "output": 887,
+          "cacheRead": 26507,
+          "cacheWrite": 5211
+        }
+      },
+      "turns": 3,
+      "seconds": 50,
+      "subagents": 1,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "cc-tiers-light@0.5",
+      "task": "lookup",
+      "kind": "trivial",
+      "rep": 1,
+      "pass": true,
+      "cost": 0.0350667,
+      "models": {
+        "claude-sonnet-5-5": 0.0350667
+      },
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 6,
+          "output": 236,
+          "cacheRead": 51987,
+          "cacheWrite": 6874
+        }
+      },
+      "turns": 3,
+      "seconds": 10,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "cc-tiers-light@0.5",
+      "task": "typo",
+      "kind": "trivial",
+      "rep": 1,
+      "pass": true,
+      "cost": 0.0515366,
+      "models": {
+        "claude-sonnet-5-5": 0.0515366
+      },
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 10,
+          "output": 533,
+          "cacheRead": 93786,
+          "cacheWrite": 9202
+        }
+      },
+      "turns": 3,
+      "seconds": 7,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "cc-tiers-light@0.5",
+      "task": "rename",
+      "kind": "trivial",
+      "rep": 1,
+      "pass": true,
+      "cost": 0.0757488,
+      "models": {
+        "claude-sonnet-5-5": 0.0757488
+      },
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 16,
+          "output": 1058,
+          "cacheRead": 164808,
+          "cacheWrite": 12164
+        }
+      },
+      "turns": 3,
+      "seconds": 13,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "cc-tiers-light@0.5",
+      "task": "bugfix",
+      "kind": "normal",
+      "rep": 1,
+      "pass": true,
+      "cost": 0.1124764,
+      "models": {
+        "claude-sonnet-5-5": 0.1124764
+      },
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 24,
+          "output": 2271,
+          "cacheRead": 273064,
+          "cacheWrite": 15603
+        }
+      },
+      "turns": 7,
+      "seconds": 16,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "cc-tiers-light@0.5",
+      "task": "pagination",
+      "kind": "normal",
+      "rep": 1,
+      "pass": true,
+      "cost": 0.17791659999999998,
+      "models": {
+        "claude-sonnet-5-5": 0.17791659999999998
+      },
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 32,
+          "output": 5143,
+          "cacheRead": 399026,
+          "cacheWrite": 21630
+        }
+      },
+      "turns": 5,
+      "seconds": 23,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "cc-tiers-light@0.5",
+      "task": "mixed",
+      "kind": "mixed",
+      "rep": 1,
+      "pass": true,
+      "cost": 0.4023205999999999,
+      "models": {
+        "claude-sonnet-5-5": 0.24959879999999998,
+        "claude-opus-5-5": 0.15272180000000002
+      },
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 40,
+          "output": 7564,
+          "cacheRead": 550108,
+          "cacheWrite": 29717
+        },
+        "claude-opus-5-5": {
+          "input": 8,
+          "output": 4041,
+          "cacheRead": 25549,
+          "cacheWrite": 13352
+        }
+      },
+      "turns": 1,
+      "seconds": 55,
+      "subagents": 1,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "cc-tiers-light@0.5",
+      "task": "lru",
+      "kind": "hard",
+      "rep": 1,
+      "pass": true,
+      "cost": 0.4715731999999999,
+      "models": {
+        "claude-sonnet-5-5": 0.3188514,
+        "claude-opus-5-5": 0.15272180000000002
+      },
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 44,
+          "output": 11349,
+          "cacheRead": 637974,
+          "cacheWrite": 35369
+        },
+        "claude-opus-5-5": {
+          "input": 8,
+          "output": 4041,
+          "cacheRead": 25549,
+          "cacheWrite": 13352
+        }
+      },
+      "turns": 4,
+      "seconds": 27,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "opus",
+      "task": "lookup",
+      "kind": "trivial",
+      "rep": 2,
+      "pass": true,
+      "cost": 0.069906,
+      "models": {
+        "claude-opus-5-5": 0.069906
+      },
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 6,
+          "output": 339,
+          "cacheRead": 44630,
+          "cacheWrite": 6772
+        }
+      },
+      "turns": 3,
+      "seconds": 9,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "opus",
+      "task": "typo",
+      "kind": "trivial",
+      "rep": 2,
+      "pass": true,
+      "cost": 0.08445979999999999,
+      "models": {
+        "claude-opus-5-5": 0.08445979999999999
+      },
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 10,
+          "output": 558,
+          "cacheRead": 79779,
+          "cacheWrite": 7163
+        }
+      },
+      "turns": 2,
+      "seconds": 9,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "opus",
+      "task": "rename",
+      "kind": "trivial",
+      "rep": 2,
+      "pass": true,
+      "cost": 0.11762339999999999,
+      "models": {
+        "claude-opus-5-5": 0.11762339999999999
+      },
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 16,
+          "output": 1196,
+          "cacheRead": 134157,
+          "cacheWrite": 8351
+        }
+      },
+      "turns": 3,
+      "seconds": 17,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "opus",
+      "task": "bugfix",
+      "kind": "normal",
+      "rep": 2,
+      "pass": true,
+      "cost": 0.16634960000000001,
+      "models": {
+        "claude-opus-5-5": 0.16634960000000001
+      },
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 24,
+          "output": 2263,
+          "cacheRead": 212608,
+          "cacheWrite": 9809
+        }
+      },
+      "turns": 4,
+      "seconds": 21,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "opus",
+      "task": "pagination",
+      "kind": "normal",
+      "rep": 2,
+      "pass": true,
+      "cost": 0.2733824,
+      "models": {
+        "claude-opus-5-5": 0.2733824
+      },
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 30,
+          "output": 5406,
+          "cacheRead": 276232,
+          "cacheWrite": 13737
+        }
+      },
+      "turns": 3,
+      "seconds": 33,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "opus",
+      "task": "mixed",
+      "kind": "mixed",
+      "rep": 2,
+      "pass": true,
+      "cost": 0.33340780000000003,
+      "models": {
+        "claude-opus-5-5": 0.33340780000000003
+      },
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 36,
+          "output": 6770,
+          "cacheRead": 351879,
+          "cacheWrite": 15936
+        }
+      },
+      "turns": 3,
+      "seconds": 19,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "opus",
+      "task": "lru",
+      "kind": "hard",
+      "rep": 2,
+      "pass": true,
+      "cost": 0.48115860000000005,
+      "models": {
+        "claude-opus-5-5": 0.48115860000000005
+      },
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 42,
+          "output": 11458,
+          "cacheRead": 436113,
+          "cacheWrite": 20576
+        }
+      },
+      "turns": 3,
+      "seconds": 48,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "sonnet",
+      "task": "lookup",
+      "kind": "trivial",
+      "rep": 2,
+      "pass": true,
+      "cost": 0.032735400000000005,
+      "models": {
+        "claude-sonnet-5-5": 0.032735400000000005
+      },
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 6,
+          "output": 232,
+          "cacheRead": 45714,
+          "cacheWrite": 6458
+        }
+      },
+      "turns": 3,
+      "seconds": 6,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "sonnet",
+      "task": "typo",
+      "kind": "trivial",
+      "rep": 2,
+      "pass": true,
+      "cost": 0.039291000000000006,
+      "models": {
+        "claude-sonnet-5-5": 0.039291000000000006
+      },
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 10,
+          "output": 405,
+          "cacheRead": 81210,
+          "cacheWrite": 6775
+        }
+      },
+      "turns": 2,
+      "seconds": 5,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "sonnet",
+      "task": "rename",
+      "kind": "trivial",
+      "rep": 2,
+      "pass": true,
+      "cost": 0.052732100000000004,
+      "models": {
+        "claude-sonnet-5-5": 0.052732100000000004
+      },
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 16,
+          "output": 757,
+          "cacheRead": 135821,
+          "cacheWrite": 7887
+        }
+      },
+      "turns": 3,
+      "seconds": 9,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "sonnet",
+      "task": "bugfix",
+      "kind": "normal",
+      "rep": 2,
+      "pass": true,
+      "cost": 0.0767744,
+      "models": {
+        "claude-sonnet-5-5": 0.0767744
+      },
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 24,
+          "output": 1679,
+          "cacheRead": 214444,
+          "cacheWrite": 9623
+        }
+      },
+      "turns": 7,
+      "seconds": 11,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "sonnet",
+      "task": "pagination",
+      "kind": "normal",
+      "rep": 2,
+      "pass": true,
+      "cost": 0.1284643,
+      "models": {
+        "claude-sonnet-5-5": 0.1284643
+      },
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 34,
+          "output": 4199,
+          "cacheRead": 325023,
+          "cacheWrite": 13476
+        }
+      },
+      "turns": 5,
+      "seconds": 20,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "sonnet",
+      "task": "mixed",
+      "kind": "mixed",
+      "rep": 2,
+      "pass": true,
+      "cost": 0.15582960000000004,
+      "models": {
+        "claude-sonnet-5-5": 0.15582960000000004
+      },
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 40,
+          "output": 5281,
+          "cacheRead": 400396,
+          "cacheWrite": 15725
+        }
+      },
+      "turns": 3,
+      "seconds": 11,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "sonnet",
+      "task": "lru",
+      "kind": "hard",
+      "rep": 2,
+      "pass": true,
+      "cost": 0.20768660000000003,
+      "models": {
+        "claude-sonnet-5-5": 0.20768660000000003
+      },
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 44,
+          "output": 8590,
+          "cacheRead": 454826,
+          "cacheWrite": 19054
+        }
+      },
+      "turns": 2,
+      "seconds": 22,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "cc-tiers@0.5",
+      "task": "lookup",
+      "kind": "trivial",
+      "rep": 2,
+      "pass": true,
+      "cost": 0.09989279999999999,
+      "models": {
+        "claude-opus-5-5": 0.09989279999999999
+      },
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 6,
+          "output": 262,
+          "cacheRead": 50504,
+          "cacheWrite": 10566
+        }
+      },
+      "turns": 3,
+      "seconds": 8,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "cc-tiers@0.5",
+      "task": "typo",
+      "kind": "trivial",
+      "rep": 2,
+      "pass": true,
+      "cost": 0.12876279999999998,
+      "models": {
+        "claude-opus-5-5": 0.12876279999999998
+      },
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 10,
+          "output": 436,
+          "cacheRead": 93734,
+          "cacheWrite": 12657
+        }
+      },
+      "turns": 2,
+      "seconds": 6,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "cc-tiers@0.5",
+      "task": "rename",
+      "kind": "trivial",
+      "rep": 2,
+      "pass": true,
+      "cost": 0.1729264,
+      "models": {
+        "claude-opus-5-5": 0.1729264
+      },
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 16,
+          "output": 870,
+          "cacheRead": 166192,
+          "cacheWrite": 15278
+        }
+      },
+      "turns": 3,
+      "seconds": 9,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "cc-tiers@0.5",
+      "task": "bugfix",
+      "kind": "normal",
+      "rep": 2,
+      "pass": true,
+      "cost": 0.2690249,
+      "models": {
+        "claude-opus-5-5": 0.24258340000000003,
+        "claude-sonnet-5-5": 0.0264415
+      },
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 22,
+          "output": 2026,
+          "cacheRead": 247557,
+          "cacheWrite": 19058
+        },
+        "claude-sonnet-5-5": {
+          "input": 6,
+          "output": 957,
+          "cacheRead": 27170,
+          "cacheWrite": 5657
+        }
+      },
+      "turns": 3,
+      "seconds": 30,
+      "subagents": 1,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "cc-tiers@0.5",
+      "task": "pagination",
+      "kind": "normal",
+      "rep": 2,
+      "pass": true,
+      "cost": 0.6095727,
+      "models": {
+        "claude-opus-5-5": 0.5310736,
+        "claude-sonnet-5-5": 0.07849909999999999
+      },
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 38,
+          "output": 9107,
+          "cacheRead": 401963,
+          "cacheWrite": 37404
+        },
+        "claude-sonnet-5-5": {
+          "input": 12,
+          "output": 3873,
+          "cacheRead": 55751,
+          "cacheWrite": 13668
+        }
+      },
+      "turns": 4,
+      "seconds": 103,
+      "subagents": 2,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "cc-tiers@0.5",
+      "task": "mixed",
+      "kind": "mixed",
+      "rep": 2,
+      "pass": true,
+      "cost": 0.8158160249999998,
+      "models": {
+        "claude-opus-5-5": 0.676362,
+        "claude-sonnet-5-5": 0.1381541,
+        "claude-haiku-5-5": 0.001299925
+      },
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 44,
+          "output": 11960,
+          "cacheRead": 522905,
+          "cacheWrite": 45406
+        },
+        "claude-sonnet-5-5": {
+          "input": 26,
+          "output": 6454,
+          "cacheRead": 118321,
+          "cacheWrite": 24692
+        },
+        "claude-haiku-5-5": {
+          "input": 6,
+          "output": 745,
+          "cacheRead": 26470,
+          "cacheWrite": 5297
+        }
+      },
+      "turns": 4,
+      "seconds": 63,
+      "subagents": 3,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "cc-tiers@0.5",
+      "task": "lru",
+      "kind": "hard",
+      "rep": 2,
+      "pass": true,
+      "cost": 0.9951589249999999,
+      "models": {
+        "claude-opus-5-5": 0.7943162,
+        "claude-sonnet-5-5": 0.19954280000000002,
+        "claude-haiku-5-5": 0.001299925
+      },
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 50,
+          "output": 14160,
+          "cacheRead": 665796,
+          "cacheWrite": 51075
+        },
+        "claude-sonnet-5-5": {
+          "input": 32,
+          "output": 10178,
+          "cacheRead": 146388,
+          "cacheWrite": 33224
+        },
+        "claude-haiku-5-5": {
+          "input": 6,
+          "output": 745,
+          "cacheRead": 26470,
+          "cacheWrite": 5297
+        }
+      },
+      "turns": 3,
+      "seconds": 52,
+      "subagents": 1,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "cc-tiers-light@0.5",
+      "task": "lookup",
+      "kind": "trivial",
+      "rep": 2,
+      "pass": true,
+      "cost": 0.035511600000000004,
+      "models": {
+        "claude-sonnet-5-5": 0.035511600000000004
+      },
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 6,
+          "output": 288,
+          "cacheRead": 52076,
+          "cacheWrite": 6853
+        }
+      },
+      "turns": 3,
+      "seconds": 10,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "cc-tiers-light@0.5",
+      "task": "typo",
+      "kind": "trivial",
+      "rep": 2,
+      "pass": true,
+      "cost": 0.052231700000000006,
+      "models": {
+        "claude-sonnet-5-5": 0.052231700000000006
+      },
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 10,
+          "output": 608,
+          "cacheRead": 93877,
+          "cacheWrite": 9186
+        }
+      },
+      "turns": 3,
+      "seconds": 7,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "cc-tiers-light@0.5",
+      "task": "rename",
+      "kind": "trivial",
+      "rep": 2,
+      "pass": true,
+      "cost": 0.0757298,
+      "models": {
+        "claude-sonnet-5-5": 0.0757298
+      },
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 16,
+          "output": 1053,
+          "cacheRead": 164878,
+          "cacheWrite": 12170
+        }
+      },
+      "turns": 3,
+      "seconds": 9,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "cc-tiers-light@0.5",
+      "task": "bugfix",
+      "kind": "normal",
+      "rep": 2,
+      "pass": true,
+      "cost": 0.1115361,
+      "models": {
+        "claude-sonnet-5-5": 0.1115361
+      },
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 24,
+          "output": 2195,
+          "cacheRead": 272981,
+          "cacheWrite": 15560
+        }
+      },
+      "turns": 7,
+      "seconds": 20,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "cc-tiers-light@0.5",
+      "task": "pagination",
+      "kind": "normal",
+      "rep": 2,
+      "pass": true,
+      "cost": 0.1832103,
+      "models": {
+        "claude-sonnet-5-5": 0.1832103
+      },
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 34,
+          "output": 5310,
+          "cacheRead": 430783,
+          "cacheWrite": 21741
+        }
+      },
+      "turns": 5,
+      "seconds": 39,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "cc-tiers-light@0.5",
+      "task": "mixed",
+      "kind": "mixed",
+      "rep": 2,
+      "pass": true,
+      "cost": 0.2204184,
+      "models": {
+        "claude-sonnet-5-5": 0.2204184
+      },
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 40,
+          "output": 6288,
+          "cacheRead": 540544,
+          "cacheWrite": 25851
+        }
+      },
+      "turns": 3,
+      "seconds": 13,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    },
+    {
+      "config": "cc-tiers-light@0.5",
+      "task": "lru",
+      "kind": "hard",
+      "rep": 2,
+      "pass": true,
+      "cost": 0.28087660000000003,
+      "models": {
+        "claude-sonnet-5-5": 0.28087660000000003
+      },
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 44,
+          "output": 9566,
+          "cacheRead": 620526,
+          "cacheWrite": 30769
+        }
+      },
+      "turns": 2,
+      "seconds": 26,
+      "subagents": 0,
+      "error": "",
+      "checkOutput": "",
+      "mode": "session"
+    }
+  ]
+}

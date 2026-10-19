@@ -248,7 +248,7 @@ test('readmes stay in sync in structure and behavior', () => {
       'cc-tiers-history.json',
       'cheap',
       'cc-tiers:checker',
-      'node --test',
+      'npm test',
       'five_hour',
       'seven_day',
     ]) {

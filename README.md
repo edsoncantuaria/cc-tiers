@@ -234,6 +234,25 @@ The escalation order is fixed. Routing phrases and keywords, the retry limit, th
 
 ---
 
+## 📊 Benchmark
+
+`bench/` runs seven tasks (3 trivial, 2 normal, 1 mixed, 1 hard) on a small Node project, each graded by a hidden test. Measured on 2026-10-19 with Claude Code 2.1.303 and cc-tiers 0.5.0, two runs per task, at API list prices. Every configuration passed every task (112/112).
+
+| Configuration | One task per session | All seven in one session | vs Opus only (session) |
+| --- | --: | --: | --: |
+| Opus only | $0.105 / task | $0.209 / task | — |
+| Sonnet only | $0.050 / task | $0.096 / task | **−54%** |
+| cc-tiers (Opus orchestrator) | $0.190 / task | $0.487 / task | **+133%** |
+| cc-tiers light (Sonnet dispatcher) | $0.053 / task | $0.163 / task | **−22%** |
+
+- **Light mode is the setting that saves:** about half the cost of Opus only on one-off tasks and 22% less in a working session, with Opus still on call for planning, escalation, and risky review.
+- **The default Opus orchestrator costs more than plain Opus** on tasks this size: the Opus main thread pays for every request, and each subagent pays for a fresh context. It only pays back when much of the work is long enough to run on Sonnet or Haiku. For everyday work, use light mode (`claude --agent cc-tiers:dispatcher`).
+- Plain Sonnet was cheapest and passed everything here; these tasks never needed an escalation. The value of tiers is the safety net on harder work, which this fixture does not stress.
+
+Raw data: `bench/results/oneshot-all-0.5.json` and `bench/results/session-all-0.5.json`. Rerun with `npm run bench` (add `-- --session` for one session); it spends real tokens.
+
+---
+
 ## 📋 Requirements
 
 - Claude Code **2.1.295+** (the `/config` pickers use `userConfig.options`, the PreToolUse hook sets `onFailure`, and the effort ladder uses the per-call `effort` from 2.1.292).
@@ -244,7 +263,7 @@ The escalation order is fixed. Routing phrases and keywords, the retry limit, th
 ```bash
 git clone https://github.com/edsoncantuaria/cc-tiers
 cd cc-tiers
-node --test tests/*.test.mjs
+npm test
 claude plugin validate --strict .
 claude --plugin-dir .
 ```
