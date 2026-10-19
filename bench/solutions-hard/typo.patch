@@ -1,0 +1,13 @@
+diff --git a/src/booking.js b/src/booking.js
+index b9a41ae..c7e30e9 100644
+--- a/src/booking.js
++++ b/src/booking.js
+@@ -26,7 +26,7 @@ export async function claimShift(shiftId, userId) {
+   const shift = await requireShift(shiftId)
+   const user = await requireUser(userId)
+   if (shift.assignees.includes(user.id)) throw new ConflictError(`${user.id} already works ${shift.id}`)
+-  if (shift.assignees.length >= shift.capacity) throw new ConflictError('Shift capacity excceded')
++  if (shift.assignees.length >= shift.capacity) throw new ConflictError('Shift capacity exceeded')
+   await checkAvailability(user, shift)
+   shift.assignees.push(user.id)
+   shift.status = shift.assignees.length >= shift.capacity ? 'full' : 'open'

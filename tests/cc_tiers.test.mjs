@@ -1422,3 +1422,88 @@ test('the benchmark fixture is green, and every hidden check fails before the ta
   assert.ok(text.includes('| Opus only | 1/2 | $0.200 | $0.400 | 9s | 100% |'))
   assert.ok(text.includes('| `typo` (trivial) | 🟡 $0.200 |'))
 })
+
+test('the hard benchmark fixture is green, and every hidden check fails before its task and passes with the reference fix', async () => {
+  const bench = path.join(ROOT, 'bench')
+  const tasks = JSON.parse(readFileSync(path.join(bench, 'tasks-hard.json'), 'utf8'))
+  assert.equal(tasks[0].id, 'find-listeners', 'the lookup runs first in session mode, while the tree is clean')
+  const kinds = {}
+  for (const task of tasks) kinds[task.kind] = (kinds[task.kind] || 0) + 1
+  assert.deepEqual(kinds, { trivial: 4, normal: 3, hard: 3, large: 2 })
+  const { cpSync } = await import('node:fs')
+  const env = { ...process.env }
+  delete env.NODE_TEST_CONTEXT
+  const dirs = []
+  const fresh = async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-hard-'))
+    dirs.push(dir)
+    cpSync(path.join(bench, 'fixture-hard'), dir, { recursive: true })
+    for (const args of [['init', '-q'], ['add', '-A'], ['-c', 'user.email=bench@example.com', '-c', 'user.name=bench', 'commit', '-qm', 'fixture']]) {
+      spawnSync('git', args, { cwd: dir })
+    }
+    mkdirSync(path.join(dir, '.bench-check'))
+    return dir
+  }
+  const run = (dir, files, extra = {}) => spawnSync(process.execPath, ['--test', ...files], { cwd: dir, encoding: 'utf8', env: { ...env, ...extra } })
+  const projectTests = (dir) => readdirSync(path.join(dir, 'test')).filter((name) => name.endsWith('.test.mjs')).map((name) => path.join('test', name))
+  try {
+    const untouched = await fresh()
+    assert.equal(run(untouched, projectTests(untouched)).status, 0)
+    for (const task of tasks) {
+      assert.ok(task.prompt, task.id)
+      const check = path.join(bench, 'checks-hard', `${task.id}.test.mjs`)
+      cpSync(check, path.join(untouched, '.bench-check', `${task.id}.test.mjs`))
+      assert.notEqual(run(untouched, [`.bench-check/${task.id}.test.mjs`]).status, 0, `${task.id} check passes on the untouched fixture`)
+    }
+    for (const task of tasks) {
+      const dir = await fresh()
+      const patch = path.join(bench, 'solutions-hard', `${task.id}.patch`)
+      const answer = path.join(bench, 'solutions-hard', `${task.id}.txt`)
+      if (existsSync(patch)) assert.equal(spawnSync('git', ['apply', patch], { cwd: dir }).status, 0, `${task.id} patch applies`)
+      cpSync(path.join(bench, 'checks-hard', `${task.id}.test.mjs`), path.join(dir, '.bench-check', `${task.id}.test.mjs`))
+      const result = existsSync(answer) ? readFileSync(answer, 'utf8') : ''
+      const proc = run(dir, [`.bench-check/${task.id}.test.mjs`, ...projectTests(dir)], { BENCH_RESULT: result })
+      assert.equal(proc.status, 0, `${task.id} reference fails:\n${proc.stdout.slice(-1500)}`)
+    }
+  } finally {
+    await Promise.all(dirs.map((dir) => rm(dir, { recursive: true, force: true })))
+  }
+})
+
+test('the benchmark counts escalations from hook output only, and splits results by kind', async () => {
+  const { escalationsIn, kindTable, routeIn, routing } = await import(pathToFileURL(path.join(ROOT, 'bench', 'run.mjs')).href)
+  const hook = (text) => JSON.stringify({ type: 'attachment', attachment: { type: 'hook_additional_context', content: [text], hookEvent: 'PostToolUse' } })
+  const counted = tiers.applyEvent(
+    tiers.applyEvent(tiers.emptyState('s'), tiers.normalizeEvent(event('t1', 'implementer', report('implementer', 'sonnet', 'fail'))), riskyRouting()).state,
+    tiers.normalizeEvent(event('t2', 'implementer', report('implementer', 'sonnet', 'fail'))),
+    riskyRouting(),
+  ).message
+  const lines = [
+    hook('cc-tiers moved csv from haiku to sonnet before the attempt limit. The new tier starts at zero failures; carry the notes.'),
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: counted }] } }),
+    hook(counted),
+  ]
+  assert.deepEqual(escalationsIn(lines), ['haiku->sonnet (early)', 'sonnet->opus (limit)'])
+  assert.deepEqual(escalationsIn(lines, 1), ['sonnet->opus (limit)'])
+  const rows = [
+    { config: 'sonnet', kind: 'hard', pass: false, cost: 0.5, escalations: null },
+    { config: 'sonnet', kind: 'hard', pass: true, cost: 0.3, escalations: null },
+    { config: 'cc-tiers', kind: 'hard', pass: true, cost: 1, escalations: 2 },
+  ]
+  const text = kindTable(rows).join('\n')
+  assert.ok(text.includes('| Sonnet only | 1/2 | $0.800 | — |'))
+  assert.ok(text.includes('| cc-tiers (Opus orchestrator) | 1/1 | $1.00 | 2 | — |'))
+  const call = (name, input) => JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', name, input }] } })
+  const steps = routeIn([
+    call('Agent', { subagent_type: 'cc-tiers:worker', prompt: 'CC_TIERS_TASK: rename\nCC_TIERS_TIER: haiku' }),
+    call('Agent', { subagent_type: 'cc-tiers:implementer', prompt: 'CC_TIERS_TASK: skip-dates\nCC_TIERS_TIER: sonnet' }),
+    call('Edit', { file_path: 'src/time.js' }),
+  ])
+  assert.deepEqual(steps.map((step) => step.task), ['rename', 'skip-dates', ''])
+  assert.deepEqual(routing('large', steps, 'opus'), { path: 'haiku -> sonnet -> inline opus', ok: true })
+  assert.equal(routing('normal', steps.slice(2), 'opus').ok, false)
+  assert.equal(routing('normal', steps.slice(2), 'sonnet').ok, true)
+  assert.equal(routing('trivial', steps.slice(1), 'opus').ok, false)
+  assert.equal(routing('hard', steps, 'opus').ok, false)
+  assert.equal(routing('large', steps.slice(0, 1), 'opus').ok, false)
+})

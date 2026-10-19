@@ -1,0 +1,126 @@
+diff --git a/src/audit.js b/src/audit.js
+index c589a6a..a11abb5 100644
+--- a/src/audit.js
++++ b/src/audit.js
+@@ -9,6 +9,7 @@ const TYPES = [
+   'shift.claimed',
+   'shift.released',
+   'shift.swapped',
++  'shift.cancelled',
+   'attachment.saved',
+ ]
+ 
+diff --git a/src/booking.js b/src/booking.js
+index b9a41ae..208a42d 100644
+--- a/src/booking.js
++++ b/src/booking.js
+@@ -25,6 +25,7 @@ async function checkAvailability(user, shift) {
+ export async function claimShift(shiftId, userId) {
+   const shift = await requireShift(shiftId)
+   const user = await requireUser(userId)
++  if (shift.status === 'cancelled') throw new ConflictError(`${shift.id} is cancelled`)
+   if (shift.assignees.includes(user.id)) throw new ConflictError(`${user.id} already works ${shift.id}`)
+   if (shift.assignees.length >= shift.capacity) throw new ConflictError('Shift capacity excceded')
+   await checkAvailability(user, shift)
+@@ -39,7 +40,7 @@ export async function releaseShift(shiftId, userId) {
+   const shift = await requireShift(shiftId)
+   if (!shift.assignees.includes(userId)) throw new NotFoundError(`${userId} does not work ${shiftId}`)
+   shift.assignees = shift.assignees.filter((id) => id !== userId)
+-  shift.status = 'open'
++  if (shift.status !== 'cancelled') shift.status = 'open'
+   const saved = await saveShift(shift)
+   await emit('shift.released', { shiftId, userId })
+   return saved
+diff --git a/src/index.js b/src/index.js
+index 05217a5..4e17216 100644
+--- a/src/index.js
++++ b/src/index.js
+@@ -11,7 +11,7 @@ import { resetStore } from './store.js'
+ export { configure, getConfig } from './config.js'
+ export { now, setClock, resetClock } from './clock.js'
+ export { createUser, getUser, listUsers, deactivateUser } from './users.js'
+-export { createShift, getShift, listShifts, updateShift } from './shifts.js'
++export { cancelShift, createShift, getShift, listShifts, updateShift } from './shifts.js'
+ export { createRecurring } from './recurring.js'
+ export { claimShift, releaseShift, swapShift } from './booking.js'
+ export { hoursForUser, splitByLocalDay } from './payroll.js'
+diff --git a/src/routes.js b/src/routes.js
+index 03f37be..c823ee7 100644
+--- a/src/routes.js
++++ b/src/routes.js
+@@ -6,7 +6,7 @@ import { hoursForUser } from './payroll.js'
+ import { createRecurring } from './recurring.js'
+ import { payrollCsv, shiftsCsv } from './reports.js'
+ import { createRouter } from './router.js'
+-import { createShift, listShifts, requireShift, updateShift } from './shifts.js'
++import { cancelShift, createShift, listShifts, requireShift, updateShift } from './shifts.js'
+ import { createUser, listUsers, requireUser } from './users.js'
+ 
+ const MANAGER = ['manager']
+@@ -65,6 +65,11 @@ export function buildRoutes() {
+     return { body: await updateShift(params.id, body ?? {}) }
+   })
+ 
++  router.add('POST', '/shifts/:id/cancel', async ({ auth, params, body }) => {
++    requireRole(auth, MANAGER)
++    return { body: await cancelShift(params.id, { reason: body?.reason }) }
++  })
++
+   router.add('POST', '/shifts/:id/claim', async ({ auth, params, body }) => ({
+     body: await claimShift(params.id, actingUser(auth, body)),
+   }))
+diff --git a/src/shifts.js b/src/shifts.js
+index f013c9a..cf94528 100644
+--- a/src/shifts.js
++++ b/src/shifts.js
+@@ -7,7 +7,7 @@ import { db } from './store.js'
+ import { HOUR, isValidZone, parseInstant } from './time.js'
+ import { optionalString, requireInt, requireOneOf, requireString } from './validate.js'
+ 
+-export const STATUSES = ['open', 'full']
++export const STATUSES = ['open', 'full', 'cancelled']
+ 
+ // Shifts read in the last cacheTtlMs, by id: { shift, at }. A burst of reads on one shift skips the store.
+ const cache = new Map()
+@@ -80,9 +80,18 @@ export async function updateShift(id, patch = {}) {
+   if ('location' in patch) shift.location = optionalString(patch.location, 'location', { max: 120 })
+   if ('capacity' in patch) {
+     shift.capacity = requireInt(patch.capacity, 'capacity', { min: Math.max(1, shift.assignees.length), max: 50 })
+-    shift.status = shift.assignees.length >= shift.capacity ? 'full' : 'open'
++    if (shift.status !== 'cancelled') shift.status = shift.assignees.length >= shift.capacity ? 'full' : 'open'
+   }
+   const saved = await saveShift(shift)
+   await emit('shift.updated', { shiftId: id })
+   return saved
+ }
++
++/** A cancelled shift keeps its crew on record, so the event can tell them. */
++export async function cancelShift(id, { reason } = {}) {
++  const shift = await requireShift(id)
++  shift.status = 'cancelled'
++  const saved = await saveShift(shift)
++  await emit('shift.cancelled', { shiftId: shift.id, reason: optionalString(reason, 'reason'), assignees: [...shift.assignees] })
++  return saved
++}
+diff --git a/test/shifts.test.mjs b/test/shifts.test.mjs
+index 911d8d1..896f9ca 100644
+--- a/test/shifts.test.mjs
++++ b/test/shifts.test.mjs
+@@ -1,6 +1,6 @@
+ import assert from 'node:assert/strict'
+ import { beforeEach, test } from 'node:test'
+-import { createShift, getShift, listShifts, reset, updateShift } from '../src/index.js'
++import { cancelShift, createShift, getShift, listShifts, reset, updateShift } from '../src/index.js'
+ 
+ beforeEach(() => reset())
+ 
+@@ -39,3 +39,9 @@ test('updateShift keeps capacity above the current crew', async () => {
+   assert.equal((await getShift('shf_1')).title, 'Y')
+   await assert.rejects(updateShift('shf_2', { title: 'Z' }), { status: 404 })
+ })
++
++test('a cancelled shift is listed as such', async () => {
++  await createShift({ title: 'X', start: '2026-03-02T09:00:00Z', end: '2026-03-02T17:00:00Z' })
++  await cancelShift('shf_1', { reason: 'storm' })
++  assert.equal((await listShifts({ status: 'cancelled' })).length, 1)
++})

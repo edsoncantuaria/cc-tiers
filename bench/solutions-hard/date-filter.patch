@@ -1,0 +1,48 @@
+diff --git a/src/routes.js b/src/routes.js
+index 03f37be..0d4b047 100644
+--- a/src/routes.js
++++ b/src/routes.js
+@@ -45,7 +45,7 @@ export function buildRoutes() {
+   })
+ 
+   router.add('GET', '/shifts', async ({ query }) => ({
+-    body: await listShifts({ status: query.status, assignee: query.assignee }),
++    body: await listShifts({ status: query.status, assignee: query.assignee, from: query.from, to: query.to }),
+   }))
+ 
+   router.add('POST', '/shifts', async ({ auth, body }) => {
+diff --git a/src/shifts.js b/src/shifts.js
+index f013c9a..cefe16f 100644
+--- a/src/shifts.js
++++ b/src/shifts.js
+@@ -4,7 +4,7 @@ import { NotFoundError, ValidationError } from './errors.js'
+ import { emit } from './events.js'
+ import { nextId } from './ids.js'
+ import { db } from './store.js'
+-import { HOUR, isValidZone, parseInstant } from './time.js'
++import { HOUR, isValidZone, localDate, parseInstant, parseLocalDate } from './time.js'
+ import { optionalString, requireInt, requireOneOf, requireString } from './validate.js'
+ 
+ export const STATUSES = ['open', 'full']
+@@ -66,11 +66,20 @@ export async function saveShift(shift) {
+   return structuredClone(shift)
+ }
+ 
+-export async function listShifts({ status, assignee } = {}) {
++/** from and to (YYYY-MM-DD, inclusive) match the start date in the shift's own zone. */
++export async function listShifts({ status, assignee, from, to } = {}) {
+   if (status !== undefined) requireOneOf(status, 'status', STATUSES)
++  if (from !== undefined) parseLocalDate(from, 'from')
++  if (to !== undefined) parseLocalDate(to, 'to')
+   let shifts = await db.list('shift:')
+   if (status) shifts = shifts.filter((shift) => shift.status === status)
+   if (assignee) shifts = shifts.filter((shift) => shift.assignees.includes(assignee))
++  if (from !== undefined || to !== undefined) {
++    shifts = shifts.filter((shift) => {
++      const date = localDate(shift.start, shift.zone)
++      return (from === undefined || date >= from) && (to === undefined || date <= to)
++    })
++  }
+   return shifts.sort((a, b) => a.start - b.start || a.id.localeCompare(b.id, 'en', { numeric: true }))
+ }
+ 

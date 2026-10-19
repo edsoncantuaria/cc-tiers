@@ -1,0 +1,63 @@
+diff --git a/src/attachments.js b/src/attachments.js
+index a76ad3b..4234e69 100644
+--- a/src/attachments.js
++++ b/src/attachments.js
+@@ -1,9 +1,10 @@
+-import { mkdir, readFile, writeFile } from 'node:fs/promises'
++import { constants } from 'node:fs'
++import { mkdir, open, writeFile } from 'node:fs/promises'
+ import path from 'node:path'
+ import { getConfig } from './config.js'
+ import { AppError, NotFoundError, ValidationError } from './errors.js'
+ import { emit } from './events.js'
+-import { requireShift } from './shifts.js'
++import { getShift, requireShift } from './shifts.js'
+ 
+ // Letters, digits, dot, dash, underscore; never starting with a dot.
+ const NAME = /^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,99}$/
+@@ -27,12 +28,24 @@ export async function saveAttachment(shiftId, name, content) {
+   return { shiftId: shift.id, name, bytes: data.length }
+ }
+ 
++/**
++ * Serves only what saveAttachment could have written: a real shift, a valid name,
++ * and a regular file opened without following symlinks. Anything else is a 404.
++ */
+ export async function readAttachment(shiftId, name) {
+-  const file = path.resolve(root(), shiftId, name)
++  const missing = () => new NotFoundError(`no attachment ${name} on ${shiftId}`)
++  if (typeof name !== 'string' || !NAME.test(name)) throw missing()
++  const shift = typeof shiftId === 'string' ? await getShift(shiftId) : null
++  if (!shift) throw missing()
++  let handle
+   try {
+-    return await readFile(file)
++    handle = await open(path.join(root(), shift.id, name), constants.O_RDONLY | constants.O_NOFOLLOW)
++    if (!(await handle.stat()).isFile()) throw missing()
++    return await handle.readFile()
+   } catch (error) {
+-    if (error.code === 'ENOENT') throw new NotFoundError(`no attachment ${name} on ${shiftId}`)
++    if (['ENOENT', 'ELOOP', 'ENOTDIR', 'EISDIR'].includes(error.code)) throw missing()
+     throw error
++  } finally {
++    await handle?.close()
+   }
+ }
+diff --git a/test/attachments.test.mjs b/test/attachments.test.mjs
+index 816bc44..f4f2f16 100644
+--- a/test/attachments.test.mjs
++++ b/test/attachments.test.mjs
+@@ -27,3 +27,13 @@ test('saveAttachment refuses odd names and big files', async () => {
+   await assert.rejects(saveAttachment(shift.id, 'big.txt', 'abcde'), /too large/)
+   await assert.rejects(saveAttachment('shf_9', 'a.txt', 'a'), { status: 404 })
+ })
++
++test('readAttachment refuses paths outside the shift folder', async () => {
++  await seed()
++  configure({ filesRoot: root })
++  const shift = await nyShift('2026-03-02')
++  await saveAttachment(shift.id, 'notes.txt', 'x')
++  for (const name of ['../../etc/passwd', '/etc/passwd', `../${shift.id}/notes.txt`]) {
++    await assert.rejects(readAttachment(shift.id, name), { status: 404 }, name)
++  }
++})

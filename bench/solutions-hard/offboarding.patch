@@ -1,0 +1,97 @@
+diff --git a/src/audit.js b/src/audit.js
+index c589a6a..85c83df 100644
+--- a/src/audit.js
++++ b/src/audit.js
+@@ -3,7 +3,7 @@ import { on } from './events.js'
+ 
+ const TYPES = [
+   'user.created',
+-  'user.deactivated',
++  'user.offboarded',
+   'shift.created',
+   'shift.updated',
+   'shift.claimed',
+diff --git a/src/router.js b/src/router.js
+index ed4e0b7..397a34d 100644
+--- a/src/router.js
++++ b/src/router.js
+@@ -1,11 +1,16 @@
+ import { verifyToken } from './auth.js'
+ import { AppError, AuthError, ValidationError } from './errors.js'
++import { getUser } from './users.js'
+ 
+-function authenticate(headers) {
++/** A valid signature is not enough: the user must still exist and be active. */
++async function authenticate(headers) {
+   const header = headers.authorization || headers.Authorization || ''
+   const match = /^Bearer (\S+)$/.exec(header)
+   if (!match) throw new AuthError('missing bearer token')
+-  return verifyToken(match[1])
++  const auth = verifyToken(match[1])
++  const user = await getUser(auth.sub)
++  if (!user || !user.active) throw new AuthError('user is not active')
++  return auth
+ }
+ 
+ function match(route, segments) {
+@@ -50,7 +55,7 @@ export function createRouter() {
+           otherMethod = true
+           continue
+         }
+-        const auth = route.auth ? authenticate(headers) : null
++        const auth = route.auth ? await authenticate(headers) : null
+         const query = Object.fromEntries(new URLSearchParams(search))
+         const result = (await route.handler({ params, query, body, auth })) || {}
+         return { status: result.status ?? 200, body: result.body ?? null }
+diff --git a/src/users.js b/src/users.js
+index 03df19f..281735c 100644
+--- a/src/users.js
++++ b/src/users.js
+@@ -1,3 +1,4 @@
++import { now } from './clock.js'
+ import { getConfig } from './config.js'
+ import { ConflictError, NotFoundError, ValidationError } from './errors.js'
+ import { emit } from './events.js'
+@@ -42,10 +43,17 @@ export async function listUsers({ role } = {}) {
+   return role ? users.filter((user) => user.role === role) : users
+ }
+ 
++/** Offboards a user: they lose their tokens and every shift that has not started yet. */
+ export async function deactivateUser(id) {
+   const user = await requireUser(id)
+   user.active = false
+   await db.put(`user:${id}`, user)
+-  await emit('user.deactivated', { userId: id })
++  // Imported here: booking.js imports this module, so a top-level import would be a cycle.
++  const { releaseShift } = await import('./booking.js')
++  const { listShifts } = await import('./shifts.js')
++  for (const shift of await listShifts({ assignee: id })) {
++    if (shift.start > now()) await releaseShift(shift.id, id)
++  }
++  await emit('user.offboarded', { userId: id })
+   return user
+ }
+diff --git a/test/users.test.mjs b/test/users.test.mjs
+index f67b2e0..7e053df 100644
+--- a/test/users.test.mjs
++++ b/test/users.test.mjs
+@@ -1,6 +1,6 @@
+ import assert from 'node:assert/strict'
+ import { beforeEach, test } from 'node:test'
+-import { createUser, deactivateUser, getUser, listUsers, reset } from '../src/index.js'
++import { createUser, deactivateUser, getUser, listUsers, on, reset } from '../src/index.js'
+ 
+ beforeEach(() => reset())
+ 
+@@ -29,3 +29,11 @@ test('deactivated users stay readable but cannot be required', async () => {
+   assert.equal((await getUser(ana.id)).active, false)
+   await assert.rejects(deactivateUser(ana.id), { status: 404 })
+ })
++
++test('offboarding emits user.offboarded', async () => {
++  const ana = await createUser({ name: 'Ana', email: 'ana@shiftboard.test' })
++  let seen = null
++  on('user.offboarded', (payload) => void (seen = payload))
++  await deactivateUser(ana.id)
++  assert.deepEqual(seen, { userId: ana.id })
++})
