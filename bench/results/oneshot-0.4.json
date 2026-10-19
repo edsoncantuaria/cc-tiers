@@ -1,0 +1,455 @@
+{
+  "date": "2026-10-19T15:23:26.954Z",
+  "claudeCode": "2.1.303 (Claude Code)",
+  "plugin": "0.4.0",
+  "repeat": 1,
+  "configs": [
+    "cc-tiers",
+    "cc-tiers-light"
+  ],
+  "tasks": [
+    "typo",
+    "rename",
+    "lookup",
+    "bugfix",
+    "pagination",
+    "lru",
+    "mixed"
+  ],
+  "results": [
+    {
+      "config": "cc-tiers@0.4",
+      "task": "typo",
+      "kind": "trivial",
+      "rep": 1,
+      "pass": true,
+      "cost": 0.12482037000000001,
+      "models": {
+        "claude-opus-5-5": 0.1162436,
+        "claude-haiku-5-5": 0.00146917,
+        "claude-sonnet-5-5": 0.0071076
+      },
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 6,
+          "output": 684,
+          "cacheRead": 50738,
+          "cacheWrite": 11549
+        },
+        "claude-haiku-5-5": {
+          "input": 8,
+          "output": 869,
+          "cacheRead": 36512,
+          "cacheWrite": 5350
+        },
+        "claude-sonnet-5-5": {
+          "input": 4,
+          "output": 289,
+          "cacheRead": 6546,
+          "cacheWrite": 1422
+        }
+      },
+      "turns": 3,
+      "seconds": 19,
+      "subagents": 2,
+      "error": "",
+      "checkOutput": ""
+    },
+    {
+      "config": "cc-tiers-light@0.4",
+      "task": "typo",
+      "kind": "trivial",
+      "rep": 1,
+      "pass": true,
+      "cost": 0.040606485000000005,
+      "models": {
+        "claude-sonnet-5-5": 0.0395367,
+        "claude-haiku-5-5": 0.001069785
+      },
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 6,
+          "output": 374,
+          "cacheRead": 49207,
+          "cacheWrite": 7716
+        },
+        "claude-haiku-5-5": {
+          "input": 6,
+          "output": 606,
+          "cacheRead": 22231,
+          "cacheWrite": 4351
+        }
+      },
+      "turns": 1,
+      "seconds": 10,
+      "subagents": 1,
+      "error": "",
+      "checkOutput": ""
+    },
+    {
+      "config": "cc-tiers@0.4",
+      "task": "rename",
+      "kind": "trivial",
+      "rep": 1,
+      "pass": true,
+      "cost": 0.13819599,
+      "models": {
+        "claude-opus-5-5": 0.1264016,
+        "claude-haiku-5-5": 0.0014640900000000001,
+        "claude-sonnet-5-5": 0.0103303
+      },
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 6,
+          "output": 1016,
+          "cacheRead": 51008,
+          "cacheWrite": 11982
+        },
+        "claude-haiku-5-5": {
+          "input": 6,
+          "output": 1079,
+          "cacheRead": 26299,
+          "cacheWrite": 5288
+        },
+        "claude-sonnet-5-5": {
+          "input": 4,
+          "output": 408,
+          "cacheRead": 6648,
+          "cacheWrite": 2231
+        }
+      },
+      "turns": 3,
+      "seconds": 26,
+      "subagents": 2,
+      "error": "",
+      "checkOutput": ""
+    },
+    {
+      "config": "cc-tiers-light@0.4",
+      "task": "rename",
+      "kind": "trivial",
+      "rep": 1,
+      "pass": true,
+      "cost": 0.07257011000000001,
+      "models": {
+        "claude-sonnet-5-5": 0.0712865,
+        "claude-haiku-5-5": 0.0012836100000000001
+      },
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 14,
+          "output": 1608,
+          "cacheRead": 97385,
+          "cacheWrite": 12176
+        },
+        "claude-haiku-5-5": {
+          "input": 6,
+          "output": 892,
+          "cacheRead": 22751,
+          "cacheWrite": 4876
+        }
+      },
+      "turns": 1,
+      "seconds": 23,
+      "subagents": 2,
+      "error": "",
+      "checkOutput": ""
+    },
+    {
+      "config": "cc-tiers@0.4",
+      "task": "lookup",
+      "kind": "trivial",
+      "rep": 1,
+      "pass": true,
+      "cost": 0.10313919499999999,
+      "models": {
+        "claude-opus-5-5": 0.10197,
+        "claude-haiku-5-5": 0.001169195
+      },
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 4,
+          "output": 502,
+          "cacheRead": 29930,
+          "cacheWrite": 10741
+        },
+        "claude-haiku-5-5": {
+          "input": 6,
+          "output": 623,
+          "cacheRead": 26097,
+          "cacheWrite": 4769
+        }
+      },
+      "turns": 2,
+      "seconds": 14,
+      "subagents": 1,
+      "error": "",
+      "checkOutput": ""
+    },
+    {
+      "config": "cc-tiers-light@0.4",
+      "task": "lookup",
+      "kind": "trivial",
+      "rep": 1,
+      "pass": true,
+      "cost": 0.04170577,
+      "models": {
+        "claude-sonnet-5-5": 0.0406313,
+        "claude-haiku-5-5": 0.00107447
+      },
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 6,
+          "output": 450,
+          "cacheRead": 49273,
+          "cacheWrite": 7798
+        },
+        "claude-haiku-5-5": {
+          "input": 6,
+          "output": 558,
+          "cacheRead": 22437,
+          "cacheWrite": 4564
+        }
+      },
+      "turns": 1,
+      "seconds": 10,
+      "subagents": 1,
+      "error": "",
+      "checkOutput": ""
+    },
+    {
+      "config": "cc-tiers@0.4",
+      "task": "bugfix",
+      "kind": "normal",
+      "rep": 1,
+      "pass": true,
+      "cost": 0.1353126,
+      "models": {
+        "claude-opus-5-5": 0.1108244,
+        "claude-sonnet-5-5": 0.0244882
+      },
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 4,
+          "output": 871,
+          "cacheRead": 29822,
+          "cacheWrite": 10928
+        },
+        "claude-sonnet-5-5": {
+          "input": 6,
+          "output": 858,
+          "cacheRead": 26687,
+          "cacheWrite": 5291
+        }
+      },
+      "turns": 2,
+      "seconds": 18,
+      "subagents": 1,
+      "error": "",
+      "checkOutput": ""
+    },
+    {
+      "config": "cc-tiers-light@0.4",
+      "task": "bugfix",
+      "kind": "normal",
+      "rep": 1,
+      "pass": true,
+      "cost": 0.0650389,
+      "models": {
+        "claude-sonnet-5-5": 0.0650389
+      },
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 12,
+          "output": 1443,
+          "cacheRead": 71969,
+          "cacheWrite": 12665
+        }
+      },
+      "turns": 1,
+      "seconds": 28,
+      "subagents": 1,
+      "error": "",
+      "checkOutput": ""
+    },
+    {
+      "config": "cc-tiers@0.4",
+      "task": "pagination",
+      "kind": "normal",
+      "rep": 1,
+      "pass": true,
+      "cost": 0.36125120000000005,
+      "models": {
+        "claude-opus-5-5": 0.2895572,
+        "claude-sonnet-5-5": 0.07169400000000001
+      },
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 16,
+          "output": 5267,
+          "cacheRead": 93531,
+          "cacheWrite": 24525
+        },
+        "claude-sonnet-5-5": {
+          "input": 14,
+          "output": 3847,
+          "cacheRead": 85860,
+          "cacheWrite": 9844
+        }
+      },
+      "turns": 4,
+      "seconds": 107,
+      "subagents": 2,
+      "error": "",
+      "checkOutput": ""
+    },
+    {
+      "config": "cc-tiers-light@0.4",
+      "task": "pagination",
+      "kind": "normal",
+      "rep": 1,
+      "pass": true,
+      "cost": 0.116571,
+      "models": {
+        "claude-sonnet-5-5": 0.116571
+      },
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 20,
+          "output": 4588,
+          "cacheRead": 122065,
+          "cacheWrite": 18030
+        }
+      },
+      "turns": 1,
+      "seconds": 43,
+      "subagents": 1,
+      "error": "",
+      "checkOutput": ""
+    },
+    {
+      "config": "cc-tiers@0.4",
+      "task": "lru",
+      "kind": "hard",
+      "rep": 1,
+      "pass": true,
+      "cost": 0.19399969999999997,
+      "models": {
+        "claude-opus-5-5": 0.13930979999999998,
+        "claude-sonnet-5-5": 0.0546899
+      },
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 6,
+          "output": 1684,
+          "cacheRead": 51669,
+          "cacheWrite": 11909
+        },
+        "claude-sonnet-5-5": {
+          "input": 8,
+          "output": 3085,
+          "cacheRead": 38814,
+          "cacheWrite": 7977
+        }
+      },
+      "turns": 3,
+      "seconds": 41,
+      "subagents": 1,
+      "error": "",
+      "checkOutput": ""
+    },
+    {
+      "config": "cc-tiers-light@0.4",
+      "task": "lru",
+      "kind": "hard",
+      "rep": 1,
+      "pass": true,
+      "cost": 0.09138519999999999,
+      "models": {
+        "claude-sonnet-5-5": 0.09138519999999999
+      },
+      "tokens": {
+        "claude-sonnet-5-5": {
+          "input": 12,
+          "output": 3223,
+          "cacheRead": 72682,
+          "cacheWrite": 15512
+        }
+      },
+      "turns": 1,
+      "seconds": 26,
+      "subagents": 1,
+      "error": "",
+      "checkOutput": ""
+    },
+    {
+      "config": "cc-tiers@0.4",
+      "task": "mixed",
+      "kind": "mixed",
+      "rep": 1,
+      "pass": true,
+      "cost": 0.393655155,
+      "models": {
+        "claude-opus-5-5": 0.322849,
+        "claude-haiku-5-5": 0.0012972550000000002,
+        "claude-sonnet-5-5": 0.06950890000000001
+      },
+      "tokens": {
+        "claude-opus-5-5": {
+          "input": 18,
+          "output": 6086,
+          "cacheRead": 141050,
+          "cacheWrite": 23428
+        },
+        "claude-haiku-5-5": {
+          "input": 6,
+          "output": 730,
+          "cacheRead": 26653,
+          "cacheWrite": 5321
+        },
+        "claude-sonnet-5-5": {
+          "input": 16,
+          "output": 2703,
+          "cacheRead": 60994,
+          "cacheWrite": 14539
+        }
+      },
+      "turns": 8,
+      "seconds": 95,
+      "subagents": 5,
+      "error": "",
+      "checkOutput": ""
+    },
+    {
+      "config": "cc-tiers-light@0.4",
+      "task": "mixed",
+      "kind": "mixed",
+      "rep": 1,
+      "pass": true,
+      "cost": 0.12729136,
+      "models": {
+        "claude-haiku-5-5": 0.00176056,
+        "claude-sonnet-5-5": 0.1255308
+      },
+      "tokens": {
+        "claude-haiku-5-5": {
+          "input": 8,
+          "output": 1405,
+          "cacheRead": 32401,
+          "cacheWrite": 5866
+        },
+        "claude-sonnet-5-5": {
+          "input": 24,
+          "output": 3827,
+          "cacheRead": 139338,
+          "cacheWrite": 21673
+        }
+      },
+      "turns": 1,
+      "seconds": 25,
+      "subagents": 3,
+      "error": "",
+      "checkOutput": ""
+    }
+  ]
+}

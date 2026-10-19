@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 /**
  * `/cc-tiers:route` helper. Reads a task description from the arguments or stdin
- * and prints the heuristic tier as JSON. The command applies judgment on top.
+ * and prints the heuristic tier, its first effort, and the complexity score as
+ * JSON. The command applies judgment on top.
  */
 
 import path from 'node:path'
 import {
+  assessComplexity,
   budgetDecision,
   collectLimits,
   decideTier,
@@ -28,9 +30,18 @@ const { project } = readProjectFile(projectDir)
 const routing = mergeRouting(loadJson(path.join(pluginRoot(env), 'config', 'routing.default.json')), project, userFromEnv(env))
 const budget = budgetDecision(collectLimits({ env }), routing)
 const history = routing.learn ? loadHistory(historyPath(projectDir)) : null
-const decision = decideTier(text, routing, { history, conserve: budget.conserve })
+const decision = decideTier(text, routing, { history, conserve: budget.conserve, projectDir })
 const risky = isRisky(text, routing)
+const complexity = assessComplexity(text, routing, { projectDir })
 const review = selectReviewer({ policy: routing.reviewPolicy, writerTier: decision.tier, risky, conserve: budget.conserve })
-process.stdout.write(
-  `${JSON.stringify({ ...decision, risky, review: review || 'no', conserve: budget.conserve, reviewPolicy: routing.reviewPolicy }, null, 2)}\n`,
-)
+const result = {
+  ...decision,
+  risky,
+  complexity: complexity.score,
+  signals: complexity.signals,
+  review: review || 'no',
+  conserve: budget.conserve,
+  reviewPolicy: routing.reviewPolicy,
+  classifier: routing.classifier,
+}
+process.stdout.write(`${JSON.stringify(result, null, 2)}\n`)

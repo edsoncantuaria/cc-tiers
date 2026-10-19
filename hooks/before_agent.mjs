@@ -2,7 +2,8 @@
 /**
  * PreToolUse hook for Agent calls. Refuses a cc-tiers delegation that passes a
  * model override, has no CC_TIERS_TASK header, or goes back below the tier the
- * counter already escalated to. Also delivers reports counted since the last hook.
+ * counter already escalated to. Sets the effort the attempt runs at, and delivers
+ * reports counted since the last hook.
  */
 
 import {
@@ -24,14 +25,14 @@ function main() {
   const ctx = openContext(payload)
   const history = ctx.routing.learn && ctx.projectDir ? loadHistory(historyPath(ctx.projectDir)) : null
 
-  const { deny, context } = withSession(ctx, payload, (state) => {
-    const checked = checkDelegation(state, payload.tool_input, ctx.routing, { history })
+  const { deny, context, input } = withSession(ctx, payload, (state) => {
+    const checked = checkDelegation(state, payload.tool_input, ctx.routing, { history, projectDir: ctx.projectDir })
     const pending = takePending(state)
-    return { deny: checked.deny, context: [pending, checked.context].filter(Boolean).join('\n\n') }
+    return { deny: checked.deny, input: checked.input, context: [pending, checked.context].filter(Boolean).join('\n\n') }
   })
 
-  if (!deny && !context) return
-  process.stdout.write(`${JSON.stringify(preToolOutput(deny, context))}\n`)
+  if (!deny && !context && !input) return
+  process.stdout.write(`${JSON.stringify(preToolOutput(deny, context, input))}\n`)
 }
 
 try {

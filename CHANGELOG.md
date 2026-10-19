@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.5.0 - 2026-10-19
+
+### Added
+
+- Cost per task, with no other plugin needed. Each finished task gets a `cc-tiers cost` line at Anthropic API list prices, priced per model id from `prices` in `config/routing.default.json` (cache reads at the model's rate, cache writes at 1.25x or 2x input), next to the same tokens at Opus rates. The session summary carries the running total. `show_cost` (`on` / `off`).
+- `/cc-tiers:report [--all]` and `hooks/report.mjs`: one table per session with the tiers each task ran on, attempts, escalations, effort, review, status, and cost next to Opus rates.
+- Large files: a task that names project files adding up to `largeFileBytes` (400 KB) or more scores 2 on complexity and starts on Sonnet. This is the Claude-only take on long-context routing.
+- `bench/`: a benchmark with a fixture project, seven tasks with hidden checks, and a runner that compares Opus only, Sonnet only, the orchestrator, and light mode, one task per session or all tasks in one session. Results are in `bench/results/` and in the README.
+- The README covers pairing light mode with Claude Code's advisor tool.
+
+### Changed
+
+- The benchmark showed that a fresh subagent context costs more than a small task. `light_path` is now `inline` by default: a one-task trivial request is done by the session agent itself, with no worker and no checker. `delegate` keeps the 0.4 behavior; `off` turns it off. `on` reads as `inline`.
+- The light-mode dispatcher does one ordinary task itself on Sonnet instead of opening a Sonnet implementer, and marks the attempt with a `CC_TIERS_ROLE: dispatcher` trailer that the hooks count like the Opus ceiling trailer. Two failures still move the task to `cc-tiers:architect`. It delegates when a request has several tasks or a task is too big for its context.
+
+## 0.4.0 - 2026-10-19
+
+### Added
+
+- Effort ladder. A retry at the same tier runs one effort level higher before the task changes model: Haiku `low` → `medium`, Sonnet `medium` → `high` → `xhigh`, Opus (`cc-tiers:architect`) `high` → `xhigh`. The PreToolUse hook sets `effort` on the Agent call with `updatedInput`, keeps a higher level the orchestrator asks for up to the top of the ladder, and never lowers it. A Sonnet task that matches a review keyword starts one level up. While budget routing conserves, effort stops at `conserveCap` (`high`). `effort_ladder` (`on` / `off`) in `/config`, and `effort.<tier>` / `effort.conserveCap` in the project file.
+- Complexity score, a local second opinion next to the keyword lists: several steps, three or more files, design or investigation wording (`sonnet.complexKeywords`, English and Portuguese), or a long brief. A trivial-looking task that scores 2 or more starts on Sonnet (`because: complex`). `/cc-tiers:route` prints the score, its signals, and the first effort.
+- Haiku classifier, a `prompt` hook limited to `cc-tiers:worker` calls (`if: Agent(cc-tiers:worker)`, `continueOnBlock`). It refuses a worker call whose task is not really trivial, and the orchestrator sends the slug to Sonnet without counting a failure. `classifier: local` turns it off; worker prompts then carry `CC_TIERS_CLASSIFY: skip`, which the command hook refuses while the classifier is `haiku`.
+- Light path. UserPromptSubmit tells the orchestrator when a request is one trivial task: no written plan, one delegation, no checker pass for a lookup. `light_path` (`on` / `off`).
+- Light mode: `cc-tiers:dispatcher`, a Sonnet session agent that calls Opus only through `cc-tiers:planner` (a read-only plan for a multi-task request), `cc-tiers:architect` (the ceiling), and `cc-tiers:reviewer`. Planner runs are not attempts; their spend goes to `(orchestration)`.
+- Sonnet escalations are learned. A task that used its attempts on Sonnet is recorded in the history with `tier: sonnet`, and a similar task later starts on Sonnet at the top of its ladder.
+
+### Changed
+
+- An API or network error (overloaded, rate limit, 5xx, connection reset) is no longer counted as a failure. The same tier runs again, so an outage does not push work up to Opus.
+- Under the `cheap` policy, a lookup or search that changed no files skips the checker.
+- Escalation and refusal messages name `cc-tiers:architect` as the Opus ceiling in light mode.
+
 ## 0.3.0 - 2026-10-19
 
 ### Fixed
