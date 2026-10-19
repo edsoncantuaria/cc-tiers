@@ -1835,3 +1835,27 @@ test('the research list is capped and drops the oldest slug', () => {
   assert.equal(slugs[0], 't5')
   assert.equal(state.researched.t204, true)
 })
+
+test('the calculator check fails on the empty fixture and passes with the reference', async () => {
+  const bench = path.join(ROOT, 'bench')
+  const tasks = JSON.parse(readFileSync(path.join(bench, 'tasks-calc.json'), 'utf8'))
+  assert.deepEqual(tasks.map((task) => [task.id, task.kind]), [['calc', 'normal']])
+  assert.ok(tasks[0].prompt)
+  const { cpSync } = await import('node:fs')
+  const env = { ...process.env }
+  delete env.NODE_TEST_CONTEXT
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-calc-'))
+  try {
+    cpSync(path.join(bench, 'fixture-calc'), dir, { recursive: true })
+    mkdirSync(path.join(dir, '.bench-check'))
+    cpSync(path.join(bench, 'checks-calc', 'calc.test.mjs'), path.join(dir, '.bench-check', 'calc.test.mjs'))
+    const run = (...files) => spawnSync(process.execPath, ['--test', ...files], { cwd: dir, encoding: 'utf8', env })
+    assert.notEqual(run('.bench-check/calc.test.mjs').status, 0, 'check passes on the empty fixture')
+    mkdirSync(path.join(dir, 'src'))
+    cpSync(path.join(bench, 'solutions-calc', 'calc.js'), path.join(dir, 'src', 'calc.js'))
+    const proc = run('.bench-check/calc.test.mjs', 'test/smoke.test.mjs')
+    assert.equal(proc.status, 0, `reference fails:\n${proc.stdout.slice(-1500)}`)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
