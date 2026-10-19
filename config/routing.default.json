@@ -4,7 +4,11 @@
   "learn": true,
   "budget5h": 80,
   "budget7d": 80,
-  "escalation": ["haiku", "sonnet", "opus"],
+  "escalation": [
+    "haiku",
+    "sonnet",
+    "opus"
+  ],
   "tiers": {
     "haiku": {
       "model": "haiku",
@@ -16,6 +20,26 @@
         "look up where a symbol is defined or who calls it",
         "a simple search that only reports what it finds",
         "a mechanical edit of about 15 lines or fewer in one file"
+      ],
+      "keywords": [
+        "rename",
+        "renomear",
+        "renomeie",
+        "typo",
+        "erro de digitacao",
+        "reformat",
+        "formatar",
+        "lint",
+        "codemod",
+        "docstring",
+        "fix a comment",
+        "where is",
+        "who calls",
+        "find usages",
+        "look up",
+        "lookup",
+        "onde fica",
+        "quem chama"
       ]
     },
     "sonnet": {
@@ -43,6 +67,49 @@
         "concurrency, security, or a change across packages",
         "a large diff, or the implementer is unsure",
         "anything the orchestrator judges non-trivial"
+      ],
+      "reviewKeywords": [
+        "authent",
+        "authoriz",
+        "oauth",
+        "login",
+        "password",
+        "credential",
+        "secret",
+        "permission",
+        "autentic",
+        "autoriz",
+        "senha",
+        "permiss",
+        "payment",
+        "billing",
+        "invoice",
+        "checkout",
+        "pagamento",
+        "cobranca",
+        "fatura",
+        "migrat",
+        "migrac",
+        "schema",
+        "esquema",
+        "public api",
+        "api publica",
+        "breaking change",
+        "data loss",
+        "perda de dados",
+        "drop table",
+        "security",
+        "seguranca",
+        "vulnerab",
+        "encrypt",
+        "criptograf",
+        "concurren",
+        "concorren",
+        "race condition",
+        "deadlock",
+        "mutex",
+        "transaction",
+        "transac"
       ]
     }
   }

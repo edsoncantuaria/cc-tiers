@@ -9,7 +9,7 @@ when_to_use: "The user wants a feature, bug fix, rename, formatting pass, code l
 
 Run the tiered workflow for `$ARGUMENTS`. If that is empty, use the user's latest request.
 
-You are coordinating, even if this session is not already the Opus orchestrator. Delegate with the Agent tool to the agents below. Do not pass a `model` argument; each agent file pins its model. Run them in the foreground.
+You are coordinating, even if this session is not already the Opus orchestrator. Delegate with the Agent tool to the agents below. Do not pass a `model` argument; each agent file pins its model, and the cc-tiers hook refuses a call that overrides it. Prefer the foreground; a background run is counted when it finishes.
 
 ## Live settings
 
@@ -23,7 +23,7 @@ You are coordinating, even if this session is not already the Opus orchestrator.
 
 If a placeholder is still visible, use 2, `cheap`, learning `on`, thresholds of 80, and no extra phrases.
 
-The session-start note is the effective phrase list, the budget line, and the Haiku history line. When it is missing, read `${CLAUDE_PLUGIN_ROOT}/config/routing.default.json` and, if it exists, `${CLAUDE_PROJECT_DIR}/.claude/cc-tiers.json`. A list in the project file replaces that list. `/config` wins for the attempt limit, the review policy, learning, and the budget thresholds. Append the extra phrases.
+The session-start note is the effective phrase list, the budget line, and the Haiku history line. When it is missing, read `${CLAUDE_PLUGIN_ROOT}/config/routing.default.json` and, if it exists, `${CLAUDE_PROJECT_DIR}/.claude/cc-tiers.json`. A list in the project file (`when`, `keywords`, `reviewWhen`, `reviewKeywords`) replaces that list. `/config` wins for the attempt limit, the review policy, learning, and the budget thresholds. Append the extra phrases.
 
 ## Route
 
@@ -40,7 +40,7 @@ Default to Sonnet when a task is not clearly trivial. When the session says `Bud
 
 ## Attempt rule
 
-A failure is a failed test, a rejected review, or a subagent error. After ${user_config.max_attempts} failures at one tier (default 2), escalate Haiku to Sonnet, then Sonnet to Opus. Paste every failure note into the next prompt. The new tier starts at zero. The Opus ceiling is `cc-tiers:orchestrator`: do the work in this session when that agent is already the session agent, and delegate to it (no `model` override, failure notes in the prompt) when it is not. If the Opus attempts also fail, stop and report the notes. Do not add a tier above Opus. Conserving budget does not block the ceiling.
+A failure is a failed test, a rejected review, or a subagent error. After ${user_config.max_attempts} failures at one tier (default 2), escalate Haiku to Sonnet, then Sonnet to Opus. Paste every failure note into the next prompt. The new tier starts at zero. The Opus ceiling is `cc-tiers:orchestrator`: do the work in this session when that agent is already the session agent, and delegate to it (no `model` override, failure notes in the prompt) when it is not. If the Opus attempts also fail, stop and report the notes. Do not add a tier above Opus. Conserving budget does not block the ceiling. When you implement at the ceiling in this session, open the attempt with `CC_TIERS_TASK`, `CC_TIERS_TIER: opus`, and `CC_TIERS_ROLE: orchestrator` lines, and close it with the same lines plus `CC_TIERS_STATUS` and `CC_TIERS_REASON`, so the hook counts it.
 
 A hook note that begins `cc-tiers counted a failure` is the counter. Follow its next step. A note that begins `cc-tiers recorded a Haiku failure` means similar later tasks start on Sonnet. A `cc-tiers spend` note is the fresh-token cost of that task when cc-cost is installed. Do not invent one when the session says cc-cost is not installed.
 

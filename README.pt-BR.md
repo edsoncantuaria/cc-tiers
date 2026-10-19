@@ -4,7 +4,7 @@
 
 Um plugin do Claude Code que deixa cada tarefa no nível mais barato que dá conta dela e sobe de nível com as notas da falha junto.
 
-[![Claude Code](https://img.shields.io/badge/Claude_Code-2.1.271%2B-d97757?style=for-the-badge&logo=anthropic&logoColor=white)](https://claude.com/claude-code)
+[![Claude Code](https://img.shields.io/badge/Claude_Code-2.1.295%2B-d97757?style=for-the-badge&logo=anthropic&logoColor=white)](https://claude.com/claude-code)
 [![Plugin](https://img.shields.io/badge/tipo-plugin-8a63d2?style=for-the-badge)](#-instala%C3%A7%C3%A3o)
 [![Licença: MIT](https://img.shields.io/badge/licen%C3%A7a-MIT-2f81f7?style=for-the-badge)](LICENSE)
 
@@ -46,7 +46,7 @@ claude --plugin-dir /caminho/para/cc-tiers
 
 Com o plugin ativo, o `settings.json` define o agente da sessão como `orchestrator`. O seu `agent` em `~/.claude/settings.json` continua valendo. Se você substituir, `/cc-tiers:tiers` roda o mesmo fluxo.
 
-Os agentes fixam `model: haiku`, `sonnet` ou `opus`. O orquestrador não passa modelo na chamada, porque um override por chamada trocaria o nível.
+Os agentes fixam `model: haiku`, `sonnet` ou `opus`. O orquestrador não passa modelo na chamada, porque um override por chamada trocaria o nível. Um hook PreToolUse recusa a delegação do cc-tiers que tentar.
 
 ```mermaid
 flowchart LR
@@ -75,13 +75,20 @@ O nível novo começa do zero. O Opus é o último degrau: o orquestrador faz es
 
 Um hook na ferramenta Agent guarda o contador. Quando ele diz `cc-tiers counted a failure`, essa contagem é a que o orquestrador segue.
 
+Os hooks garantem o que os prompts pedem:
+
+- **Antes de uma delegação** (PreToolUse), a chamada a um agente do cc-tiers é recusada quando passa `model`, não tem o header `CC_TIERS_TASK` ou manda uma tarefa já escalada de volta para um nível abaixo. Subir uma tarefa antes do limite (`/cc-tiers:escalate`) move o contador junto, com as notas.
+- **Agentes em background** também contam. O lançamento grava o id do agente, e o SubagentStop conta o relatório quando ele termina. O aviso chega ao orquestrador na próxima delegação ou no fim do turno.
+- **O teto Opus** não tem chamada Agent, então o orquestrador marca a própria tentativa com o header `CC_TIERS_TASK` / `CC_TIERS_TIER: opus` / `CC_TIERS_ROLE: orchestrator` e fecha com `CC_TIERS_STATUS`. O hook conta esse trailer como qualquer outro relatório.
+- Agentes em paralelo dividem um arquivo de contador por sessão, com lock e gravação atômica.
+
 ---
 
 ## 💸 Gasto, com o cc-cost
 
-Quando o [cc-cost](https://github.com/edsoncantuaria/cc-cost) está instalado, o resumo da sessão e cada tarefa terminada reportam **tokens novos por nível de modelo**. Tokens novos são entrada + escrita de cache + saída. Leituras de cache ficam de fora, a mesma regra do cc-cost. O hook atribui o uso do transcript, e o uso do próprio resultado do agente, ao slug `CC_TIERS_TASK`.
+Quando o [cc-cost](https://github.com/edsoncantuaria/cc-cost) está instalado, o resumo da sessão e cada tarefa terminada reportam **tokens novos por nível de modelo**. Tokens novos são entrada + escrita de cache + saída. Leituras de cache ficam de fora, a mesma regra do cc-cost. Os tokens de um subagente vêm do resultado do Agent, ou do próprio transcript dele quando rodou em background, e vão para o slug `CC_TIERS_TASK`. A mensagem do orquestrador que delega uma tarefa conta para essa tarefa, assim como os turnos dele dentro de uma tentativa no teto. Os outros turnos aparecem como `(orchestration)`. O hook lê o transcript da sessão de forma incremental, de onde o último hook parou, então os totais só crescem e sessões longas continuam baratas.
 
-As janelas de 5h e 7d usam os tipos do cc-cost, `five_hour` e `seven_day`. O hook lê esses valores do payload do hook quando o Claude Code os inclui, do transcript, e de `limits.json` ou `store.json` no diretório de dados do cc-cost (`~/.claude/plugins/data/cc-cost/`). O total do dia aparece quando esse diretório tem as chaves `novos:<dia>:<sessionId>` do cc-cost.
+As janelas de 5h e 7d usam os tipos do cc-cost, `five_hour` e `seven_day`. O hook lê esses valores do payload do hook quando o Claude Code os inclui, do transcript à medida que é lido, e de `limits.json` ou `store.json` no diretório de dados do cc-cost (`~/.claude/plugins/data/cc-cost/`). O total do dia aparece quando esse diretório tem as chaves `novos:<dia>:<sessionId>` do cc-cost.
 
 Se o cc-cost não está instalado, essas linhas somem. Roteamento, retentativas e revisão continuam. Uma janela sem leitura não inventa porcentagem.
 
@@ -97,9 +104,9 @@ Uma janela cujo horário de reset já passou conta como 0, do mesmo jeito que o 
 
 ## 🧠 Aprendendo com o Haiku
 
-Com `learn` em `on` (o padrão), uma falha do Haiku vai para `.claude/cc-tiers-history.json` no projeto. A tarefa seguinte que compartilha esse tipo, ou palavras suficientes, começa no Sonnet em vez do Haiku. `off` não grava nada e ignora o arquivo.
+Com `learn` em `on` (o padrão), uma falha do Haiku vai para `.claude/cc-tiers-history.json` no projeto. A tarefa seguinte com o mesmo slug, ou palavras suficientes em comum, começa no Sonnet em vez do Haiku. As palavras são comparadas sem acento, então `migração` e `migracao` casam. `off` não grava nada e ignora o arquivo.
 
-A primeira gravação adiciona `.claude/cc-tiers-history.json` ao `.gitignore` do projeto quando o projeto é um checkout git ou já tem um `.gitignore`. O repositório do plugin também ignora esse caminho.
+A primeira gravação adiciona o arquivo ao `.git/info/exclude` quando o projeto é um checkout git (worktrees incluídas), então ele fica fora do git sem mexer no `.gitignore` versionado. O repositório do plugin também ignora esse caminho.
 
 ---
 
@@ -108,7 +115,7 @@ A primeira gravação adiciona `.claude/cc-tiers-history.json` ao `.gitignore` d
 | Comando | O que faz |
 | --- | --- |
 | `/cc-tiers:tiers [tarefa]` | Planeja, encaminha e executa |
-| `/cc-tiers:route [tarefa]` | Diz o nível e para. Sem editar |
+| `/cc-tiers:route [tarefa]` | Diz o nível e para. Usa a mesma heurística dos hooks. Sem editar |
 | `/cc-tiers:escalate [slug]` | Sobe essa tarefa um nível agora, com as notas |
 
 Dá também para pedir em linguagem comum. A skill `tiers` entra quando o pedido é implementar, corrigir, renomear ou revisar. Mencione um agente direto com `@agent-cc-tiers:worker`, `@agent-cc-tiers:implementer`, `@agent-cc-tiers:checker` ou `@agent-cc-tiers:reviewer`.
@@ -146,7 +153,9 @@ Abra `/config` e ajuste as linhas do cc-tiers. Valem na sessão seguinte (o hook
 
 `cheap` manda a saída do Haiku para o checker Sonnet e só manda revisão Opus para uma frase de revisão ou para o teto. `risky` é o comportamento da 0.1.0: o Opus revisa trabalho não trivial e pula um passe trivial do Haiku. `always` revisa todo passe (Haiku no Sonnet, o resto no Opus). `never` pula a revisão. Enquanto uma janela de orçamento está economizando, a revisão Opus fica para o trabalho crítico mesmo em `risky` ou `always`.
 
-Para trocar uma lista inteira de frases, crie `.claude/cc-tiers.json` no projeto. A lista que você incluir substitui aquela lista; as que você omitir ficam no padrão. O mesmo arquivo pode definir `learn`, `budget5h` e `budget7d` quando o `/config` deixa esses campos vazios. O `/config` continua ganhando quando os dois estão definidos. Veja `config/cc-tiers.example.json`.
+O roteamento usa dois tipos de lista. **Frases** (`when`, `reviewWhen` e as opções `_extra`) casam quando a frase inteira aparece na tarefa. **Palavras-chave** (`haiku.keywords`, `opus.reviewKeywords`) casam no começo de uma palavra, sem diferenciar maiúsculas nem acentos: `migra` acha "migration" e "migração", `authent` acha "authentication" mas não "author". As palavras-chave embutidas cobrem renomear, typos, formatação e buscas para o Haiku, e auth, pagamentos, migrações, schemas, APIs públicas, segurança e concorrência para a revisão Opus, em inglês e português. Uma tarefa que parece miúda mas bate numa palavra-chave de revisão começa no Sonnet.
+
+Para trocar uma lista inteira, crie `.claude/cc-tiers.json` no projeto. A lista que você incluir substitui aquela lista; as que você omitir ficam no padrão. O mesmo arquivo pode definir `learn`, `budget5h` e `budget7d` quando o `/config` deixa esses campos vazios. O `/config` continua ganhando quando os dois estão definidos. Veja `config/cc-tiers.example.json`.
 
 ```json
 {
@@ -155,19 +164,20 @@ Para trocar uma lista inteira de frases, crie `.claude/cc-tiers.json` no projeto
   "budget7d": 80,
   "trivialExtra": ["changelog edits"],
   "tiers": {
-    "haiku": { "when": ["rename a symbol in one or two files", "changelog edits"] }
+    "haiku": { "when": ["rename a symbol in one or two files", "changelog edits"] },
+    "opus": { "reviewKeywords": ["authent", "payment", "migrat", "terraform"] }
   }
 }
 ```
 
-A ordem de escalonamento é fixa. As frases de roteamento, o limite de tentativas, a política de revisão, o aprendizado e os dois limiares de orçamento são os controles.
+A ordem de escalonamento é fixa. As frases e palavras-chave de roteamento, o limite de tentativas, a política de revisão, o aprendizado e os dois limiares de orçamento são os controles.
 
 ---
 
 ## 📋 Requisitos
 
-- Claude Code **2.1.271+** (os seletores do `/config` usam `userConfig.options`).
-- Node.js no `PATH` como `node`, que o Claude Code já traz. Os hooks não chamam Python.
+- Claude Code **2.1.295+** (os seletores do `/config` usam `userConfig.options`, e o hook PreToolUse usa `onFailure`).
+- Node.js 18+ no `PATH` como `node`. Os hooks chamam `node` direto, então rodam igual no bash, no Git Bash e no PowerShell do Windows. Não chamam Python.
 
 ## 🛠️ Desenvolvimento
 
@@ -194,13 +204,15 @@ claude --plugin-dir .
 | `commands/route.md` | `/cc-tiers:route` |
 | `commands/escalate.md` | `/cc-tiers:escalate` |
 | `config/routing.default.json` | Listas de frases embutidas e limiares padrão |
-| `hooks/hooks.json` | Resumo no SessionStart e o contador de tentativas do Agent |
+| `hooks/hooks.json` | Resumo no SessionStart, as checagens e o contador do Agent, SubagentStop, Stop e UserPromptSubmit |
 | `hooks/cc_tiers.mjs` | Regras de merge, o contador, gasto, orçamento e histórico |
+| `hooks/route.mjs` | A heurística por trás do `/cc-tiers:route` |
+| `.github/workflows/ci.yml` | Testes no Linux, macOS e Windows, e `claude plugin validate` |
 | `CHANGELOG.md` | Notas da versão |
 
 ## 🔒 Privacidade
 
-Sem rede e sem telemetria. Os hooks leem os arquivos de roteamento, as opções de plugin que o Claude Code já passa, o transcript da sessão, e os dados locais do cc-cost quando esse plugin está instalado. Gravam o contador de tentativas no diretório de dados do plugin (`latest.json` e um arquivo por sessão) e, com o aprendizado ligado, `.claude/cc-tiers-history.json` no projeto. Desinstalar o plugin remove o diretório de dados, a menos que você passe `--keep-data`. O arquivo de histórico fica no projeto até você apagá-lo.
+Sem rede e sem telemetria. Os hooks leem os arquivos de roteamento, as opções de plugin que o Claude Code já passa, o transcript da sessão, e os dados locais do cc-cost quando esse plugin está instalado. Gravam o contador de tentativas no diretório de dados do plugin (`latest.json` e um arquivo por sessão) e, com o aprendizado ligado, `.claude/cc-tiers-history.json` no projeto mais uma linha em `.git/info/exclude`. Desinstalar o plugin remove o diretório de dados, a menos que você passe `--keep-data`. O arquivo de histórico fica no projeto até você apagá-lo.
 
 ---
 

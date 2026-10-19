@@ -3,8 +3,21 @@
  * Hook entrypoints stay thin. This module is what the tests lock in.
  */
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, statSync, unlinkSync } from 'node:fs'
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  readSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 export const TIERS = ['haiku', 'sonnet', 'opus']
 export const NEXT_TIER = { haiku: 'sonnet', sonnet: 'opus', opus: null }
@@ -16,23 +29,30 @@ export const SCOPED = {
   checker: 'cc-tiers:checker',
   orchestrator: 'cc-tiers:orchestrator',
 }
-export const ROLES = { worker: 'haiku', implementer: 'sonnet', reviewer: 'opus', checker: 'sonnet' }
+export const ROLES = { worker: 'haiku', implementer: 'sonnet', reviewer: 'opus', checker: 'sonnet', orchestrator: 'opus' }
 export const REVIEW_ROLES = new Set(['reviewer', 'checker'])
 export const REVIEW_POLICIES = new Set(['cheap', 'risky', 'always', 'never'])
 export const DEFAULT_MAX_ATTEMPTS = 2
 export const DEFAULT_BUDGET = 80
 export const HISTORY_BASENAME = 'cc-tiers-history.json'
 export const HISTORY_IGNORE = `.claude/${HISTORY_BASENAME}`
+export const OVERHEAD = '(orchestration)'
 export const MAX_PHRASES = 40
 export const MAX_PHRASE_LEN = 200
 export const MAX_CARRIED = 8
 export const MAX_REASON = 500
 export const MAX_HISTORY = 40
+const MAX_SEEN = 200
+const MAX_MESSAGE_IDS = 400
+const MAX_PENDING = 12
+const SCAN_FIRST_CAP = 32 * 1024 * 1024
+const LOCK_WAIT_MS = 3000
+const LOCK_STALE_MS = 10000
 const HEADER_RE = /^CC_TIERS_([A-Z]+):\s*(.*?)\s*$/
 const ORCHESTRATION_PHRASE = 'planning and splitting work into tasks'
 const STOP = new Set(
   `a an the to of and or for in on with from by at as is are was were be this that it its into over under out up down do does
-   um uma o os as de da do dos das e ou para com sem por em no na nos nas que se
+   um uma o os as de da do dos das e ou para com sem por em no na nos nas que se nao
    cc tiers task status role review reason pass fail pending skip worker implementer reviewer checker orchestrator haiku sonnet opus`
     .split(/\s+/)
     .filter(Boolean),
@@ -163,7 +183,7 @@ export function mergeRouting(defaults, project = null, user = null) {
   const tiersIn = defaults.tiers && typeof defaults.tiers === 'object' ? defaults.tiers : {}
   const projectTiers = source.tiers && typeof source.tiers === 'object' ? source.tiers : {}
 
-  function whenList(tier, key) {
+  function list(tier, key) {
     const base = tiersIn[tier] && typeof tiersIn[tier] === 'object' ? tiersIn[tier] : {}
     let phrases = [...(base[key] || [])]
     const override = projectTiers[tier] && typeof projectTiers[tier] === 'object' ? projectTiers[tier] : {}
@@ -175,10 +195,12 @@ export function mergeRouting(defaults, project = null, user = null) {
     return phrases
   }
 
-  let haikuWhen = whenList('haiku', 'when')
-  const sonnetWhen = whenList('sonnet', 'when')
-  const opusWhen = whenList('opus', 'when')
-  let reviewWhen = whenList('opus', 'reviewWhen')
+  let haikuWhen = list('haiku', 'when')
+  const haikuKeywords = list('haiku', 'keywords')
+  const sonnetWhen = list('sonnet', 'when')
+  const opusWhen = list('opus', 'when')
+  let reviewWhen = list('opus', 'reviewWhen')
+  const reviewKeywords = list('opus', 'reviewKeywords')
   haikuWhen = appendUnique(haikuWhen, parsePhrases(source.trivialExtra))
   haikuWhen = appendUnique(haikuWhen, parsePhrases(config.trivial_extra))
   reviewWhen = appendUnique(reviewWhen, parsePhrases(source.riskyExtra))
@@ -193,7 +215,7 @@ export function mergeRouting(defaults, project = null, user = null) {
     escalation: [...TIERS],
     notes,
     tiers: {
-      haiku: { model: 'haiku', agent: 'worker', scoped: SCOPED.worker, when: haikuWhen },
+      haiku: { model: 'haiku', agent: 'worker', scoped: SCOPED.worker, when: haikuWhen, keywords: haikuKeywords },
       sonnet: { model: 'sonnet', agent: 'implementer', scoped: SCOPED.implementer, when: sonnetWhen },
       opus: {
         model: 'opus',
@@ -203,18 +225,44 @@ export function mergeRouting(defaults, project = null, user = null) {
         reviewScoped: SCOPED.reviewer,
         when: opusWhen,
         reviewWhen,
+        reviewKeywords,
       },
     },
   }
 }
 
+/** Lowercase and drop diacritics, so "Migração" and "migracao" compare equal. */
+export function fold(text) {
+  return String(text || '')
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+}
+
 function matchesAny(text, phrases) {
-  const hay = String(text || '').toLowerCase()
-  return (phrases || []).some((phrase) => phrase && hay.includes(String(phrase).toLowerCase()))
+  const hay = fold(text)
+  return (phrases || []).some((phrase) => phrase && hay.includes(fold(phrase)))
+}
+
+/** A keyword matches at the start of a word, so `migra` finds "migration" and "migração". */
+export function matchesKeyword(text, keywords) {
+  const hay = fold(text)
+  return (keywords || []).some((keyword) => {
+    const needle = fold(keyword).trim()
+    if (!needle) return false
+    const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    return new RegExp(`(^|[^a-z0-9])${escaped}`).test(hay)
+  })
 }
 
 export function isRisky(text, routing) {
-  return matchesAny(text, routing?.tiers?.opus?.reviewWhen)
+  const opus = routing?.tiers?.opus
+  return matchesAny(stripHeaders(text), opus?.reviewWhen) || matchesKeyword(stripHeaders(text), opus?.reviewKeywords)
+}
+
+export function isTrivial(text, routing) {
+  const haiku = routing?.tiers?.haiku
+  return matchesAny(stripHeaders(text), haiku?.when) || matchesKeyword(stripHeaders(text), haiku?.keywords)
 }
 
 /**
@@ -246,8 +294,7 @@ export function selectReviewer({ policy, writerTier, risky, conserve }) {
 }
 
 export function tokenize(text) {
-  const words = String(text || '')
-    .toLowerCase()
+  const words = fold(text)
     .split(/[^a-z0-9]+/)
     .filter((word) => word.length >= 3 && !STOP.has(word))
   const seen = new Set()
@@ -271,10 +318,11 @@ export function emptyHistory() {
   return { version: 1, entries: [] }
 }
 
+/** A recorded kind matches the task slug from the header; otherwise enough shared words match. */
 export function historyMatches(text, history) {
   if (!history || !Array.isArray(history.entries)) return false
+  const kind = slug(parseHeaders(text).TASK || '')
   const tokens = tokenize(stripHeaders(text))
-  const kind = slug(stripHeaders(text).slice(0, 80))
   for (const entry of history.entries) {
     if (!entry || typeof entry !== 'object') continue
     if (entry.kind && kind && entry.kind === kind) return true
@@ -309,13 +357,13 @@ export function noteHaikuFailure(history, { task, prompt, reason, now }) {
 
 /**
  * Classify one task description.
- * because is one of: ceiling, orchestration, trivial, default, opus-phrase, history, budget.
+ * because is one of: ceiling, orchestration, trivial, default, opus-phrase, history, risky, budget.
  */
 export function decideTier(text, routing, { history = null, conserve = false, ceiling = false } = {}) {
   if (ceiling) return { tier: 'opus', agent: SCOPED.orchestrator, because: 'ceiling' }
   let tier = 'sonnet'
   let because = 'default'
-  if (matchesAny(text, routing.tiers.haiku.when)) {
+  if (isTrivial(text, routing)) {
     tier = 'haiku'
     because = 'trivial'
   } else if (matchesAny(text, routing.tiers.opus.when)) {
@@ -329,6 +377,10 @@ export function decideTier(text, routing, { history = null, conserve = false, ce
   if (history && tier === 'haiku' && historyMatches(text, history)) {
     tier = 'sonnet'
     because = 'history'
+  }
+  if (tier === 'haiku' && isRisky(text, routing)) {
+    tier = 'sonnet'
+    because = 'risky'
   }
   if (conserve && tier === 'opus' && because !== 'orchestration') {
     tier = 'sonnet'
@@ -360,7 +412,7 @@ export function guidance(routing, budget, history) {
   }
   if (policy === 'cheap') {
     lines.push(
-      'Review: send Haiku output to cc-tiers:checker (Sonnet). Send work written at the Opus ceiling, and any result that matches an Opus review phrase, to cc-tiers:reviewer. Ordinary Sonnet work does not go to Opus.',
+      'Review: send Haiku output to cc-tiers:checker (Sonnet). Send work written at the Opus ceiling, and any result that matches an Opus review phrase or keyword, to cc-tiers:reviewer. Ordinary Sonnet work does not go to Opus.',
     )
   } else if (policy === 'always') {
     lines.push(
@@ -370,7 +422,7 @@ export function guidance(routing, budget, history) {
     lines.push('Review: no review pass. Tell the worker or implementer to set CC_TIERS_REVIEW: skip.')
   } else {
     lines.push(
-      'Review: skip a trivial Haiku pass. Send other finished work to cc-tiers:reviewer (Opus). A risky Haiku result goes to cc-tiers:checker (Sonnet), not Opus. While conserving, skip Opus review unless the result matches an Opus review phrase or it was written at the Opus ceiling.',
+      'Review: skip a trivial Haiku pass. Send other finished work to cc-tiers:reviewer (Opus). A risky Haiku result goes to cc-tiers:checker (Sonnet), not Opus. While conserving, skip Opus review unless the result matches an Opus review phrase or keyword, or it was written at the Opus ceiling.',
     )
   }
   if (!routing.learn) {
@@ -395,17 +447,22 @@ export function formatSessionContext(routing, projectNote, snapshot = {}) {
     'Escalation order: haiku (cc-tiers:worker) -> sonnet (cc-tiers:implementer) -> opus (the orchestrator implements the ceiling).',
     'Reviewer: cc-tiers:reviewer, on Opus, in a fresh context.',
     'Checker: cc-tiers:checker, on Sonnet, reviews Haiku output when the review policy asks for it.',
-    'Delegated agents select haiku, sonnet, or opus from their own definitions. A per-invocation model override replaces that choice.',
+    'Delegated agents select haiku, sonnet, or opus from their own definitions. cc-tiers blocks a per-invocation model override, because it would replace that choice.',
     `Haiku when: ${tiers.haiku.when.join('; ')}.`,
-    `Sonnet when: ${tiers.sonnet.when.join('; ')}.`,
-    `Opus review when: ${tiers.opus.reviewWhen.join('; ')}.`,
-    `Project routing file: ${projectNote}.`,
   ]
+  if (tiers.haiku.keywords?.length) lines.push(`Haiku keywords: ${tiers.haiku.keywords.join(', ')}.`)
+  lines.push(`Sonnet when: ${tiers.sonnet.when.join('; ')}.`)
+  lines.push(`Opus review when: ${tiers.opus.reviewWhen.join('; ')}.`)
+  if (tiers.opus.reviewKeywords?.length) lines.push(`Opus review keywords: ${tiers.opus.reviewKeywords.join(', ')}.`)
+  lines.push(`Project routing file: ${projectNote}.`)
   if (routing.notes?.length) lines.push(`Config notes: ${routing.notes.join(' ')}`)
   lines.push(
     'A failure at a tier is a failed test, a rejected review, or a subagent error. ' +
       `After ${routing.maxAttempts} failures the task moves up one tier and those notes travel with it. ` +
       'Opus is the last tier: the orchestrator then stops and reports the notes to the user.',
+  )
+  lines.push(
+    'At the Opus ceiling, open the attempt with CC_TIERS_TASK, CC_TIERS_TIER: opus, and CC_TIERS_ROLE: orchestrator on their own lines, and close it with the same lines plus CC_TIERS_STATUS and CC_TIERS_REASON. cc-tiers counts that trailer.',
   )
   lines.push(...guidance(routing, snapshot.budget, snapshot.history))
   lines.push(snapshot.ccCost?.installed ? ccCostLine(snapshot) : 'cc-cost: not installed. Per-task spend is omitted.')
@@ -443,8 +500,21 @@ export function formatTaskSpend(task, tiers) {
   return `cc-tiers spend for ${line} (input + cache write + output; cache reads excluded, same as cc-cost).`
 }
 
+function freshCursor() {
+  return { file: '', offset: 0, task: '', ids: [], limits: {} }
+}
+
 export function emptyState(sessionId) {
-  return { session_id: sessionId, seen: [], tasks: {}, spend: {} }
+  return {
+    session_id: sessionId,
+    seen: [],
+    tasks: {},
+    spend: {},
+    spent: [],
+    background: {},
+    pending: [],
+    cursor: freshCursor(),
+  }
 }
 
 export function sessionPath(dataDir, sessionId) {
@@ -457,8 +527,14 @@ export function loadState(file, sessionId) {
   try {
     const data = JSON.parse(readFileSync(file, 'utf8'))
     if (!data || typeof data !== 'object' || !data.tasks || typeof data.tasks !== 'object') return emptyState(sessionId)
-    if (!Array.isArray(data.seen)) data.seen = []
-    if (!data.spend || typeof data.spend !== 'object') data.spend = {}
+    const base = emptyState(sessionId)
+    for (const key of ['seen', 'spent', 'pending']) if (!Array.isArray(data[key])) data[key] = base[key]
+    for (const key of ['spend', 'background']) {
+      if (!data[key] || typeof data[key] !== 'object' || Array.isArray(data[key])) data[key] = base[key]
+    }
+    if (!data.cursor || typeof data.cursor !== 'object') data.cursor = base.cursor
+    if (!Array.isArray(data.cursor.ids)) data.cursor.ids = []
+    if (!data.cursor.limits || typeof data.cursor.limits !== 'object') data.cursor.limits = {}
     data.session_id = sessionId
     return data
   } catch {
@@ -466,11 +542,28 @@ export function loadState(file, sessionId) {
   }
 }
 
-export function saveState(file, state) {
+/** Write to a sibling temp file and rename, so a reader never sees half a file. */
+export function writeAtomic(file, body) {
   mkdirSync(path.dirname(file), { recursive: true })
+  const temp = `${file}.${process.pid}.${Date.now()}.tmp`
+  writeFileSync(temp, body)
+  try {
+    renameSync(temp, file)
+  } catch {
+    // Windows refuses to replace a file another process has open. Write in place instead.
+    writeFileSync(file, body)
+    try {
+      unlinkSync(temp)
+    } catch {
+      // Left for the next prune.
+    }
+  }
+}
+
+export function saveState(file, state) {
   const body = `${JSON.stringify(state, null, 2)}\n`
-  writeFileSync(file, body)
-  writeFileSync(path.join(path.dirname(file), 'latest.json'), body)
+  writeAtomic(file, body)
+  writeAtomic(path.join(path.dirname(file), 'latest.json'), body)
   pruneSessions(path.dirname(file))
 }
 
@@ -484,6 +577,53 @@ function pruneSessions(dataDir) {
       unlinkSync(stale)
     } catch {
       // A locked session file can wait until the next write.
+    }
+  }
+}
+
+function sleep(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
+/**
+ * Run fn while holding `<file>.lock`. Parallel subagents fire hooks at the same
+ * time, and without the lock their read-modify-write would drop counts.
+ * A lock older than LOCK_STALE_MS is a crashed hook and is taken over.
+ * After LOCK_WAIT_MS the hook runs anyway rather than miss its timeout.
+ */
+export function withLock(file, fn) {
+  if (!file) return fn()
+  const lock = `${file}.lock`
+  mkdirSync(path.dirname(lock), { recursive: true })
+  const deadline = Date.now() + LOCK_WAIT_MS
+  let held = false
+  while (!held) {
+    try {
+      closeSync(openSync(lock, 'wx'))
+      held = true
+    } catch (error) {
+      if (error.code !== 'EEXIST') break
+      try {
+        if (Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS) {
+          unlinkSync(lock)
+          continue
+        }
+      } catch {
+        continue
+      }
+      if (Date.now() > deadline) break
+      sleep(25)
+    }
+  }
+  try {
+    return fn()
+  } finally {
+    if (held) {
+      try {
+        unlinkSync(lock)
+      } catch {
+        // Another hook already took over a stale lock.
+      }
     }
   }
 }
@@ -538,41 +678,24 @@ export function normalizeEvent(raw) {
   const role = matchRole(String(toolInput.subagent_type || ''))
   if (!role) return null
   const prompt = String(toolInput.prompt || '')
+  const toolUseId = String(raw.tool_use_id || '')
+  const base = { id: toolUseId, tool_use_id: toolUseId, session_id: String(raw.session_id || 'unknown'), role, prompt }
   if (event === 'PostToolUseFailure') {
-    return {
-      kind: 'error',
-      tool_use_id: String(raw.tool_use_id || ''),
-      session_id: String(raw.session_id || 'unknown'),
-      role,
-      prompt,
-      text: '',
-      error: String(raw.error || 'subagent error').slice(0, MAX_REASON),
-    }
+    return { ...base, kind: 'error', text: '', error: String(raw.error || 'subagent error').slice(0, MAX_REASON) }
   }
   const response = raw.tool_response
+  const agentId = response && typeof response === 'object' && response.agentId ? String(response.agentId) : ''
   if (response && typeof response === 'object' && response.status === 'async_launched') {
-    return {
-      kind: 'background',
-      tool_use_id: String(raw.tool_use_id || ''),
-      session_id: String(raw.session_id || 'unknown'),
-      role,
-    }
+    return { ...base, kind: 'background', agent_id: agentId }
   }
   const content = response && typeof response === 'object' ? response.content : response
-  return {
-    kind: 'report',
-    tool_use_id: String(raw.tool_use_id || ''),
-    session_id: String(raw.session_id || 'unknown'),
-    role,
-    prompt,
-    text: contentText(content),
-    error: '',
-  }
+  return { ...base, kind: 'report', agent_id: agentId, text: contentText(content), error: '' }
 }
 
 function emptyMeta(event) {
   return {
     haikuFailure: false,
+    duplicate: false,
     task: '',
     tier: '',
     role: event.role,
@@ -581,25 +704,40 @@ function emptyMeta(event) {
   }
 }
 
+const TIER_RANK = { haiku: 0, sonnet: 1, opus: 2 }
+
 export function applyEvent(state, event, routing) {
   const meta = emptyMeta(event)
   if (event.kind === 'background') {
+    if (event.agent_id) {
+      state.background = state.background || {}
+      state.background[event.agent_id] = { role: event.role, prompt: event.prompt || '', tool_use_id: event.tool_use_id || '' }
+      return {
+        state,
+        meta,
+        message:
+          `${SCOPED[event.role]} is running in the background (agent ${event.agent_id}). ` +
+          'cc-tiers counts its report when it finishes and tells you then.',
+      }
+    }
     return {
       state,
       meta,
       message:
-        `${SCOPED[event.role]} moved to the background before it reported. ` +
-        'cc-tiers counts a failure only from a finished foreground report. ' +
-        'Wait for the report, then apply the attempt rule yourself if no count arrives.',
+        `${SCOPED[event.role]} moved to the background before it reported, and no agent id came back. ` +
+        'Wait for the report, then apply the attempt rule yourself.',
     }
   }
 
   const seen = [...(state.seen || [])]
-  const toolUseId = event.tool_use_id || ''
-  if (toolUseId && seen.includes(toolUseId)) return { state, message: '', meta }
-  if (toolUseId) {
-    seen.push(toolUseId)
-    state.seen = seen.slice(-200)
+  const id = event.id || event.tool_use_id || ''
+  if (id && seen.includes(id)) {
+    meta.duplicate = true
+    return { state, message: '', meta }
+  }
+  if (id) {
+    seen.push(id)
+    state.seen = seen.slice(-MAX_SEEN)
   }
 
   const headers = parseHeaders(event.prompt || '')
@@ -622,11 +760,11 @@ export function applyEvent(state, event, routing) {
   const defaultTier = role === 'checker' ? 'haiku' : role === 'reviewer' ? 'sonnet' : ROLES[role]
   if (!TIERS.includes(tier)) tier = defaultTier
   if (!REVIEW_ROLES.has(role)) tier = ROLES[role]
-  meta.tier = tier
 
   let status = (headers.STATUS || '').toLowerCase()
   if (event.kind === 'error') status = 'fail'
   if (status !== 'pass' && status !== 'fail') {
+    meta.tier = tier
     return {
       state,
       meta,
@@ -636,13 +774,34 @@ export function applyEvent(state, event, routing) {
     }
   }
 
+  const tasks = state.tasks || (state.tasks = {})
+  let current = tasks[task]
+  if (!current || typeof current !== 'object') current = { tier, failures: [], carried: [] }
+
+  // The counter already moved past this tier. A stale lower-tier run must not reset it.
+  let note = ''
+  if (TIER_RANK[current.tier] > TIER_RANK[tier]) {
+    if (REVIEW_ROLES.has(role)) {
+      tier = current.tier
+    } else if (status === 'fail') {
+      meta.tier = tier
+      return {
+        state,
+        meta,
+        message:
+          `Task ${task} already escalated to ${current.tier}, so this ${tier} failure was not counted. ` +
+          `Delegate it to ${SCOPED[IMPLEMENTERS[current.tier]]} with the failure notes.`,
+      }
+    } else {
+      note = `Task ${task} was at ${current.tier}, but ${SCOPED[role]} finished it on ${tier}. `
+    }
+  }
+  meta.tier = tier
+
   let reason = headers.REASON || event.error || 'no reason given'
   reason = reason.split(/\s+/).filter(Boolean).join(' ').slice(0, MAX_REASON)
   meta.reason = reason
   const review = (headers.REVIEW || '').toLowerCase()
-  const tasks = state.tasks || (state.tasks = {})
-  let current = tasks[task]
-  if (!current || typeof current !== 'object') current = { tier, failures: [], carried: [] }
 
   let message
   if (REVIEW_ROLES.has(role)) {
@@ -675,7 +834,7 @@ export function applyEvent(state, event, routing) {
     message = applied.message
     meta.haikuFailure = applied.haikuFailure
   }
-  return { state, message, meta }
+  return { state, message: `${note}${message}`, meta }
 }
 
 function applyReview(tasks, task, current, tier, status, reason, routing, role) {
@@ -684,12 +843,13 @@ function applyReview(tasks, task, current, tier, status, reason, routing, role) 
     const who = role === 'checker' ? 'Sonnet' : 'Opus'
     return { message: `Task ${task} passed ${who} review. cc-tiers cleared its attempt counter.`, haikuFailure: false }
   }
-  current.tier = tier
   return applyFailure(tasks, task, current, tier, role, reason, routing)
 }
 
 function applyFailure(tasks, task, current, tier, role, reason, routing) {
-  if (current.tier !== tier) current = { tier, failures: [], carried: [...(current.carried || [])] }
+  if (current.tier !== tier) {
+    current = { tier, failures: [], carried: [...(current.carried || []), ...(current.failures || [])].slice(-MAX_CARRIED) }
+  }
   const failures = [...(current.failures || [])]
   failures.push(`${tier}/${role}: ${reason}`)
   current.failures = failures
@@ -756,8 +916,89 @@ function formatCount(task, tier, count, maximum, decision, history) {
   return lines.join('\n')
 }
 
+/**
+ * Check one Agent call before it runs.
+ * Returns { deny, context } where deny is a reason to refuse the call.
+ * An upward move past the counter (an early escalation) moves the counter too.
+ */
+export function checkDelegation(state, toolInput, routing, { history = null } = {}) {
+  const input = toolInput && typeof toolInput === 'object' ? toolInput : {}
+  // Only this plugin's agents: another plugin may also ship a `worker` or `reviewer`.
+  const type = String(input.subagent_type || '').trim().toLowerCase()
+  const role = type.startsWith('cc-tiers:') ? matchRole(type) : null
+  if (!role) return { deny: '', context: '' }
+  const scoped = SCOPED[role]
+  if (input.model != null && String(input.model).trim() !== '') {
+    return {
+      deny:
+        `cc-tiers: do not pass model to ${scoped}. Its agent file pins ${ROLES[role]}, and a per-call model replaces the tier. ` +
+        'Call it again without the model argument.',
+      context: '',
+    }
+  }
+  const prompt = String(input.prompt || '')
+  const headers = parseHeaders(prompt)
+  const task = slug(headers.TASK || '')
+  if (!task) {
+    return {
+      deny:
+        `cc-tiers: start the prompt for ${scoped} with CC_TIERS_TASK: <slug>, CC_TIERS_TIER, and CC_TIERS_ROLE lines, ` +
+        'so the attempt counter can follow the task. Call it again with that header.',
+      context: '',
+    }
+  }
+  if (REVIEW_ROLES.has(role)) return { deny: '', context: '' }
+
+  const tier = ROLES[role]
+  const tasks = state.tasks || (state.tasks = {})
+  const current = tasks[task]
+  if (current && typeof current === 'object' && TIERS.includes(current.tier)) {
+    if (TIER_RANK[tier] < TIER_RANK[current.tier]) {
+      const target = current.tier === 'opus' ? 'the Opus orchestrator (implement it yourself, or cc-tiers:orchestrator)' : SCOPED[IMPLEMENTERS[current.tier]]
+      return {
+        deny:
+          `cc-tiers: task ${task} already escalated to ${current.tier}. Delegate it to ${target} with the failure notes, not to ${scoped}.`,
+        context: '',
+      }
+    }
+    if (TIER_RANK[tier] > TIER_RANK[current.tier]) {
+      const from = current.tier
+      tasks[task] = {
+        tier,
+        failures: [],
+        carried: [...(current.carried || []), ...(current.failures || [])].slice(-MAX_CARRIED),
+      }
+      return {
+        deny: '',
+        context: `cc-tiers moved ${task} from ${from} to ${tier} before the attempt limit. The new tier starts at zero failures; carry the notes.`,
+      }
+    }
+    return { deny: '', context: '' }
+  }
+
+  const decision = decideTier(prompt, routing, { history, conserve: routing.conserve === true })
+  if (role === 'worker' && (decision.because === 'history' || decision.because === 'risky')) {
+    const why =
+      decision.because === 'history'
+        ? 'a similar task already failed on Haiku in this project'
+        : 'it matches an Opus review keyword'
+    return { deny: '', context: `cc-tiers routing hint: ${task} looks like Sonnet work because ${why}. Prefer cc-tiers:implementer next time.` }
+  }
+  return { deny: '', context: '' }
+}
+
 export function hookOutput(eventName, text) {
   return { hookSpecificOutput: { hookEventName: eventName, additionalContext: text } }
+}
+
+export function preToolOutput(deny, context) {
+  const output = { hookEventName: 'PreToolUse' }
+  if (deny) {
+    output.permissionDecision = 'deny'
+    output.permissionDecisionReason = deny
+  }
+  if (context) output.additionalContext = context
+  return { hookSpecificOutput: output }
 }
 
 export function readProjectFile(projectDir) {
@@ -787,22 +1028,43 @@ export function loadHistory(file) {
 }
 
 export function saveHistory(file, history) {
-  mkdirSync(path.dirname(file), { recursive: true })
-  writeFileSync(file, `${JSON.stringify(history, null, 2)}\n`)
+  writeAtomic(file, `${JSON.stringify(history, null, 2)}\n`)
 }
 
-export function ensureHistoryGitignore(projectDir) {
-  const gitignore = path.join(projectDir, '.gitignore')
-  const hasGit = existsSync(path.join(projectDir, '.git'))
-  if (!existsSync(gitignore)) {
-    if (!hasGit) return false
-    writeFileSync(gitignore, `# cc-tiers learns Haiku failures locally\n${HISTORY_IGNORE}\n`)
-    return true
+/** The git directory that holds info/exclude, following a worktree's `.git` file to the common dir. */
+export function gitCommonDir(projectDir) {
+  const dotGit = path.join(projectDir, '.git')
+  if (!existsSync(dotGit)) return null
+  let gitDir = dotGit
+  try {
+    if (statSync(dotGit).isFile()) {
+      const match = /^gitdir:\s*(.+)$/m.exec(readFileSync(dotGit, 'utf8'))
+      if (!match) return null
+      gitDir = path.resolve(projectDir, match[1].trim())
+    }
+    const common = path.join(gitDir, 'commondir')
+    if (existsSync(common)) gitDir = path.resolve(gitDir, readFileSync(common, 'utf8').trim())
+  } catch {
+    return null
   }
-  const text = readFileSync(gitignore, 'utf8')
-  if (text.includes(HISTORY_IGNORE)) return false
+  return gitDir
+}
+
+/**
+ * Keep the history file out of git without touching the tracked .gitignore:
+ * the entry goes in .git/info/exclude, which stays local to this checkout.
+ */
+export function ensureHistoryIgnored(projectDir) {
+  const gitignore = path.join(projectDir, '.gitignore')
+  if (existsSync(gitignore) && readFileSync(gitignore, 'utf8').includes(HISTORY_IGNORE)) return false
+  const gitDir = gitCommonDir(projectDir)
+  if (!gitDir) return false
+  const exclude = path.join(gitDir, 'info', 'exclude')
+  const text = existsSync(exclude) ? readFileSync(exclude, 'utf8') : ''
+  if (text.split(/\n/).some((line) => line.trim() === HISTORY_IGNORE || line.trim() === `/${HISTORY_IGNORE}`)) return false
   const suffix = text.endsWith('\n') || text.length === 0 ? '' : '\n'
-  writeFileSync(gitignore, `${text}${suffix}# cc-tiers learns Haiku failures locally\n${HISTORY_IGNORE}\n`)
+  mkdirSync(path.dirname(exclude), { recursive: true })
+  writeFileSync(exclude, `${text}${suffix}# cc-tiers learns Haiku failures locally\n/${HISTORY_IGNORE}\n`)
   return true
 }
 
@@ -853,15 +1115,18 @@ function percentValue(entry, now) {
   return Math.min(100, Math.max(0, number))
 }
 
-/** Accept cc-cost's `{ kind, percentUsed }` list and the status-line `rate_limits` shape. */
-export function parseLimits(raw, now = Date.now()) {
-  const result = { fiveHour: null, sevenDay: null }
+/**
+ * The raw 5h and 7d entries in one record, keyed five_hour and seven_day.
+ * Accepts cc-cost's `{ kind, percentUsed }` list and the status-line `rate_limits` shape.
+ */
+export function extractLimitEntries(raw) {
+  const result = {}
   if (!raw || typeof raw !== 'object') return result
   const apply = (kind, entry) => {
-    const key = kind === 'five_hour' || kind === '5h' ? 'fiveHour' : kind === 'seven_day' || kind === '7d' ? 'sevenDay' : null
-    if (!key) return
-    const percent = percentValue(entry, now)
-    if (percent != null) result[key] = percent
+    const key = kind === 'five_hour' || kind === '5h' ? 'five_hour' : kind === 'seven_day' || kind === '7d' ? 'seven_day' : null
+    if (!key || entry == null) return
+    if (typeof entry !== 'number' && typeof entry !== 'object') return
+    result[key] = entry
   }
   const fromArray = (list) => {
     if (!Array.isArray(list)) return
@@ -878,11 +1143,17 @@ export function parseLimits(raw, now = Date.now()) {
   fromArray(raw.limits)
   fromMap(raw.rate_limits)
   if (raw.rateLimits && !Array.isArray(raw.rateLimits)) fromMap(raw.rateLimits)
-  if (raw.spend && typeof raw.spend === 'object') {
-    const nested = parseLimits(raw.spend, now)
-    if (nested.fiveHour != null) result.fiveHour = nested.fiveHour
-    if (nested.sevenDay != null) result.sevenDay = nested.sevenDay
-  }
+  if (raw.spend && typeof raw.spend === 'object') Object.assign(result, extractLimitEntries(raw.spend))
+  return result
+}
+
+export function parseLimits(raw, now = Date.now()) {
+  const entries = extractLimitEntries(raw)
+  const result = { fiveHour: null, sevenDay: null }
+  const five = percentValue(entries.five_hour, now)
+  const seven = percentValue(entries.seven_day, now)
+  if (five != null) result.fiveHour = five
+  if (seven != null) result.sevenDay = seven
   return result
 }
 
@@ -913,6 +1184,7 @@ export function manifestHasCcCost(data) {
 export function claudeDir(env = process.env) {
   if (env.CLAUDE_CONFIG_DIR) return env.CLAUDE_CONFIG_DIR
   if (env.HOME) return path.join(env.HOME, '.claude')
+  if (env.USERPROFILE) return path.join(env.USERPROFILE, '.claude')
   return ''
 }
 
@@ -943,25 +1215,16 @@ export function ccCostDataDir(env = process.env) {
   return root ? path.join(root, 'plugins', 'data', 'cc-cost') : ''
 }
 
-/** Latest 5h/7d reading from the hook payload, the transcript, and cc-cost's data directory. */
-export function collectLimits({ payload, transcript, env = process.env, now = Date.now() } = {}) {
-  let best = { fiveHour: null, sevenDay: null }
+/** Latest 5h/7d reading from the hook payload, the scanned transcript, and cc-cost's data directory. */
+export function collectLimits({ payload, cursor, env = process.env, now = Date.now() } = {}) {
+  const best = { fiveHour: null, sevenDay: null }
   const take = (raw) => {
     const parsed = parseLimits(raw, now)
     if (parsed.fiveHour != null) best.fiveHour = parsed.fiveHour
     if (parsed.sevenDay != null) best.sevenDay = parsed.sevenDay
   }
   take(payload)
-  if (transcript) {
-    for (const line of String(transcript).split(/\n/)) {
-      if (!line.trim()) continue
-      try {
-        take(JSON.parse(line))
-      } catch {
-        // Transcript lines that are not JSON are not usage records.
-      }
-    }
-  }
+  if (cursor?.limits) take({ rate_limits: cursor.limits })
   const explicit = env.CC_TIERS_LIMITS_FILE
   if (explicit) take(readJsonIfPresent(explicit))
   const dataDir = ccCostDataDir(env)
@@ -1000,74 +1263,6 @@ export function readTodayTotal(env = process.env, now = Date.now()) {
   return freshFromStore(store, localDay(now))
 }
 
-function collectStrings(node, found) {
-  if (typeof node === 'string') {
-    found.push(node)
-    return
-  }
-  if (Array.isArray(node)) {
-    for (const item of node) collectStrings(item, found)
-    return
-  }
-  if (node && typeof node === 'object') {
-    for (const value of Object.values(node)) collectStrings(value, found)
-  }
-}
-
-function hasTokenFields(node) {
-  return Boolean(
-    node &&
-      typeof node === 'object' &&
-      (node.input_tokens != null || node.output_tokens != null || node.input != null || node.output != null),
-  )
-}
-
-function collectUsages(node, found, inheritedModel) {
-  if (!node || typeof node !== 'object') return
-  if (Array.isArray(node)) {
-    for (const item of node) collectUsages(item, found, inheritedModel)
-    return
-  }
-  const model = typeof node.model === 'string' ? node.model : inheritedModel
-  if (node.usage && typeof node.usage === 'object' && hasTokenFields(node.usage)) {
-    found.push({ model: node.usage.model || model, usage: node.usage })
-  }
-  for (const [key, value] of Object.entries(node)) {
-    if (key === 'usage') continue
-    collectUsages(value, found, model)
-  }
-}
-
-export function attributeTranscript(text) {
-  const spend = {}
-  let task = ''
-  for (const line of String(text || '').split(/\n/)) {
-    if (!line.trim()) continue
-    let row
-    try {
-      row = JSON.parse(line)
-    } catch {
-      continue
-    }
-    const strings = []
-    collectStrings(row, strings)
-    for (const value of strings) {
-      const headers = parseHeaders(value)
-      if (headers.TASK) task = slug(headers.TASK)
-    }
-    if (!task) continue
-    const usages = []
-    collectUsages(row, usages, null)
-    for (const item of usages) {
-      const tier = tierOfModel(item.model)
-      const amount = freshTokens(item.usage)
-      if (!tier || !amount) continue
-      addSpend(spend, task, tier, amount)
-    }
-  }
-  return spend
-}
-
 export function addSpend(spend, task, tier, amount) {
   if (!task || !TIERS.includes(tier) || !amount) return spend
   const current = spend[task] || { haiku: 0, sonnet: 0, opus: 0 }
@@ -1076,30 +1271,193 @@ export function addSpend(spend, task, tier, amount) {
   return spend
 }
 
-const ROLE_TIER = { worker: 'haiku', implementer: 'sonnet', reviewer: 'opus', checker: 'sonnet', orchestrator: 'opus' }
+export function mergeSpend(target, delta) {
+  for (const [task, tiers] of Object.entries(delta || {})) {
+    for (const tier of TIERS) addSpend(target, task, tier, Number(tiers?.[tier]) || 0)
+  }
+  return target
+}
+
+function messageBlocks(message) {
+  if (Array.isArray(message.content)) return message.content
+  if (typeof message.content === 'string') return [{ type: 'text', text: message.content }]
+  return []
+}
+
+function lineId(line) {
+  let hash = 5381
+  for (let index = 0; index < line.length; index += 1) hash = ((hash * 33) ^ line.charCodeAt(index)) >>> 0
+  return `h${hash.toString(36)}`
+}
+
+/**
+ * Fold one main-transcript row into the cursor.
+ * - The orchestrator's own text opens a task with CC_TIERS_TASK + CC_TIERS_ROLE: orchestrator
+ *   (the Opus ceiling) and closes it with CC_TIERS_STATUS. That closing trailer is a report.
+ * - An Agent call whose prompt carries CC_TIERS_TASK charges that one message to the task.
+ * - Every other main-chain message is orchestration overhead.
+ * Sidechain rows are skipped: subagent usage comes from the Agent result or its own transcript.
+ * Rows that repeat a message id (one row per content block) are counted once.
+ */
+function foldRow(row, line, cursor, sink) {
+  const limits = extractLimitEntries(row)
+  if (limits.five_hour) cursor.limits.five_hour = limits.five_hour
+  if (limits.seven_day) cursor.limits.seven_day = limits.seven_day
+  if (row.type !== 'assistant' || row.isSidechain === true) return
+  const message = row.message && typeof row.message === 'object' ? row.message : {}
+  let delegated = ''
+  let closing = false
+  for (const block of messageBlocks(message)) {
+    if (!block || typeof block !== 'object') continue
+    if (block.type === 'text') {
+      const headers = parseHeaders(block.text)
+      if (!headers.TASK) continue
+      if (headers.TASK.toLowerCase() === 'none') {
+        cursor.task = ''
+        continue
+      }
+      if ((headers.ROLE || '').toLowerCase() !== 'orchestrator') continue
+      cursor.task = slug(headers.TASK)
+      const status = (headers.STATUS || '').toLowerCase()
+      if (cursor.task && (status === 'pass' || status === 'fail')) {
+        sink.reports.push({ id: `row:${row.uuid || lineId(line)}`, text: block.text })
+        closing = true
+      }
+    } else if (block.type === 'tool_use' && block.input && typeof block.input === 'object' && !delegated) {
+      delegated = slug(parseHeaders(String(block.input.prompt || '')).TASK || '')
+    }
+  }
+  const id = message.id || row.uuid || ''
+  if (!id || !cursor.ids.includes(id)) {
+    if (id) cursor.ids = [...cursor.ids, id].slice(-MAX_MESSAGE_IDS)
+    const tier = tierOfModel(message.model)
+    const amount = freshTokens(message.usage)
+    if (tier && amount) addSpend(sink.spend, delegated || cursor.task || OVERHEAD, tier, amount)
+  }
+  if (closing) cursor.task = ''
+}
+
+function readRange(file, start, end) {
+  const length = Math.max(0, end - start)
+  const buffer = Buffer.alloc(length)
+  const fd = openSync(file, 'r')
+  try {
+    let read = 0
+    while (read < length) {
+      const count = readSync(fd, buffer, read, length - read, start + read)
+      if (count <= 0) break
+      read += count
+    }
+    return buffer.subarray(0, read)
+  } finally {
+    closeSync(fd)
+  }
+}
+
+/**
+ * Read the transcript from where the last hook stopped, and fold only the new lines.
+ * The first scan of a long transcript starts SCAN_FIRST_CAP bytes from the end.
+ * Returns the spend added and any ceiling reports found.
+ */
+export function scanTranscript(state, file) {
+  if (!state.cursor || typeof state.cursor !== 'object') state.cursor = freshCursor()
+  const cursor = state.cursor
+  const sink = { spend: {}, reports: [] }
+  if (!file || !existsSync(file)) return sink
+  let size
+  try {
+    size = statSync(file).size
+  } catch {
+    return sink
+  }
+  let dropFirst = false
+  if (cursor.file !== file) {
+    Object.assign(cursor, freshCursor(), { file, offset: Math.max(0, size - SCAN_FIRST_CAP) })
+    dropFirst = cursor.offset > 0
+  }
+  if (size < cursor.offset) {
+    cursor.offset = size
+    return sink
+  }
+  if (size === cursor.offset) return sink
+  let buffer
+  try {
+    buffer = readRange(file, cursor.offset, size)
+  } catch {
+    return sink
+  }
+  const last = buffer.lastIndexOf(0x0a)
+  if (last < 0) return sink
+  cursor.offset += last + 1
+  const lines = buffer.subarray(0, last + 1).toString('utf8').split('\n')
+  if (dropFirst) lines.shift()
+  for (const line of lines) {
+    if (!line.trim()) continue
+    let row
+    try {
+      row = JSON.parse(line)
+    } catch {
+      continue
+    }
+    if (row && typeof row === 'object') foldRow(row, line, cursor, sink)
+  }
+  mergeSpend(state.spend || (state.spend = {}), sink.spend)
+  return sink
+}
+
+/** Spend and ceiling reports for a whole transcript text, the same way scanTranscript folds it. */
+export function attributeTranscript(text) {
+  const cursor = freshCursor()
+  const sink = { spend: {}, reports: [] }
+  for (const line of String(text || '').split(/\n/)) {
+    if (!line.trim()) continue
+    try {
+      const row = JSON.parse(line)
+      if (row && typeof row === 'object') foldRow(row, line, cursor, sink)
+    } catch {
+      // Lines that are not JSON are not usage records.
+    }
+  }
+  return sink.spend
+}
+
+/** Fresh tokens per tier in one subagent transcript. Every row counts; repeated message ids count once. */
+export function agentTranscriptSpend(file) {
+  const totals = { haiku: 0, sonnet: 0, opus: 0 }
+  if (!file || !existsSync(file)) return totals
+  let text
+  try {
+    text = readFileSync(file, 'utf8')
+  } catch {
+    return totals
+  }
+  const ids = new Set()
+  for (const line of text.split(/\n/)) {
+    if (!line.trim()) continue
+    let row
+    try {
+      row = JSON.parse(line)
+    } catch {
+      continue
+    }
+    const message = row?.message && typeof row.message === 'object' ? row.message : null
+    if (!message || !message.usage) continue
+    const id = message.id || row.uuid || ''
+    if (id && ids.has(id)) continue
+    if (id) ids.add(id)
+    const tier = tierOfModel(message.model)
+    if (tier) totals[tier] += freshTokens(message.usage)
+  }
+  return totals
+}
 
 export function usageFromToolResponse(response, role) {
   if (!response || typeof response !== 'object' || !response.usage) return null
   const amount = freshTokens(response.usage)
   if (!amount) return null
-  const tier = tierOfModel(response.usage.model || response.model) || ROLE_TIER[role] || null
+  const tier = tierOfModel(response.usage.model || response.resolvedModel || response.model) || ROLES[role] || null
   if (!tier) return null
   return { tier, tokens: amount }
-}
-
-export function mergeTranscriptSpend(state, transcriptSpend, extra) {
-  const spend = {}
-  for (const [task, tiers] of Object.entries(state.spend || {})) spend[task] = { ...tiers }
-  if (transcriptSpend) {
-    for (const [task, tiers] of Object.entries(transcriptSpend)) {
-      spend[task] = { haiku: 0, sonnet: 0, opus: 0, ...tiers }
-    }
-  }
-  if (extra?.task && extra.tier && extra.tokens && !transcriptSpend?.[extra.task]?.[extra.tier]) {
-    addSpend(spend, extra.task, extra.tier, extra.tokens)
-  }
-  state.spend = spend
-  return state
 }
 
 export function userFromEnv(env = process.env) {
@@ -1116,7 +1474,7 @@ export function userFromEnv(env = process.env) {
 
 export function pluginRoot(env = process.env) {
   if (env.CLAUDE_PLUGIN_ROOT) return env.CLAUDE_PLUGIN_ROOT
-  return path.resolve(path.dirname(new URL(import.meta.url).pathname), '..')
+  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 }
 
 export function readStdin() {
@@ -1137,15 +1495,90 @@ export function parsePayload(raw) {
   }
 }
 
-export function readTranscript(file) {
-  if (!file || !existsSync(file)) return ''
-  try {
-    const stat = statSync(file)
-    const cap = 2_000_000
-    if (stat.size <= cap) return readFileSync(file, 'utf8')
-    const fd = readFileSync(file)
-    return fd.subarray(fd.length - cap).toString('utf8')
-  } catch {
-    return ''
+/** Everything a hook needs that does not depend on the session state. */
+export function openContext(payload, env = process.env) {
+  const root = pluginRoot(env)
+  const defaults = loadJson(path.join(root, 'config', 'routing.default.json'))
+  const projectDir = env.CLAUDE_PROJECT_DIR || ''
+  const { project, note } = readProjectFile(projectDir || null)
+  const routing = mergeRouting(defaults, project, userFromEnv(env))
+  const dataDir = env.CLAUDE_PLUGIN_DATA || ''
+  const sessionId = String(payload.session_id || 'unknown')
+  return {
+    env,
+    projectDir,
+    projectNote: note,
+    routing,
+    sessionId,
+    file: dataDir ? sessionPath(dataDir, sessionId) : null,
+    ccCost: findCcCost(env),
   }
+}
+
+/**
+ * Load the session state under its lock, catch up on the transcript, count any
+ * ceiling trailers, run fn, and save. fn receives (state, { budget }).
+ */
+export function withSession(ctx, payload, fn) {
+  return withLock(ctx.file, () => {
+    const state = ctx.file ? loadState(ctx.file, ctx.sessionId) : emptyState(ctx.sessionId)
+    const scan = scanTranscript(state, payload.transcript_path)
+    const budget = budgetDecision(collectLimits({ payload, cursor: state.cursor, env: ctx.env }), ctx.routing)
+    ctx.routing.conserve = budget.conserve
+    for (const report of scan.reports) {
+      const message = processReport(ctx, state, { kind: 'report', id: report.id, role: 'orchestrator', prompt: '', text: report.text })
+      if (message) queueMessage(state, message)
+    }
+    const result = fn(state, { budget })
+    if (ctx.file) saveState(ctx.file, state)
+    return result
+  })
+}
+
+export function queueMessage(state, message) {
+  state.pending = [...(state.pending || []), message].slice(-MAX_PENDING)
+}
+
+export function takePending(state) {
+  const pending = state.pending || []
+  state.pending = []
+  return pending.join('\n\n')
+}
+
+/**
+ * Count one finished report: the attempt counter, subagent spend, and Haiku history.
+ * usage is { key, tier, tokens } or { key, totals } for a subagent run; key dedupes it.
+ * Returns the message for the orchestrator, or '' for a duplicate.
+ */
+export function processReport(ctx, state, event, usage = null) {
+  const applied = applyEvent(state, event, ctx.routing)
+  if (applied.meta.duplicate) return ''
+  let message = applied.message
+  const task = applied.meta.task
+  if (ctx.ccCost && task && usage?.key) {
+    state.spent = state.spent || []
+    if (!state.spent.includes(usage.key)) {
+      state.spent = [...state.spent, usage.key].slice(-MAX_SEEN)
+      if (usage.totals) mergeSpend(state.spend, { [task]: usage.totals })
+      else if (usage.tier && usage.tokens) addSpend(state.spend, task, usage.tier, usage.tokens)
+    }
+  }
+  if (applied.meta.haikuFailure && ctx.routing.learn && ctx.projectDir) {
+    const file = historyPath(ctx.projectDir)
+    withLock(file, () => {
+      const history = noteHaikuFailure(loadHistory(file), {
+        task,
+        prompt: applied.meta.prompt,
+        reason: applied.meta.reason,
+      })
+      saveHistory(file, history)
+    })
+    ensureHistoryIgnored(ctx.projectDir)
+    message += `\ncc-tiers recorded a Haiku failure for ${task}. Similar tasks will start on Sonnet.`
+  }
+  if (ctx.ccCost && task && state.spend?.[task]) {
+    const line = formatTaskSpend(task, state.spend[task])
+    if (line) message = message ? `${message}\n${line}` : line
+  }
+  return message
 }

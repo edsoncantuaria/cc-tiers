@@ -4,7 +4,7 @@
 
 A Claude Code plugin that keeps each task on the cheapest tier that can finish it, then escalates with the failure notes attached.
 
-[![Claude Code](https://img.shields.io/badge/Claude_Code-2.1.271%2B-d97757?style=for-the-badge&logo=anthropic&logoColor=white)](https://claude.com/claude-code)
+[![Claude Code](https://img.shields.io/badge/Claude_Code-2.1.295%2B-d97757?style=for-the-badge&logo=anthropic&logoColor=white)](https://claude.com/claude-code)
 [![Plugin](https://img.shields.io/badge/type-plugin-8a63d2?style=for-the-badge)](#-install)
 [![License: MIT](https://img.shields.io/badge/license-MIT-2f81f7?style=for-the-badge)](LICENSE)
 
@@ -46,7 +46,7 @@ claude --plugin-dir /path/to/cc-tiers
 
 While the plugin is enabled, `settings.json` sets the session agent to `orchestrator`. Your own `agent` in `~/.claude/settings.json` still wins. If you override it, `/cc-tiers:tiers` runs the same workflow.
 
-The agents pin `model: haiku`, `sonnet`, or `opus`. The orchestrator does not pass a model on the call, because a per-call override would replace the tier.
+The agents pin `model: haiku`, `sonnet`, or `opus`. The orchestrator does not pass a model on the call, because a per-call override would replace the tier. A PreToolUse hook refuses a cc-tiers delegation that tries.
 
 ```mermaid
 flowchart LR
@@ -75,13 +75,20 @@ The new tier starts at zero. Opus is the last stop: the orchestrator does that w
 
 A hook on the Agent tool keeps the counter. When it reports `cc-tiers counted a failure`, that count is the one the orchestrator follows.
 
+The hooks enforce what the prompts ask for:
+
+- **Before a delegation** (PreToolUse), a call to a cc-tiers agent is refused when it passes `model`, has no `CC_TIERS_TASK` header, or sends an escalated task back down a tier. Sending a task up early (`/cc-tiers:escalate`) moves the counter with the notes carried.
+- **Background agents** are counted too. The launch records the agent id, and SubagentStop counts the report when it finishes. The note reaches the orchestrator on its next delegation, or at the end of the turn.
+- **The Opus ceiling** has no Agent call, so the orchestrator marks its own attempt with a `CC_TIERS_TASK` / `CC_TIERS_TIER: opus` / `CC_TIERS_ROLE: orchestrator` header and closes it with `CC_TIERS_STATUS`. The hook counts that trailer like any other report.
+- Parallel agents share one counter file per session, behind a lock, written atomically.
+
 ---
 
 ## 💸 Spend, with cc-cost
 
-When [cc-cost](https://github.com/edsoncantuaria/cc-cost) is installed, the session summary and each finished task report **fresh tokens per model tier**. Fresh tokens are input + cache write + output. Cache reads stay out, the same rule cc-cost uses. The hook attributes transcript usage, and the agent result's own usage, to the `CC_TIERS_TASK` slug.
+When [cc-cost](https://github.com/edsoncantuaria/cc-cost) is installed, the session summary and each finished task report **fresh tokens per model tier**. Fresh tokens are input + cache write + output. Cache reads stay out, the same rule cc-cost uses. A subagent's tokens come from the Agent result, or from its own transcript when it ran in the background, and go to its `CC_TIERS_TASK` slug. The orchestrator's message that delegates a task counts toward that task, and so do its turns inside a ceiling attempt. Its other turns are listed as `(orchestration)`. The hook reads the session transcript incrementally, from where the last hook stopped, so totals only grow and long sessions stay cheap.
 
-The 5h and 7d windows use cc-cost's kinds, `five_hour` and `seven_day`. The hook reads them from the hook payload when Claude Code includes them, from the transcript, and from `limits.json` or `store.json` in cc-cost's plugin data directory (`~/.claude/plugins/data/cc-cost/`). A daily total is reported when that directory holds cc-cost's `novos:<day>:<sessionId>` keys.
+The 5h and 7d windows use cc-cost's kinds, `five_hour` and `seven_day`. The hook reads them from the hook payload when Claude Code includes them, from the transcript as it is scanned, and from `limits.json` or `store.json` in cc-cost's plugin data directory (`~/.claude/plugins/data/cc-cost/`). A daily total is reported when that directory holds cc-cost's `novos:<day>:<sessionId>` keys.
 
 If cc-cost is not installed, those lines are omitted. Routing, retries, and review keep working. A missing window reading does not invent a percent.
 
@@ -97,9 +104,9 @@ A window whose reset time is already past counts as 0, the same way cc-cost draw
 
 ## 🧠 Learning from Haiku
 
-With `learn` set to `on` (the default), a Haiku failure is appended to `.claude/cc-tiers-history.json` in the project. The next task that shares that kind, or enough of its words, starts on Sonnet instead of Haiku. `off` writes nothing and ignores the file.
+With `learn` set to `on` (the default), a Haiku failure is appended to `.claude/cc-tiers-history.json` in the project. The next task with the same slug, or enough of the same words, starts on Sonnet instead of Haiku. Words are compared without accents, so `migração` and `migracao` match. `off` writes nothing and ignores the file.
 
-The first write adds `.claude/cc-tiers-history.json` to the project's `.gitignore` when the project is a git checkout or already has a `.gitignore`. The plugin repo ignores that path too.
+The first write adds the file to `.git/info/exclude` when the project is a git checkout (worktrees included), so it stays out of git without touching your tracked `.gitignore`. The plugin repo ignores that path too.
 
 ---
 
@@ -108,7 +115,7 @@ The first write adds `.claude/cc-tiers-history.json` to the project's `.gitignor
 | Command | What it does |
 | --- | --- |
 | `/cc-tiers:tiers [task]` | Plan, route, and run the work |
-| `/cc-tiers:route [task]` | Name the tier and stop. No edits |
+| `/cc-tiers:route [task]` | Name the tier and stop. Runs the same heuristic as the hooks. No edits |
 | `/cc-tiers:escalate [slug]` | Move that task up one tier now, notes included |
 
 You can also ask in plain language. The `tiers` skill loads for an implement, fix, rename, or review request. Mention an agent directly with `@agent-cc-tiers:worker`, `@agent-cc-tiers:implementer`, `@agent-cc-tiers:checker`, or `@agent-cc-tiers:reviewer`.
@@ -146,7 +153,9 @@ Open `/config` and set the cc-tiers rows. They apply on the next session (the Se
 
 `cheap` sends Haiku output to the Sonnet checker and sends Opus review only for a review phrase or the ceiling. `risky` is the 0.1.0 behavior: Opus reviews non-trivial work and skips a trivial Haiku pass. `always` reviews every pass (Haiku on Sonnet, the rest on Opus). `never` skips review. While a budget window is conserving, Opus review is reserved for critical work even under `risky` or `always`.
 
-To replace a whole phrase list, add `.claude/cc-tiers.json` to the project. A list you include replaces that list; lists you omit stay at the default. The same file may set `learn`, `budget5h`, and `budget7d` when `/config` leaves them empty. `/config` still wins when both are set. See `config/cc-tiers.example.json`.
+Routing matches two kinds of lists. **Phrases** (`when`, `reviewWhen`, and the `_extra` options) match when the whole phrase appears in the task. **Keywords** (`haiku.keywords`, `opus.reviewKeywords`) match at the start of a word, case- and accent-insensitive: `migra` finds "migration" and "migração", `authent` finds "authentication" but not "author". The built-in keywords cover renames, typos, formatting and lookups for Haiku, and auth, payments, migrations, schemas, public APIs, security, and concurrency for Opus review, in English and Portuguese. A task that looks trivial but hits a review keyword starts on Sonnet.
+
+To replace a whole list, add `.claude/cc-tiers.json` to the project. A list you include replaces that list; lists you omit stay at the default. The same file may set `learn`, `budget5h`, and `budget7d` when `/config` leaves them empty. `/config` still wins when both are set. See `config/cc-tiers.example.json`.
 
 ```json
 {
@@ -155,19 +164,20 @@ To replace a whole phrase list, add `.claude/cc-tiers.json` to the project. A li
   "budget7d": 80,
   "trivialExtra": ["changelog edits"],
   "tiers": {
-    "haiku": { "when": ["rename a symbol in one or two files", "changelog edits"] }
+    "haiku": { "when": ["rename a symbol in one or two files", "changelog edits"] },
+    "opus": { "reviewKeywords": ["authent", "payment", "migrat", "terraform"] }
   }
 }
 ```
 
-The escalation order is fixed. Routing phrases, the retry limit, the review policy, learning, and the two budget thresholds are the knobs.
+The escalation order is fixed. Routing phrases and keywords, the retry limit, the review policy, learning, and the two budget thresholds are the knobs.
 
 ---
 
 ## 📋 Requirements
 
-- Claude Code **2.1.271+** (the `/config` pickers use `userConfig.options`).
-- Node.js on `PATH` as `node`, which Claude Code already ships. The hooks do not call Python.
+- Claude Code **2.1.295+** (the `/config` pickers use `userConfig.options`, and the PreToolUse hook sets `onFailure`).
+- Node.js 18+ on `PATH` as `node`. The hooks call `node` directly, so they run the same under bash, Git Bash, and PowerShell on Windows. They do not call Python.
 
 ## 🛠️ Development
 
@@ -194,13 +204,15 @@ claude --plugin-dir .
 | `commands/route.md` | `/cc-tiers:route` |
 | `commands/escalate.md` | `/cc-tiers:escalate` |
 | `config/routing.default.json` | Built-in phrase lists and default thresholds |
-| `hooks/hooks.json` | SessionStart summary, and the Agent attempt counter |
+| `hooks/hooks.json` | SessionStart summary, the Agent checks and counter, SubagentStop, Stop, and UserPromptSubmit |
 | `hooks/cc_tiers.mjs` | Merge rules, the counter, spend, budget, and history |
+| `hooks/route.mjs` | The heuristic behind `/cc-tiers:route` |
+| `.github/workflows/ci.yml` | Tests on Linux, macOS, and Windows, and `claude plugin validate` |
 | `CHANGELOG.md` | Release notes |
 
 ## 🔒 Privacy
 
-No network and no telemetry. The hooks read the routing files, the plugin options Claude Code already passes in, the session transcript, and cc-cost's local plugin data when that plugin is installed. They write the attempt counter under the plugin data directory (`latest.json` and one file per session) and, when learning is on, `.claude/cc-tiers-history.json` in the project. Uninstalling the plugin removes the plugin data directory unless you pass `--keep-data`. The history file stays in the project until you delete it.
+No network and no telemetry. The hooks read the routing files, the plugin options Claude Code already passes in, the session transcript, and cc-cost's local plugin data when that plugin is installed. They write the attempt counter under the plugin data directory (`latest.json` and one file per session) and, when learning is on, `.claude/cc-tiers-history.json` in the project plus one line in `.git/info/exclude`. Uninstalling the plugin removes the plugin data directory unless you pass `--keep-data`. The history file stays in the project until you delete it.
 
 ---
 

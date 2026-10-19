@@ -1,6 +1,6 @@
 {
   "name": "cc-tiers",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Tiered Opus, Sonnet, and Haiku workflow with cheaper review, budget routing, and cc-cost spend",
   "author": {
     "name": "edsoncantuaria",
@@ -58,7 +58,7 @@
     "risky_extra": {
       "type": "string",
       "title": "Extra review phrases",
-      "description": "Comma-separated phrases that also require an Opus review, added to the built-in risky list. Example: terraform, billing.",
+      "description": "Comma-separated phrases that also require an Opus review, added to the built-in risky phrases. Built-in keywords already cover auth, payments, migrations, schemas, security, and concurrency. Example: terraform, billing.",
       "default": ""
     }
   }

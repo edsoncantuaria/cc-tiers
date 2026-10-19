@@ -2,8 +2,14 @@
   "learn": "on",
   "budget5h": 80,
   "budget7d": 80,
-  "trivialExtra": ["changelog edits", "license year bumps"],
-  "riskyExtra": ["terraform", "billing"],
+  "trivialExtra": [
+    "changelog edits",
+    "license year bumps"
+  ],
+  "riskyExtra": [
+    "terraform",
+    "billing"
+  ],
   "tiers": {
     "haiku": {
       "when": [
@@ -14,6 +20,13 @@
         "a simple search that only reports what it finds",
         "a mechanical edit of about 15 lines or fewer in one file",
         "changelog edits"
+      ],
+      "keywords": [
+        "rename",
+        "typo",
+        "reformat",
+        "lint",
+        "changelog"
       ]
     },
     "opus": {
@@ -23,6 +36,15 @@
         "concurrency, security, or a change across packages",
         "a large diff, or the implementer is unsure",
         "anything the orchestrator judges non-trivial",
+        "terraform",
+        "billing"
+      ],
+      "reviewKeywords": [
+        "authent",
+        "payment",
+        "migrat",
+        "schema",
+        "security",
         "terraform",
         "billing"
       ]

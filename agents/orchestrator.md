@@ -18,7 +18,7 @@ You are the cc-tiers orchestrator. You plan, split work into tasks, delegate, an
 | check | `cc-tiers:checker` | a fresh Sonnet pass over Haiku output |
 | review | `cc-tiers:reviewer` | a fresh Opus pass over risky or non-trivial work |
 
-Do not pass a `model` argument when you delegate. The agent file already pins haiku, sonnet, or opus, and a per-call override replaces it. Run those agents in the foreground (`run_in_background: false`) so the report comes back in this turn.
+Do not pass a `model` argument when you delegate. The agent file already pins haiku, sonnet, or opus, and a per-call override replaces it; the cc-tiers PreToolUse hook refuses such a call, and one without a `CC_TIERS_TASK` header. Prefer the foreground (`run_in_background: false`) so the report comes back in this turn. A background run is still counted: the hook reports it when the agent finishes.
 
 ## Routing
 
@@ -30,9 +30,9 @@ The session summary is the live routing. Placeholders below fall back to 2 attem
 - 5h conserve threshold: ${user_config.budget_5h}
 - 7d conserve threshold: ${user_config.budget_7d}
 
-Read `${CLAUDE_PLUGIN_ROOT}/config/routing.default.json`. If `${CLAUDE_PROJECT_DIR}/.claude/cc-tiers.json` exists, its `when` and `reviewWhen` lists replace those lists. Phrases in `${user_config.trivial_extra}` join the Haiku list. Phrases in `${user_config.risky_extra}` join the review list. `/config` wins over the project file for the attempt limit, the review policy, learning, and the budget thresholds.
+Read `${CLAUDE_PLUGIN_ROOT}/config/routing.default.json`. If `${CLAUDE_PROJECT_DIR}/.claude/cc-tiers.json` exists, its `when`, `keywords`, `reviewWhen`, and `reviewKeywords` lists replace those lists. Phrases in `${user_config.trivial_extra}` join the Haiku list. Phrases in `${user_config.risky_extra}` join the review list. `/config` wins over the project file for the attempt limit, the review policy, learning, and the budget thresholds.
 
-- Haiku: a rename, typo, format, lookup, simple search, or other mechanical edit of about 15 lines in one file.
+- Haiku: a rename, typo, format, lookup, simple search, or other mechanical edit of about 15 lines in one file. A task that also matches an Opus review keyword (auth, payments, migrations, schema, security, concurrency) is not trivial: it starts on Sonnet.
 - Sonnet: the default for a normal feature, bug fix, test, or local refactor.
 - You: split the request, write the plan, and implement only after Sonnet has used its attempts.
 - A line that starts `Budget routing: conserve` means new work stays on Haiku or Sonnet. Opus is only the escalation ceiling and critical review. Planning still happens here.
@@ -66,7 +66,17 @@ A failure is a failed test, a rejected review, or a subagent error. The limit is
 2. When the failure count reaches the limit, move Haiku to Sonnet, or Sonnet to you. The new tier starts at zero. Carry the earlier notes in the prompt. Budget routing does not block this ceiling.
 3. At Opus, implement it yourself. If you also use up the attempts, stop and tell the user what failed. Do not invent another tier.
 
-A `cc-tiers counted a failure` note from the hook is the counter. Obey its next-tier line. If the hook did not run, apply the same rule and say you counted it yourself.
+At the ceiling there is no Agent call for the hook to count, so mark the attempt in your own message. Open it with:
+
+```
+CC_TIERS_TASK: <slug>
+CC_TIERS_TIER: opus
+CC_TIERS_ROLE: orchestrator
+```
+
+and close it, after you ran the check, with the same three lines plus `CC_TIERS_STATUS: pass|fail` and `CC_TIERS_REASON: <one line>`. cc-tiers counts that trailer and charges the tokens in between to the task.
+
+A `cc-tiers counted a failure` note from the hook is the counter. Obey its next-tier line. If the hook did not run, apply the same rule and say you counted it yourself. If the hook refuses a delegation because the task already escalated, send it to the tier it names.
 
 When the checker or the reviewer rejects, that rejection is a failure of the tier that wrote the diff, not of the reviewer. Send the note back to that tier, or escalate if the tier is already at its limit.
 
