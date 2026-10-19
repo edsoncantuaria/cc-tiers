@@ -73,6 +73,17 @@ function workspace(fixture) {
   return dir
 }
 
+/**
+ * The tree id of the workspace as it is now, tracked and untracked files alike.
+ * It stages into its own index file, so the model never sees staged changes.
+ */
+export function workspaceTree(dir) {
+  const env = { ...process.env, GIT_INDEX_FILE: path.join(dir, '.git', 'bench-snapshot-index') }
+  if (spawnSync('git', ['add', '-A'], { cwd: dir, env }).status !== 0) return ''
+  const tree = spawnSync('git', ['write-tree'], { cwd: dir, encoding: 'utf8', env })
+  return tree.status === 0 ? tree.stdout.trim() : ''
+}
+
 function runClaude(dir, config, prompt, timeoutMs, plugin, resume = '') {
   // project and local only: the user's own CLAUDE.md, agents, plugins, and hooks would change what is measured.
   const args = ['-p', prompt, '--output-format', 'json', '--permission-mode', 'bypassPermissions', '--setting-sources', 'project,local', ...config.args(plugin)]
@@ -238,6 +249,12 @@ export function routeIn(lines, from = 0) {
   return steps
 }
 
+/** Files changed with no writer delegation and no Edit/Write step: the session wrote them itself, through Bash. */
+export function inlineSteps(steps, changed) {
+  if (!changed || steps.some((step) => step.agent === 'inline' || WRITERS.has(step.agent))) return steps
+  return [...steps, { agent: 'inline', task: '' }]
+}
+
 /**
  * Whether a step was routed the way the README says: trivial work on Haiku or
  * inline (the light path), normal work written on Sonnet, hard work never written
@@ -285,7 +302,7 @@ export function stepUsage(json, previous) {
   return { ...json, modelUsage, total_cost_usd: (Number(json.total_cost_usd) || 0) - (Number(previous.total_cost_usd) || 0) }
 }
 
-function summarize(config, task, rep, run, verdict, escalations = null, route = null) {
+export function summarize(config, task, rep, run, verdict, escalations = null, route = null) {
   const json = run.json || {}
   const models = {}
   const tokens = {}
@@ -311,7 +328,8 @@ function summarize(config, task, rep, run, verdict, escalations = null, route = 
     resolved: verdict.resolved,
     regressions: verdict.regressions,
     pass: verdict.resolved,
-    freshTokens,
+    // No JSON (timeout or crash) means no usage to count, not zero tokens.
+    freshTokens: run.json ? freshTokens : null,
     cost: Number(json.total_cost_usd) || 0,
     models,
     tokens,
@@ -352,9 +370,9 @@ const resolvedOf = (row) => Boolean(row.resolved ?? row.pass)
 const percent = (share) => `${Math.round(share * 100)}%`
 const kilo = (tokens) => `${(tokens / 1000).toFixed(1)}k`
 
-/** Fresh tokens of a row; older result files only have the per-model `tokens`. Null when the row has neither. */
+/** Fresh tokens of a row; older result files only have the per-model `tokens`. Null when the run left no usage. */
 function freshOf(row) {
-  if (row.freshTokens != null) return row.freshTokens
+  if ('freshTokens' in row) return row.freshTokens
   if (!row.tokens) return null
   return Object.values(row.tokens).reduce((sum, t) => sum + (t.input || 0) + (t.cacheWrite || 0) + (t.output || 0), 0)
 }
@@ -502,10 +520,10 @@ async function main() {
   }
   process.stderr.write(`Running ${jobs.length} ${session ? 'sessions' : 'jobs'} (${configs.length} configs x ${tasks.length} tasks x ${repeat}) on ${path.relative(ROOT, fixture)}, ${parallel} at a time.\n`)
   // Escalations and routing exist only where cc-tiers routes; elsewhere they stay null rather than 0.
-  const transcriptFor = (config, sessionId, from, kind) => {
+  const transcriptFor = (config, sessionId, from, kind, changed) => {
     if (!config.startsWith('cc-tiers')) return { found: null, route: null, seen: from }
     const lines = readLines(transcriptFile(sessionId))
-    const steps = routeIn(lines, from)
+    const steps = inlineSteps(routeIn(lines, from), changed)
     const route = { ...routing(kind, steps, config === 'cc-tiers-light' ? 'sonnet' : 'opus'), steps }
     return { found: escalationsIn(lines, from), route, seen: lines.length }
   }
@@ -518,10 +536,12 @@ async function main() {
     try {
       for (const task of tasks) {
         const before = passingTests(dir)
+        const tree = workspaceTree(dir)
         const run = await runClaude(dir, CONFIGS[config], task.prompt, timeoutMs, plugin, id)
+        const changed = workspaceTree(dir) !== tree
         if (run.json?.session_id && run.json.session_id !== id) seen = 0
         id = run.json?.session_id || id
-        const read = transcriptFor(config, id, seen, task.kind)
+        const read = transcriptFor(config, id, seen, task.kind, changed)
         seen = read.seen
         const verdict = grade(dir, task, run.json?.result, checks, before)
         rmSync(path.join(dir, '.bench-check'), { recursive: true, force: true })
@@ -540,10 +560,12 @@ async function main() {
     const dir = workspace(fixture)
     try {
       const before = passingTests(dir)
+      const tree = workspaceTree(dir)
       const run = await runClaude(dir, CONFIGS[config], task.prompt, timeoutMs, plugin)
+      const changed = workspaceTree(dir) !== tree
       const verdict = grade(dir, task, run.json?.result, checks, before)
       const name = tag && config.startsWith('cc-tiers') ? `${config}@${tag}` : config
-      const read = transcriptFor(config, run.json?.session_id, 0, task.kind)
+      const read = transcriptFor(config, run.json?.session_id, 0, task.kind, changed)
       const row = summarize(name, task, rep, run, verdict, read.found, read.route)
       process.stderr.write(`${progress(row)} ${name} ${task.id} ${kilo(row.freshTokens)} tokens ${row.seconds}s\n`)
       return row

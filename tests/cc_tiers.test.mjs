@@ -1645,6 +1645,47 @@ test('the benchmark counts escalations from hook output only, and splits results
   assert.equal(routing('large', steps.slice(0, 1), 'opus').ok, false)
 })
 
+test('the benchmark sees inline work that only changed the workspace tree', async () => {
+  const { inlineSteps, routing, workspaceTree } = await import(pathToFileURL(path.join(ROOT, 'bench', 'run.mjs')).href)
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-tree-'))
+  try {
+    const git = (...args) => spawnSync('git', args, { cwd: dir, encoding: 'utf8' })
+    writeFileSync(path.join(dir, 'a.js'), 'export const a = 1\n')
+    git('init', '-q')
+    git('add', '-A')
+    git('-c', 'user.email=t@example.com', '-c', 'user.name=t', 'commit', '-qm', 'fixture')
+    const before = workspaceTree(dir)
+    assert.match(before, /^[0-9a-f]{40,64}$/)
+    assert.equal(workspaceTree(dir) !== before, false)
+    writeFileSync(path.join(dir, 'b.js'), 'export const b = 2\n')
+    assert.equal(workspaceTree(dir) !== before, true)
+    assert.equal(git('diff', '--cached', '--name-only').stdout, '', 'the snapshot leaves the real index alone')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+  const inline = inlineSteps([{ agent: 'cc-tiers:researcher', task: 'csv' }], true)
+  assert.deepEqual(inline.at(-1), { agent: 'inline', task: '' })
+  assert.deepEqual(routing('normal', inline, 'sonnet'), { path: 'inline sonnet', ok: true })
+  assert.deepEqual(inlineSteps([], false), [])
+  const delegated = [{ agent: 'cc-tiers:implementer', task: 'csv' }]
+  assert.deepEqual(inlineSteps(delegated, true), delegated)
+  const edited = [{ agent: 'inline', task: '' }]
+  assert.deepEqual(inlineSteps(edited, true), edited)
+})
+
+test('a run with no JSON has no token count', async () => {
+  const { metrics, summarize } = await import(pathToFileURL(path.join(ROOT, 'bench', 'run.mjs')).href)
+  const verdict = { f2p: false, p2p: true, ownTests: true, resolved: false, regressions: [], output: 'timeout' }
+  const task = { id: 'calc', kind: 'normal' }
+  // A timeout can still leave a passing workspace behind.
+  const crashed = summarize('sonnet', task, 1, { code: null, json: null, stderr: '', seconds: 900 }, { ...verdict, f2p: true, resolved: true })
+  assert.equal(crashed.freshTokens, null)
+  const usage = { modelUsage: { sonnet: { inputTokens: 100, outputTokens: 50, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } } }
+  const ran = summarize('sonnet', task, 2, { code: 0, json: usage, stderr: '', seconds: 30 }, { ...verdict, f2p: true, resolved: true })
+  assert.equal(ran.freshTokens, 150)
+  assert.equal(metrics([crashed, ran]).tokensPerResolved, 150)
+})
+
 test('quality defaults: risky review, cost hidden, Sonnet starts at high', () => {
   const routing = tiers.mergeRouting(tiers.loadJson(path.join(ROOT, 'config/routing.default.json')))
   assert.equal(routing.reviewPolicy, 'risky')
