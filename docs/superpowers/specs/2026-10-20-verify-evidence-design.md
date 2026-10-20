@@ -317,3 +317,22 @@ da 0.6: qualquer `fail` do reviewer conta.
 - Se o teto do Opus é verificado no `Stop` ou em outro ponto (com o porquê).
 - Texto exato dos prompts dos agentes, mantendo o estilo dos atuais.
 - Versão 0.7.0 no `plugin.json`, `CHANGELOG.md`, README EN e pt-BR.
+
+## Adendo — código limpo sem pedir (2026-10-20)
+
+- Objetivo: o usuário faz um pedido curto e o código sai limpo sem ele pedir
+  nem escrever regras no CLAUDE.md do projeto.
+- Pesquisador: o briefing ganha Reuso (helpers existentes, `arquivo:linha`),
+  Convenções (trechos próximos) e a forma que a versão instalada recomenda ou
+  marca como obsoleta. Limite de cerca de 40 linhas.
+- Quem escreve: reaproveita ou estende, nunca forka; segue a doc da versão e as
+  convenções do arquivo; mexe só no que a tarefa exige; sem proteção hipotética
+  (retry, cache, fallback, compatibilidade só com consumidor real); comentário só
+  para o que o código não diz; para quando está verificado.
+- Decisão do usuário: código recriado e mudança fora da tarefa são bloqueantes
+  (achados `scope`). Proteção hipotética, estilo, ruído de comentário e gosto de
+  nome são notas e não reprovam a tarefa.
+- Benchmark: coluna `Touched outside scope`, com escopo = arquivos da solução de
+  referência + `scopeExtra` + diretórios de teste. Limite: uma correção
+  alternativa legítima em outro arquivo conta; o JSON bruto lista os arquivos.
+  Legibilidade e qualidade de comentário não têm métrica determinística.

@@ -1,8 +1,8 @@
 # 🎚️ cc-tiers
 
-### O Opus planeja e revisa. O Sonnet constrói. A pesquisa vem primeiro.
+### O Opus planeja e revisa. O Sonnet constrói. O Haiku faz o simples.
 
-Um plugin do Claude Code para assinantes Pro e Max que querem respostas melhores, não mais baratas. Plano, pesquisa, implementação e revisão rodam cada um no seu contexto: o Opus planeja, o Sonnet pesquisa e depois constrói, e o Opus revisa o resultado sem ter visto como ele foi escrito. Quando uma tarefa falha, o nível seguinte recebe as notas da falha. O [benchmark](#-benchmark) mede qualidade com métricas padrão; tokens são o preço dessa qualidade, não o objetivo.
+Um plugin do Claude Code para assinantes Pro e Max que querem o trabalho certo da primeira vez. O ponto é o seu tempo e o código, não tokens. Você faz um pedido curto e não escreve a spec: o cc-tiers pesquisa o projeto e escreve os critérios de aceite sozinho. O código segue a documentação da versão instalada e as convenções do seu próprio projeto, reaproveita o que já existe e fica dentro da tarefa, sem você precisar pedir código limpo nem escrever regras para isso. Os hooks rodam os testes de novo antes de um pass valer, e uma revisão só conta com um defeito reproduzido, então você não precisa pedir de novo. Cada tarefa vai para o modelo de que precisa: Haiku para o simples, Sonnet para o trabalho normal, Opus para planejar, revisar e pegar o que o Sonnet não terminou, para o Opus não ser gasto num typo. No relógio, uma execução demora mais que o Opus sozinho; o [benchmark](#-benchmark) mede se o resultado sai melhor.
 
 [![Claude Code](https://img.shields.io/badge/Claude_Code-2.1.295%2B-d97757?style=for-the-badge&logo=anthropic&logoColor=white)](https://claude.com/claude-code)
 [![Plugin](https://img.shields.io/badge/tipo-plugin-8a63d2?style=for-the-badge)](#-instala%C3%A7%C3%A3o)
@@ -10,7 +10,7 @@ Um plugin do Claude Code para assinantes Pro e Max que querem respostas melhores
 
 [English](README.md) · **Português**
 
-🔬 pesquisa antes do código  •  🧐 revisão independente  •  🪜 mais effort antes de um modelo maior  •  🔁 duas falhas, depois sobe  •  📏 qualidade medida
+🔬 pesquisa antes do código  •  🧐 revisão independente  •  🪜 mais effort antes de um modelo maior  •  🔁 duas falhas, depois sobe  •  📏 qualidade medida  •  ✅ testes rodados de novo pelo hook  •  ♻️ reaproveitar antes de escrever
 
 ---
 
@@ -39,7 +39,7 @@ claude --plugin-dir /caminho/para/cc-tiers
 | Nível | Agente | Modelo | Faz |
 | :-: | --- | --- | --- |
 | Plano | `cc-tiers:orchestrator` | Opus | Divide o pedido, delega e só implementa o teto |
-| Pesquisa | `cc-tiers:researcher` | Sonnet | Acha a versão instalada, a documentação dessa versão e o uso existente antes de o código ser escrito. Não edita |
+| Pesquisa | `cc-tiers:researcher` | Sonnet | Acha a versão instalada, a documentação dessa versão, o uso existente, o código reaproveitável e as convenções antes de o código ser escrito. Não edita |
 | Padrão | `cc-tiers:implementer` | Sonnet | Features, bugs, testes, refactors locais |
 | Miúdo | `cc-tiers:worker` | Haiku | Renomear, typos, formatação, buscas simples, edições de ~15 linhas |
 | Checagem | `cc-tiers:checker` | Sonnet | Uma passada nova sobre a saída do Haiku. Não edita |
@@ -76,16 +76,34 @@ flowchart LR
 
 ## 🔬 Pesquisa primeiro
 
-Código escrito de memória, com uma versão antiga da API em mente, falha de jeitos que o teste nem sempre pega. Antes de uma tarefa ir para o `cc-tiers:implementer` ou o `cc-tiers:architect`, o `cc-tiers:researcher` (Sonnet, só leitura) confere quatro coisas:
+Código escrito de memória, com uma versão antiga da API em mente, falha de jeitos que o teste nem sempre pega. Antes de uma tarefa ir para o `cc-tiers:implementer` ou o `cc-tiers:architect`, o `cc-tiers:researcher` (Sonnet, só leitura) confere estas coisas:
 
 - A versão em uso, lida primeiro no arquivo de lock e depois no manifesto.
 - A documentação dessa versão, vinda de `vendor/` ou `node_modules/` quando instalada, nunca a da última release por padrão.
+- Como a documentação dessa versão recomenda fazer a tarefa e o que ela marca como obsoleto.
 - Como o repositório já chama a API, como `arquivo:linha`.
+- Reuso: código que o repositório já tem e que faz tudo ou parte da tarefa, como `arquivo:linha`.
+- Convenções: um ou dois trechos próximos a seguir (nomes, tratamento de erro, estilo de teste, quantidade de comentário).
 - Referências fora do repositório, só quando se aplicam.
 
-Ele devolve um briefing de até umas 30 linhas em três blocos, **Versão e doc**, **No repo** e **Fora do repo**, com a fonte de cada fato. O orquestrador cola o relatório inteiro, trailer incluído, no prompt de quem vai escrever, entre duas linhas que só têm `CC_TIERS_RESEARCH_BEGIN` e `CC_TIERS_RESEARCH_END`, e acrescenta `CC_TIERS_RESEARCH: done`. Uma tarefa que não toca biblioteca, framework nem API externa diz o motivo no lugar: `CC_TIERS_RESEARCH: none - <motivo>`. Um briefing pode servir a várias tarefas: o prompt do pesquisador leva `CC_TIERS_COVERS: <slug>, <slug>`, e um pass marca todos.
+Ele devolve um briefing de até umas 40 linhas em três blocos, **Versão e doc**, **No repo** (uso, Reuso, Convenções) e **Fora do repo**, com a fonte de cada fato. O orquestrador cola o relatório inteiro, trailer incluído, no prompt de quem vai escrever, entre duas linhas que só têm `CC_TIERS_RESEARCH_BEGIN` e `CC_TIERS_RESEARCH_END`, e acrescenta `CC_TIERS_RESEARCH: done`. Uma tarefa que não toca biblioteca, framework nem API externa diz o motivo no lugar: `CC_TIERS_RESEARCH: none - <motivo>`. Um briefing pode servir a várias tarefas: o prompt do pesquisador leva `CC_TIERS_COVERS: <slug>, <slug>`, e um pass marca todos.
 
 O hook PreToolUse garante isso. Ele recusa a chamada ao implementer ou ao architect que não tem nem pesquisa concluída para aquela tarefa nem a linha `none`. Pesquisa não é tentativa, e uma pesquisa que falha não conta contra a tarefa. O worker fica de fora. O teto Opus e a tarefa do próprio dispatcher são pesquisados por prompt, sem checagem do hook. `research: off` tira o passo e a checagem.
+
+---
+
+## 🧹 Código limpo sem pedir
+
+Quem escreve já leva estas regras, então um projeto não precisa de regras no CLAUDE.md para isso:
+
+- Reaproveitar ou estender o que existe, nunca forkar. O bloco Reuso do briefing diz onde olhar.
+- Seguir a documentação da versão instalada e as convenções do arquivo editado.
+- Mexer só no que a tarefa exige: sem refator, reformat, rename ou bump de dependência de passagem.
+- Sem proteção hipotética: retry, cache, fallback ou compatibilidade só quando algo real consome.
+- Comentário só para o que o código não consegue dizer.
+- Parar quando estiver verificado. Sem passes extras.
+
+O revisor bloqueia código que recria o que o projeto já tem e mudanças fora da tarefa (ambos achados de `scope`). Proteção hipotética, estilo, ruído de comentário e gosto de nome são notas: vão para o relatório final e nunca reprovam uma tarefa.
 
 ---
 
@@ -144,7 +162,7 @@ O relatório final diz, por tarefa, `verified: <comandos>`, `flaky: <comando>` o
 
 Uma revisão rejeitava com "uma razão concreta", e isso pesava igual com prova ou sem. Agora uma rejeição só conta quando traz um defeito bloqueante com um jeito de reproduzir. O revisor recebe o diff, o bloco de spec, o bloco de pesquisa e o pedido, e nunca o relatório nem a explicação de quem escreveu: um revisor que lê o raciocínio do autor herda os pontos cegos dele.
 
-O revisor passa por corretude, regressão, segurança, estado (ordem, idempotência, atomicidade) e escopo, nessa ordem. Cada achado é um bloco antes do trailer:
+O revisor passa por corretude, regressão, segurança, estado (ordem, idempotência, atomicidade) e escopo, nessa ordem. Código recriado e mudanças fora da tarefa são achados `scope` bloqueantes. Cada achado é um bloco antes do trailer:
 
 ```
 CC_TIERS_FINDING_BEGIN
@@ -368,9 +386,12 @@ Uma rodada sai certa da primeira vez quando o usuário não teria de pedir de no
 | Resolved | FAIL_TO_PASS passou e nenhum arquivo PASS_TO_PASS regrediu | SWE-bench |
 | Broke something | Rodadas cujo check oculto passou mas que quebraram um teste que passava antes | PASS_TO_PASS |
 | Recreated existing code | Rodadas que falharam num teste do check oculto cujo nome começa com `reuse: `. `—` quando nenhuma rodada foi checada para isso | cc-tiers |
+| Touched outside scope | Rodadas que mudaram um arquivo fora do escopo da tarefa: os arquivos da solução de referência, `scopeExtra` do JSON de tarefas e os diretórios de teste. `—` quando nenhuma rodada foi medida para isso | cc-tiers |
 | Tokens per resolved task | Tokens novos (entrada + escrita de cache + saída) divididos pelas tarefas resolvidas. Só para informação | cc-tiers |
 
 Testes que o modelo escreveu não contam para resolvida; o JSON bruto guarda como `ownTests`. Uma tarefa pode listar `changesTests`, os arquivos de teste originais que ela muda de propósito; eles ficam fora do PASS_TO_PASS. Abaixo da tabela por tarefa, **Where it made a difference** lista as tarefas em que uma configuração resolveu uma parcela de rodadas diferente da do só Opus.
+
+O escopo são os arquivos da solução de referência mais uma lista curta de permitidos, então uma correção alternativa legítima em outro arquivo pode contar como fora do escopo; o JSON bruto lista os arquivos para o leitor julgar. Legibilidade e qualidade de comentário não têm métrica determinística e não estão nas tabelas. As linhas abaixo são anteriores à coluna, por isso mostram `—`.
 
 **Duas suítes.**
 
@@ -397,11 +418,11 @@ A suíte de login roda só em one-shot: a tarefa edita o servidor e a configura�
 
 Login (`bench/results/login.json`, k=2, cc-tiers no commit `18a1222` do plugin):
 
-| Configuration | pass@1 | Δ pass@1 vs Opus only | pass^k | Resolved | Broke something | Recreated existing code | Tokens per resolved task |
-| --- | --: | --: | --: | --: | --: | --: | --: |
-| Opus only | 50% | — | 0% (k=2) | 1/2 | 0 | — | 50.2k |
-| Sonnet only | 50% | 0 pp | 0% (k=2) | 1/2 | 0 | — | 40.1k |
-| cc-tiers (Opus orchestrator) 18a1222 | 100% | +50 pp | 100% (k=2) | 2/2 | 0 | — | 202.4k |
+| Configuration | pass@1 | Δ pass@1 vs Opus only | pass^k | Resolved | Broke something | Recreated existing code | Touched outside scope | Tokens per resolved task |
+| --- | --: | --: | --: | --: | --: | --: | --: | --: |
+| Opus only | 50% | — | 0% (k=2) | 1/2 | 0 | — | — | 50.2k |
+| Sonnet only | 50% | 0 pp | 0% (k=2) | 1/2 | 0 | — | — | 40.1k |
+| cc-tiers (Opus orchestrator) 18a1222 | 100% | +50 pp | 100% (k=2) | 2/2 | 0 | — | — | 202.4k |
 
 | Task | Opus only | Sonnet only | cc-tiers (Opus orchestrator) 18a1222 |
 | --- | --: | --: | --: |
@@ -429,11 +450,11 @@ Login (`bench/results/login.json`, k=2, cc-tiers no commit `18a1222` do plugin):
 
 Par difícil (`bench/results/hard-pair.json`, `traversal` e `race`, k=3, cc-tiers no commit `ef57726` do plugin):
 
-| Configuration | pass@1 | Δ pass@1 vs Opus only | pass^k | Resolved | Broke something | Recreated existing code | Tokens per resolved task |
-| --- | --: | --: | --: | --: | --: | --: | --: |
-| Opus only | 100% | — | 100% (k=3) | 6/6 | 0 | — | 32.7k |
-| Sonnet only | 50% | −50 pp | 50% (k=3) | 3/6 | 0 | — | 38.5k |
-| cc-tiers (Opus orchestrator) | 100% | 0 pp | 100% (k=3) | 6/6 | 0 | — | 166.5k |
+| Configuration | pass@1 | Δ pass@1 vs Opus only | pass^k | Resolved | Broke something | Recreated existing code | Touched outside scope | Tokens per resolved task |
+| --- | --: | --: | --: | --: | --: | --: | --: | --: |
+| Opus only | 100% | — | 100% (k=3) | 6/6 | 0 | — | — | 32.7k |
+| Sonnet only | 50% | −50 pp | 50% (k=3) | 3/6 | 0 | — | — | 38.5k |
+| cc-tiers (Opus orchestrator) | 100% | 0 pp | 100% (k=3) | 6/6 | 0 | — | — | 166.5k |
 
 | Task | Opus only | Sonnet only | cc-tiers (Opus orchestrator) |
 | --- | --: | --: | --: |

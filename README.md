@@ -1,8 +1,8 @@
 # 🎚️ cc-tiers
 
-### Opus plans and reviews. Sonnet builds. Research comes first.
+### Opus plans and reviews. Sonnet builds. Haiku does the small stuff.
 
-A Claude Code plugin for Pro and Max subscribers who want better answers, not cheaper ones. Plan, research, implementation, and review each run in their own context: Opus plans, Sonnet researches and then builds, and Opus reviews the result without having seen how it was written. When a task fails, the next tier gets the failure notes. The [benchmark](#-benchmark) measures quality with standard metrics; tokens are the price of that quality, not the goal.
+A Claude Code plugin for Pro and Max subscribers who want work done right the first time. The point is your time and the code, not tokens. You make a short request and do not write the spec: cc-tiers researches the project and writes the acceptance criteria itself. The code follows the docs of the version you have installed and the conventions of your own project, reuses what already exists, and stays inside the task, without you asking for clean code or writing rules for it. The hooks re-run the tests before a pass counts, and a review counts only with a reproduced defect, so you do not have to ask again. Each task goes to the model it needs: Haiku for the simple stuff, Sonnet for normal work, Opus to plan, review, and take what Sonnet could not finish, so Opus is not spent on a typo. On the clock a run takes longer than plain Opus; the [benchmark](#-benchmark) measures whether the result is better.
 
 [![Claude Code](https://img.shields.io/badge/Claude_Code-2.1.295%2B-d97757?style=for-the-badge&logo=anthropic&logoColor=white)](https://claude.com/claude-code)
 [![Plugin](https://img.shields.io/badge/type-plugin-8a63d2?style=for-the-badge)](#-install)
@@ -10,7 +10,7 @@ A Claude Code plugin for Pro and Max subscribers who want better answers, not ch
 
 **English** · [Português](README.pt-BR.md)
 
-🔬 research before code  •  🧐 independent review  •  🪜 more effort before a bigger model  •  🔁 two failures, then escalate  •  📏 quality measured
+🔬 research before code  •  🧐 independent review  •  🪜 more effort before a bigger model  •  🔁 two failures, then escalate  •  📏 quality measured  •  ✅ tests re-run by the hook  •  ♻️ reuse before writing
 
 ---
 
@@ -39,7 +39,7 @@ claude --plugin-dir /path/to/cc-tiers
 | Tier | Agent | Model | Does |
 | :-: | --- | --- | --- |
 | Plan | `cc-tiers:orchestrator` | Opus | Splits the request, delegates, and implements only the ceiling |
-| Research | `cc-tiers:researcher` | Sonnet | Finds the installed version, that version's docs, and existing usage before code is written. Does not edit |
+| Research | `cc-tiers:researcher` | Sonnet | Finds the installed version, that version's docs, existing usage, reusable code, and conventions before code is written. Does not edit |
 | Default | `cc-tiers:implementer` | Sonnet | Features, bug fixes, tests, local refactors |
 | Trivial | `cc-tiers:worker` | Haiku | Renames, typos, formatting, lookups, simple searches, ~15-line edits |
 | Check | `cc-tiers:checker` | Sonnet | A fresh pass over Haiku's output. Does not edit |
@@ -76,16 +76,34 @@ flowchart LR
 
 ## 🔬 Research first
 
-Code written from memory of an old API version fails in ways a test does not always catch. Before a task goes to `cc-tiers:implementer` or `cc-tiers:architect`, `cc-tiers:researcher` (Sonnet, read-only) checks four things:
+Code written from memory of an old API version fails in ways a test does not always catch. Before a task goes to `cc-tiers:implementer` or `cc-tiers:architect`, `cc-tiers:researcher` (Sonnet, read-only) checks these:
 
 - The version in use, read from the lock file first and the manifest second.
 - The docs of that version, from `vendor/` or `node_modules/` when installed, never the docs of the latest release by default.
+- How that version's docs recommend doing the task, and what they mark deprecated.
 - How the repo already calls the API, as `file:line`.
+- Reuse: code the repo already has that does all or part of the task, as `file:line`.
+- Conventions: one or two nearby snippets to follow (naming, error handling, test style, comment density).
 - Prior art outside the repo, only when it applies.
 
-It returns a brief of under about 30 lines in three blocks, **Version and docs**, **In the repo**, and **Outside the repo**, with a source for every fact. The orchestrator pastes the whole report, trailer included, into the writer's prompt between two lines that hold only `CC_TIERS_RESEARCH_BEGIN` and `CC_TIERS_RESEARCH_END`, and adds `CC_TIERS_RESEARCH: done`. A task that touches no library, framework, or external API says why instead: `CC_TIERS_RESEARCH: none - <reason>`. One brief can serve several tasks: the researcher's prompt carries `CC_TIERS_COVERS: <slug>, <slug>`, and a pass marks all of them.
+It returns a brief of under about 40 lines in three blocks, **Version and docs**, **In the repo** (usage, Reuse, Conventions), and **Outside the repo**, with a source for every fact. The orchestrator pastes the whole report, trailer included, into the writer's prompt between two lines that hold only `CC_TIERS_RESEARCH_BEGIN` and `CC_TIERS_RESEARCH_END`, and adds `CC_TIERS_RESEARCH: done`. A task that touches no library, framework, or external API says why instead: `CC_TIERS_RESEARCH: none - <reason>`. One brief can serve several tasks: the researcher's prompt carries `CC_TIERS_COVERS: <slug>, <slug>`, and a pass marks all of them.
 
 The PreToolUse hook enforces this. It refuses a call to the implementer or the architect that has neither a finished research for that task nor a `none` line. A research is not an attempt, and a failed research does not count against the task. The worker is exempt. The Opus ceiling and the dispatcher's own task are researched by prompt, with no hook check. `research: off` removes the step and the check.
+
+---
+
+## 🧹 Clean code without asking
+
+The writers carry these rules, so a project needs no CLAUDE.md rules for them:
+
+- Reuse or extend what exists, never fork it. The brief's Reuse block says where to look.
+- Follow the docs of the installed version, and the conventions of the file being edited.
+- Touch only what the task needs: no drive-by refactor, reformat, rename, or dependency bump.
+- No hypothetical protection: retry, cache, fallback, or compatibility only when something real consumes it.
+- Comments only for what the code cannot say.
+- Stop when it is verified. No extra passes.
+
+The reviewer blocks code that recreates what the project already has, and changes outside the task (both `scope` findings). Hypothetical protection, style, comment noise, and naming taste are notes: they reach the final report and never fail a task.
 
 ---
 
@@ -144,7 +162,7 @@ The final report says, per task, `verified: <commands>`, `flaky: <command>`, or 
 
 A review used to reject with "a concrete reason", and that weighed the same with a proof or without one. Now a rejection counts only when it carries a blocking defect with a way to reproduce it. The reviewer receives the diff, the spec block, the research block, and the request, and never the writer's report or explanation: a reviewer that reads the writer's reasoning inherits its blind spots.
 
-The reviewer goes through correctness, regression, security, state (order, idempotency, atomicity), and scope, in that order. Each finding is a block before the trailer:
+The reviewer goes through correctness, regression, security, state (order, idempotency, atomicity), and scope, in that order. Recreated code and changes outside the task are blocking `scope` findings. Each finding is a block before the trailer:
 
 ```
 CC_TIERS_FINDING_BEGIN
@@ -368,9 +386,12 @@ A run is right the first time when the user would not have to ask again. They wo
 | Resolved | FAIL_TO_PASS passed and no PASS_TO_PASS file regressed | SWE-bench |
 | Broke something | Runs whose hidden check passed but that broke a test that passed before | PASS_TO_PASS |
 | Recreated existing code | Runs that failed a hidden-check test whose name starts with `reuse: `. `—` when no run was checked for it | cc-tiers |
+| Touched outside scope | Runs that changed a file outside the task's scope: the files of the reference solution, `scopeExtra` from the tasks JSON, and test directories. `—` when no run was measured for it | cc-tiers |
 | Tokens per resolved task | Fresh tokens (input + cache write + output) divided by resolved tasks. For information only | cc-tiers |
 
 Tests the model wrote do not count toward resolved; the raw JSON keeps them as `ownTests`. A task may list `changesTests`, the original test files it changes on purpose; they are left out of PASS_TO_PASS. Below the per-task table, **Where it made a difference** lists the tasks where a configuration resolved a different share of runs than Opus only.
+
+The scope is the reference solution's files plus a short allowance list, so a legitimate alternative fix in another file can count as touched outside scope; the raw JSON lists the files so a reader can judge. Readability and comment quality have no deterministic metric and are not in the tables. The rows below predate the column, so it shows `—`.
 
 **Two suites.**
 
@@ -397,11 +418,11 @@ The login suite is one-shot only: its task edits the server and the config, so `
 
 Login (`bench/results/login.json`, k=2, cc-tiers at plugin commit `18a1222`):
 
-| Configuration | pass@1 | Δ pass@1 vs Opus only | pass^k | Resolved | Broke something | Recreated existing code | Tokens per resolved task |
-| --- | --: | --: | --: | --: | --: | --: | --: |
-| Opus only | 50% | — | 0% (k=2) | 1/2 | 0 | — | 50.2k |
-| Sonnet only | 50% | 0 pp | 0% (k=2) | 1/2 | 0 | — | 40.1k |
-| cc-tiers (Opus orchestrator) 18a1222 | 100% | +50 pp | 100% (k=2) | 2/2 | 0 | — | 202.4k |
+| Configuration | pass@1 | Δ pass@1 vs Opus only | pass^k | Resolved | Broke something | Recreated existing code | Touched outside scope | Tokens per resolved task |
+| --- | --: | --: | --: | --: | --: | --: | --: | --: |
+| Opus only | 50% | — | 0% (k=2) | 1/2 | 0 | — | — | 50.2k |
+| Sonnet only | 50% | 0 pp | 0% (k=2) | 1/2 | 0 | — | — | 40.1k |
+| cc-tiers (Opus orchestrator) 18a1222 | 100% | +50 pp | 100% (k=2) | 2/2 | 0 | — | — | 202.4k |
 
 | Task | Opus only | Sonnet only | cc-tiers (Opus orchestrator) 18a1222 |
 | --- | --: | --: | --: |
@@ -429,11 +450,11 @@ Login (`bench/results/login.json`, k=2, cc-tiers at plugin commit `18a1222`):
 
 Hard pair (`bench/results/hard-pair.json`, `traversal` and `race`, k=3, cc-tiers at plugin commit `ef57726`):
 
-| Configuration | pass@1 | Δ pass@1 vs Opus only | pass^k | Resolved | Broke something | Recreated existing code | Tokens per resolved task |
-| --- | --: | --: | --: | --: | --: | --: | --: |
-| Opus only | 100% | — | 100% (k=3) | 6/6 | 0 | — | 32.7k |
-| Sonnet only | 50% | −50 pp | 50% (k=3) | 3/6 | 0 | — | 38.5k |
-| cc-tiers (Opus orchestrator) | 100% | 0 pp | 100% (k=3) | 6/6 | 0 | — | 166.5k |
+| Configuration | pass@1 | Δ pass@1 vs Opus only | pass^k | Resolved | Broke something | Recreated existing code | Touched outside scope | Tokens per resolved task |
+| --- | --: | --: | --: | --: | --: | --: | --: | --: |
+| Opus only | 100% | — | 100% (k=3) | 6/6 | 0 | — | — | 32.7k |
+| Sonnet only | 50% | −50 pp | 50% (k=3) | 3/6 | 0 | — | — | 38.5k |
+| cc-tiers (Opus orchestrator) | 100% | 0 pp | 100% (k=3) | 6/6 | 0 | — | — | 166.5k |
 
 | Task | Opus only | Sonnet only | cc-tiers (Opus orchestrator) |
 | --- | --: | --: | --: |

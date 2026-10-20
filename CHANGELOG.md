@@ -10,6 +10,8 @@
 - Options `verify` (`on` / `off`, default `on`), `verify_allow` (command prefixes, `docker exec` not included), `verify_timeout` (default 300 s, 10-600), `verify_budget` (default 600 s, 30-600), and `review_evidence` (`on` / `off`, default `on`).
 - `/cc-tiers:report` has a Verify column: `ok`, `flaky`, or `not validated`. The final report says `verified`, `flaky`, or `not validated` per task.
 - Benchmark: for cc-tiers a quality layers table counts passes blocked by the gate, flaky commands, tasks not validated, findings discarded, rejections without evidence, and review rounds per task. README documents the run for the hard suite (`bench/results/verify-evidence.json`); results are pending.
+- Clean code without asking. The researcher brief has Reuse (existing helpers as `file:line`) and Conventions (nearby snippets), and notes how the installed version recommends doing the task and what it marks deprecated; the limit is about 40 lines. The writers reuse or extend and never fork, follow the version's docs and the file's conventions, touch only what the task needs, add no hypothetical protection (retry, cache, fallback, or compatibility only with a real consumer), comment only what the code cannot say, and stop when verified. The reviewer blocks recreated code and changes outside the task as `scope` findings; hypothetical protection, style, comment noise, and naming taste are notes.
+- Benchmark: a `Touched outside scope` column counts runs that changed a file outside the task's scope (the reference solution's files, `scopeExtra` in the tasks JSON, and test directories). The raw JSON keeps the list of files.
 
 ### Changed
 
@@ -17,6 +19,7 @@
 - A review `fail` without a blocking finding with evidence no longer counts as a failure. `review_evidence: off` restores 0.6.
 - The hook timeout of PostToolUse, PostToolUseFailure, SubagentStop, and Stop is 660 s, so the gate can run its commands. The other hooks keep their timeouts.
 - The reviewer and the checker no longer receive the writer's report, only the diff, the spec block, the research block, and the request.
+- The README opening states the purpose: your time, the spec, and the code, not tokens; the right model per task; and that a run is slower on the clock than plain Opus.
 
 ## 0.6.0 - 2026-10-20
 
