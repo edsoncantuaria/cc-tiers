@@ -17,7 +17,7 @@
 
 ### Changed
 
-- The benchmark runner passes `--disallowedTools AskUserQuestion` for every configuration, so none waits on a question in a headless run.
+- The benchmark runner passes `--disallowedTools AskUserQuestion` for every configuration, because a headless run denies it anyway; disabling it means no configuration spends turns on a question nobody can answer.
 - Defaults favor quality, so a session behaves differently after updating: `review_policy` is `risky` (was `cheap`), `show_cost` is `off` (was `on`), and the Sonnet effort ladder is `high`, `xhigh` (was `medium`, `high`, `xhigh`); a risky Sonnet task starts at `xhigh`. The implementer's own effort is `high`.
 - The README tells the quality-first story for Pro and Max: Opus plans and reviews, Sonnet researches and builds, review runs in a fresh context, and cost is optional. Light mode is for when the usage window is tight.
 - The benchmark tables no longer show dollars. The 0.5 dollar table is withdrawn: its session-mode column summed session-cumulative cost, and the 0.5 pass rates used the old criterion (hidden check plus the model's own tests, no before-form PASS_TO_PASS), so they are not like-for-like with 0.6. The quality results are marked not measured yet.

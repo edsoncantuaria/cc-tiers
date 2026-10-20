@@ -2019,6 +2019,9 @@ test('the spec gate refuses a writer without criteria', () => {
   for (const body of ['-', '- (request)', '**', '1. (repo: src/a.js:3)', '• (decided: simpler) (user)']) {
     assert.equal(call(`${SPEC_BEGIN}\nCriteria:\n${body}\n${SPEC_END}\n`).deny, refusal, body)
   }
+  for (const heading of ['**Criteria:**', '## Edge cases', 'Criteria', '*Assumed:*', '__Criteria__:']) {
+    assert.equal(call(`${SPEC_BEGIN}\n${heading}\n${SPEC_END}\n`).deny, refusal, heading)
+  }
   assert.equal(call(`${BRIEF_BEGIN}\n${SPEC_BEGIN}\nCriteria:\n- a CSV with a header row (request)\n${SPEC_END}\n${BRIEF_END}\n`).deny, refusal)
   assert.deepEqual(state.tasks, {})
   assert.deepEqual(state.log, {})
@@ -2029,6 +2032,7 @@ test('the spec gate refuses a writer without criteria', () => {
   assert.deepEqual(state.tasks, before)
   assert.deepEqual(state.log, {})
 
+  assert.equal(tiers.checkDelegation(tiers.emptyState('s'), { subagent_type: 'cc-tiers:implementer', prompt: `${HEADER('csv', 'sonnet', 'implementer')}${SPEC_BEGIN}\n**Criteria:**\n- a CSV with a header row (request)\n${SPEC_END}\nGo.` }, routing).deny, '')
   assert.equal(tiers.checkDelegation(tiers.emptyState('s'), { subagent_type: 'cc-tiers:implementer', prompt: `${HEADER('csv', 'sonnet', 'implementer')}CC_TIERS_SPEC: none - typo-level change\nGo.` }, routing).deny, '')
   assert.equal(tiers.checkDelegation(tiers.emptyState('s'), { subagent_type: 'cc-tiers:implementer', prompt: `${HEADER('csv', 'sonnet', 'implementer')}${SPEC_BEGIN}\nCriteria:\n- a CSV with a header row (request)\n${SPEC_END}\nGo.` }, routing).deny, '')
   assert.equal(tiers.checkDelegation(tiers.emptyState('s'), { subagent_type: 'cc-tiers:implementer', prompt: `${HEADER('csv', 'sonnet', 'implementer')}${SPEC_BEGIN}\nCriteria:\n- returns {} when both files are missing (request)\n${SPEC_END}\nGo.` }, routing).deny, '')
@@ -2041,6 +2045,11 @@ test('the spec gate refuses a writer without criteria', () => {
   assert.equal(worker.deny, '')
   const both = tiers.checkDelegation(tiers.emptyState('s'), { subagent_type: 'cc-tiers:implementer', prompt: `${HEADER('csv', 'sonnet', 'implementer')}Go.` }, defaultRouting())
   assert.ok(both.deny.includes('run cc-tiers:researcher for csv'))
+  const hint = ' Also add the acceptance criteria between CC_TIERS_SPEC_BEGIN and CC_TIERS_SPEC_END, or CC_TIERS_SPEC: none - <reason>.'
+  assert.ok(both.deny.endsWith(`add CC_TIERS_RESEARCH: none - <reason>.${hint}`))
+  const onlyResearch = tiers.checkDelegation(tiers.emptyState('s'), { subagent_type: 'cc-tiers:implementer', prompt: `${HEADER('csv', 'sonnet', 'implementer')}CC_TIERS_SPEC: none - typo\nGo.` }, defaultRouting())
+  assert.ok(onlyResearch.deny.includes('run cc-tiers:researcher for csv'))
+  assert.equal(onlyResearch.deny.includes('acceptance criteria'), false)
 })
 
 test('both blocks are left out of routing signals', () => {
@@ -2302,8 +2311,9 @@ test('the short check embeds the fixture files byte for byte, and a rewritten wo
 test('--session is refused for a oneShot task, and the trap tasks are oneShot', async () => {
   const { sessionRefusal } = await import(pathToFileURL(path.join(ROOT, 'bench', 'run.mjs')).href)
   const tasks = JSON.parse(readFileSync(path.join(ROOT, 'bench', 'tasks-trap.json'), 'utf8'))
-  assert.ok(tasks.every((task) => task.oneShot === true))
-  assert.throws(() => sessionRefusal(tasks, 'bench/tasks-trap.json', true), /tasks-trap\.json.*config.*src\/config\.js/s)
+  assert.ok(tasks.every((task) => task.oneShot === 'both trap tasks write src/config.js'))
+  assert.throws(() => sessionRefusal(tasks, 'bench/tasks-trap.json', true), /tasks-trap\.json.*config.*both trap tasks write src\/config\.js/s)
+  assert.throws(() => sessionRefusal([{ id: 'x', oneShot: true }], 'bench/t.json', true), /"x".*clean tree/s)
   assert.doesNotThrow(() => sessionRefusal(tasks, 'bench/tasks-trap.json', false))
   assert.doesNotThrow(() => sessionRefusal([{ id: 'a' }], 'bench/tasks.json', true))
 })

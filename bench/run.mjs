@@ -94,7 +94,9 @@ export function claudeArgs(config, plugin, prompt, resume = '') {
 
 export function sessionRefusal(tasks, tasksFile, session) {
   const oneShot = tasks.find((task) => task.oneShot)
-  if (session && oneShot) throw new Error(`${tasksFile}: --session cannot run task "${oneShot.id}": its tasks write the same file (src/config.js), so each needs a clean tree. Run it one-shot.`)
+  if (!session || !oneShot) return
+  const why = typeof oneShot.oneShot === 'string' ? oneShot.oneShot : 'this task must run in a clean tree'
+  throw new Error(`${tasksFile}: --session cannot run task "${oneShot.id}": ${why}. Run it one-shot.`)
 }
 
 function runClaude(dir, config, prompt, timeoutMs, plugin, resume = '') {

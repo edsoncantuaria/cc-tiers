@@ -81,7 +81,7 @@ const RESEARCH_NONE_RE = /^none\s*-\s*\S/
 const SPEC_BEGIN = 'CC_TIERS_SPEC_BEGIN'
 const SPEC_END = 'CC_TIERS_SPEC_END'
 const SPEC_NONE_RE = /^none\s*-\s*\S/i
-const SPEC_HEADING_RE = /^(criteria|edge cases|assumed):$/i
+const SPEC_HEADING_RE = /^[*_#\s]*(criteria|edge cases|assumed)[*_#\s]*:?[*_#\s]*$/i
 const SPEC_BULLET_RE = /^(?:[-*•]|\d+\.)\s*/
 const SPEC_ORIGIN_RE = /\((?:request|user|(?:repo|docs|decided):[^)]*)\)/gi
 const ORCHESTRATION_PHRASE = 'planning and splitting work into tasks'
@@ -1357,7 +1357,9 @@ export function checkDelegation(state, toolInput, routing, { history = null, pro
     )
   }
   if (REVIEW_ROLES.has(role) || role === 'researcher') return pass
-  if (routing.research && (role === 'implementer' || role === 'architect')) {
+  const writer = role === 'implementer' || role === 'architect'
+  const specMissing = routing.specify && writer && !specCriteria(stripResearch(prompt)).length && !SPEC_NONE_RE.test(headers.SPEC || '')
+  if (routing.research && writer) {
     const research = (headers.RESEARCH || '').toLowerCase()
     if (research === 'done') {
       if (!Object.hasOwn(state.researched || {}, task)) {
@@ -1366,16 +1368,13 @@ export function checkDelegation(state, toolInput, routing, { history = null, pro
         )
       }
     } else if (!RESEARCH_NONE_RE.test(research)) {
-      return refuse(`cc-tiers: run cc-tiers:researcher for ${task} before delegating it, or add CC_TIERS_RESEARCH: none - <reason>.`)
+      const hint = specMissing ? ' Also add the acceptance criteria between CC_TIERS_SPEC_BEGIN and CC_TIERS_SPEC_END, or CC_TIERS_SPEC: none - <reason>.' : ''
+      return refuse(`cc-tiers: run cc-tiers:researcher for ${task} before delegating it, or add CC_TIERS_RESEARCH: none - <reason>.${hint}`)
     }
   }
-  if (routing.specify && (role === 'implementer' || role === 'architect')) {
-    if (!specCriteria(stripResearch(prompt)).length && !SPEC_NONE_RE.test(headers.SPEC || '')) {
-      return refuse(
-        `cc-tiers: write the acceptance criteria for ${task} between CC_TIERS_SPEC_BEGIN and CC_TIERS_SPEC_END before delegating it, or add CC_TIERS_SPEC: none - <reason>.`,
-      )
-    }
-  }
+  if (specMissing) return refuse(
+      `cc-tiers: write the acceptance criteria for ${task} between CC_TIERS_SPEC_BEGIN and CC_TIERS_SPEC_END before delegating it, or add CC_TIERS_SPEC: none - <reason>.`,
+    )
   if (role === 'worker' && routing.classifier === 'haiku' && (headers.CLASSIFY || '').toLowerCase() === 'skip') {
     return refuse(
       'cc-tiers: the classifier is haiku, so a cc-tiers:worker prompt may not carry CC_TIERS_CLASSIFY: skip. Remove that line and call it again.',
