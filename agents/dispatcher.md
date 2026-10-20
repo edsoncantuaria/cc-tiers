@@ -82,15 +82,15 @@ Assumed:
 CC_TIERS_SPEC_END
 ```
 
-Keep it under about 15 lines. Every line says where it came from: `(request)`, `(repo: file:line)`, `(docs: <link or path>)`, `(decided: <why>)`, or `(user)` for an answer. A block with only headings is refused. The hook strips the block before it reads headers, like the research block.
+Keep it under about 15 lines, and omit `Assumed:` when nothing was assumed. Every line says where it came from: `(request)`, `(repo: file:line)`, `(docs: <link or path>)`, `(decided: <why>)`, or `(user)` for an answer. A block with only headings is refused. The hook strips the block before it reads headers, like the research block.
 
 Ask the user only when two reasonable readings lead to different code and neither the project nor the docs of the version in use decide. Do not ask what the repo, the research, or a sensible default settles. Ask once, before any implementing, with every question together and at most 3. Use `AskUserQuestion` as multiple choice, the recommended option first, with the reason in its label. Tag each answer `(user)` in the block. Only the main session can call `AskUserQuestion`; a subagent cannot, so never tell one to ask.
 
-When no human can answer, the tool is unavailable or denied (in a non-interactive run nothing tells you so; the call is simply denied). Then take the recommended option, list it under `Assumed:`, say so in the final report, and do not wait.
+When no human can answer (the tool is unavailable or denied; in a non-interactive run nothing tells you, the call is simply denied), take the recommended option, list it under `Assumed:`, say so in the final report, and do not wait.
 
 Paste the block under the writer's `CC_TIERS_TASK/TIER/ROLE` header, outside the research block. Paste the same block into the `cc-tiers:reviewer` or `cc-tiers:checker` prompt for that slug, so the review judges the same criteria. A retry, or an escalation to `cc-tiers:architect`, reuses the block; fix a criterion only when the failure notes show it was wrong, and say so in the block.
 
-When a task needs no criteria (a mechanical edit, a lookup), add `CC_TIERS_SPEC: none - <reason>` instead. Before a task you do yourself, write the block in your own message before the first edit: no hook checks it. `cc-tiers:worker` needs none, and the light path skips this step. The live setting `Specify: ${user_config.specify}` (fallback `on`) says whether it is on: `off` makes the hook skip the check. If the hook refuses a delegation, it says `cc-tiers: write the acceptance criteria for <task> between CC_TIERS_SPEC_BEGIN and CC_TIERS_SPEC_END before delegating it, or add CC_TIERS_SPEC: none - <reason>.` Write the block, or add the `none` line, and delegate again.
+When a task needs no criteria (a mechanical edit, a lookup), add `CC_TIERS_SPEC: none - <reason>` instead, on its own line under the delegation header, outside both blocks. Before a task you do yourself, write the block in your own message before the first edit: no hook checks it. `cc-tiers:worker` needs none, and the light path skips this step. The live setting `Specify: ${user_config.specify}` (fallback `on`) says whether it is on: `off` makes the hook skip the check. If the hook refuses a delegation, it says `cc-tiers: write the acceptance criteria for <task> between CC_TIERS_SPEC_BEGIN and CC_TIERS_SPEC_END before delegating it, or add CC_TIERS_SPEC: none - <reason>.` Write the block, or add the `none` line, and delegate again.
 
 ## Delegation prompt
 
