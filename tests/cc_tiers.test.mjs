@@ -106,7 +106,7 @@ test('required files are present and Python hooks are gone', () => {
 test('manifest declares the 0.5.0 knobs', () => {
   const manifest = JSON.parse(readFileSync(path.join(ROOT, '.claude-plugin/plugin.json'), 'utf8'))
   assert.equal(manifest.name, 'cc-tiers')
-  assert.equal(manifest.version, '0.7.0')
+  assert.equal(manifest.version, '0.8.0')
   assert.equal(JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version, manifest.version)
   assert.equal(/\s|@|:|\/|\\/.test(manifest.name), false)
   assert.equal(RESERVED_PREFIXES.some((prefix) => manifest.name.startsWith(prefix)), false)
@@ -897,8 +897,48 @@ test('the built-in lists match real task wording, in English and Portuguese', ()
   assert.equal(tiers.decideTier('fix a typo in README', routing).tier, 'haiku')
   assert.equal(tiers.decideTier('Renomear a função carregarUsuario', routing).tier, 'haiku')
   const risky = tiers.decideTier('Rename the users column and migrate the data', routing)
-  assert.deepEqual([risky.tier, risky.because], ['sonnet', 'risky'])
+  assert.deepEqual([risky.tier, risky.because], ['opus', 'hard'])
   assert.equal(tiers.decideTier('Add pagination to GET /users', routing).because, 'default')
+})
+
+test('hard start: a risky task starts on Opus unless the option says sonnet or the budget conserves', () => {
+  const routing = defaultRouting()
+  assert.equal(routing.hardStart, 'opus')
+  const migration = tiers.decideTier('Write a database migration for the users table', routing)
+  assert.deepEqual([migration.tier, migration.because, migration.effort], ['opus', 'hard', 'high'])
+  const conserved = tiers.decideTier('Write a database migration for the users table', routing, { conserve: true })
+  assert.deepEqual([conserved.tier, conserved.because, conserved.effort], ['sonnet', 'budget', 'high'])
+  assert.equal(tiers.decideTier('Add pagination to GET /users', routing).tier, 'sonnet')
+
+  const sonnet = defaultRouting({ hard_start: 'sonnet' })
+  assert.equal(sonnet.hardStart, 'sonnet')
+  assert.deepEqual(
+    ['tier', 'because', 'effort'].map((key) => tiers.decideTier('Write a database migration for the users table', sonnet)[key]),
+    ['sonnet', 'default', 'xhigh'],
+  )
+  const rename = tiers.decideTier('Rename the users column and migrate the data', sonnet)
+  assert.deepEqual([rename.tier, rename.because], ['sonnet', 'risky'])
+  assert.equal(defaultRouting({ hard_start: 'bogus' }).hardStart, 'opus')
+  assert.equal(tiers.userFromEnv({ CLAUDE_PLUGIN_OPTION_HARD_START: 'sonnet' }).hard_start, 'sonnet')
+  assert.equal(tiers.userFromEnv({}).hard_start, null)
+
+  const manifest = JSON.parse(readFileSync(path.join(ROOT, '.claude-plugin/plugin.json'), 'utf8'))
+  const option = manifest.userConfig.hard_start
+  assert.equal(option.type, 'string')
+  assert.deepEqual(option.options, ['opus', 'sonnet'])
+  assert.equal(option.default, 'opus')
+  assert.equal(tiers.loadJson(path.join(ROOT, 'config/routing.default.json')).hardStart, 'opus')
+
+  const text = tiers.formatSessionContext(routing, 'not present', { ccCost: { installed: false } })
+  assert.ok(text.includes('Hard start: opus'))
+  assert.ok(tiers.formatSessionContext(sonnet, 'not present', { ccCost: { installed: false } }).includes('Hard start: sonnet'))
+
+  const state = tiers.emptyState('s')
+  const prompt = 'CC_TIERS_TASK: users-migration\nCC_TIERS_TIER: sonnet\nCC_TIERS_ROLE: implementer\nCC_TIERS_RESEARCH: none - x\nCC_TIERS_SPEC: none - x\nWrite a database migration for the users table'
+  const hint = tiers.checkDelegation(state, { subagent_type: 'cc-tiers:implementer', prompt }, routing)
+  assert.equal(hint.deny, '')
+  assert.ok(hint.context.includes('looks like Opus work'))
+  assert.equal(tiers.checkDelegation(tiers.emptyState('s'), { subagent_type: 'cc-tiers:implementer', prompt }, sonnet).context.includes('Opus work'), false)
 })
 
 test('a risky Sonnet pass is sent to Opus under the cheap policy', () => {
@@ -1125,10 +1165,17 @@ test('the route helper prints the heuristic tier', async () => {
     })
     assert.equal(proc.status, 0, proc.stderr)
     const decision = JSON.parse(proc.stdout)
-    assert.equal(decision.tier, 'sonnet')
+    assert.equal(decision.tier, 'opus')
+    assert.equal(decision.because, 'hard')
     assert.equal(decision.risky, true)
     assert.equal(decision.review, 'reviewer')
     assert.equal(tiers.pluginRoot({}), ROOT)
+    const sonnet = spawnSync(process.execPath, [path.join(ROOT, 'hooks', 'route.mjs')], {
+      input: 'Add a database migration for invoices',
+      encoding: 'utf8',
+      env: { ...process.env, CLAUDE_PLUGIN_ROOT: '', CLAUDE_PROJECT_DIR: dir, HOME: path.join(dir, 'home'), CLAUDE_PLUGIN_OPTION_HARD_START: 'sonnet' },
+    })
+    assert.equal(JSON.parse(sonnet.stdout).tier, 'sonnet')
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

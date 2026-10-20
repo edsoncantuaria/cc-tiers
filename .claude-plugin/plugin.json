@@ -1,6 +1,6 @@
 {
   "name": "cc-tiers",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Quality-first tiers for Pro and Max: Opus plans and reviews, Sonnet researches and builds, Haiku does the small stuff, with an effort ladder, independent review, and a quality benchmark",
   "author": {
     "name": "edsoncantuaria",
@@ -74,6 +74,13 @@
       "description": "haiku: before a cc-tiers:worker call runs, a quick Haiku pass checks that the task is really trivial and sends it to Sonnet when it is not. local: only the keyword lists and the complexity score decide; the orchestrator marks worker prompts CC_TIERS_CLASSIFY: skip.",
       "default": "haiku",
       "options": ["haiku", "local"]
+    },
+    "hard_start": {
+      "type": "string",
+      "title": "Hard tasks start on",
+      "description": "opus (default): a task that matches an Opus review keyword (auth, payments, migrations, schema, security, concurrency, plus Extra review phrases) or needs an architecture decision starts on Opus, with research, spec, and review as usual: the orchestrator implements it (in light mode, cc-tiers:architect). While budget routing conserves, it starts on Sonnet. sonnet: it starts on Sonnet one effort level up, and Opus implements only after Sonnet uses its attempts.",
+      "default": "opus",
+      "options": ["opus", "sonnet"]
     },
     "show_cost": {
       "type": "string",

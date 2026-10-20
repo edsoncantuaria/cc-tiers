@@ -6,6 +6,7 @@
   "budget7d": 80,
   "classifier": "haiku",
   "lightPath": true,
+  "hardStart": "opus",
   "showCost": false,
   "research": true,
   "specify": true,

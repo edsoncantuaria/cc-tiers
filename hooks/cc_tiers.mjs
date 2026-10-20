@@ -57,6 +57,7 @@ const DELEGATED_WRITERS = new Set(['worker', 'implementer', 'architect'])
 export const REVIEW_POLICIES = new Set(['cheap', 'risky', 'always', 'never'])
 export const CLASSIFIERS = new Set(['haiku', 'local'])
 export const LIGHT_MODES = new Set(['inline', 'delegate', 'off'])
+export const HARD_STARTS = new Set(['opus', 'sonnet'])
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 export const DEFAULT_LADDERS = { haiku: ['low', 'medium'], sonnet: ['high', 'xhigh'], opus: ['high', 'xhigh'] }
 /** The effort each agent file pins, so the hook only rewrites a call that needs a different level. */
@@ -152,6 +153,12 @@ export function parseLightPath(value, fallback = 'inline') {
   if (text === 'on' || text === 'true') return 'inline'
   if (text === 'false' || text === 'no') return 'off'
   return LIGHT_MODES.has(text) ? text : fallback
+}
+
+/** Where a task that matches an Opus review keyword starts: opus or sonnet. */
+export function parseHardStart(value, fallback = 'opus') {
+  const text = String(value ?? '').trim().toLowerCase()
+  return HARD_STARTS.has(text) ? text : fallback
 }
 
 export function parseEffort(value) {
@@ -303,6 +310,7 @@ export function mergeRouting(defaults, project = null, user = null) {
     if (CLASSIFIERS.has(lowered)) classifier = lowered
   }
   const light = parseLightPath(config.light_path, parseLightPath(defaults.lightPath, 'inline'))
+  const hardStart = parseHardStart(config.hard_start, parseHardStart(defaults.hardStart))
   const showCost = parseLearn(config.show_cost, parseLearn(defaults.showCost, true))
   const research = parseLearn(config.research, parseLearn(source.research, parseLearn(defaults.research, true)))
   const specify = parseLearn(config.specify, parseLearn(source.specify, parseLearn(defaults.specify, true)))
@@ -337,6 +345,7 @@ export function mergeRouting(defaults, project = null, user = null) {
     effort: { on: effortOn, ladders, conserveCap },
     classifier,
     light,
+    hardStart,
     showCost,
     research,
     specify,
@@ -631,7 +640,7 @@ export function noteFailure(history, { tier = 'haiku', task, prompt, reason, now
 
 /**
  * Classify one task description.
- * because is one of: ceiling, orchestration, trivial, default, opus-phrase, history, risky, complex, budget.
+ * because is one of: ceiling, orchestration, trivial, default, opus-phrase, history, risky, hard, complex, budget.
  * effort is the level the first attempt runs at, or null when the ladder is off.
  */
 export function decideTier(text, routing, { history = null, conserve = false, ceiling = false, projectDir = '' } = {}) {
@@ -668,6 +677,10 @@ function classify(text, routing, { history, conserve, ceiling, projectDir }) {
   if (tier === 'haiku' && assessComplexity(text, routing, { projectDir }).complex) {
     tier = 'sonnet'
     because = 'complex'
+  }
+  if (routing.hardStart === 'opus' && tier === 'sonnet' && isRisky(text, routing)) {
+    tier = 'opus'
+    because = 'hard'
   }
   if (conserve && tier === 'opus' && because !== 'orchestration') {
     tier = 'sonnet'
@@ -749,6 +762,18 @@ export function effortLine(routing, conserve = false) {
   )
 }
 
+export function hardStartLine(routing) {
+  if (routing.hardStart === 'sonnet') {
+    return 'Hard start: sonnet. A task that matches an Opus review keyword starts on Sonnet one effort level up; Opus implements only after Sonnet uses its attempts.'
+  }
+  return (
+    'Hard start: opus. A task that matches an Opus review keyword (auth, payments, migrations, schema, security, concurrency), ' +
+    'or needs an architecture decision with trade-offs, a bug fix with no clear reproduction or across modules, or an investigation with competing hypotheses, ' +
+    'starts on Opus: the orchestrator implements it with the Opus attempt trailer (in light mode, cc-tiers:architect), after research and the spec, and it is reviewed as usual. ' +
+    'While budget routing conserves, it starts on Sonnet one effort level up.'
+  )
+}
+
 export function classifierLine(routing) {
   if (routing.classifier === 'local') {
     return 'Classifier: local. Only the keyword lists and the complexity score route Haiku work. Add CC_TIERS_CLASSIFY: skip to every cc-tiers:worker prompt so the Haiku classifier hook stands down.'
@@ -796,6 +821,7 @@ export function formatSessionContext(routing, projectNote, snapshot = {}) {
     'Delegated agents select haiku, sonnet, or opus from their own definitions. cc-tiers blocks a per-invocation model override, because it would replace that choice.',
     effortLine(routing, snapshot.budget?.conserve === true),
     classifierLine(routing),
+    hardStartLine(routing),
     researchLine(routing),
     specifyLine(routing),
     verifyLine(routing),
@@ -1502,6 +1528,12 @@ export function checkDelegation(state, toolInput, routing, { history = null, pro
       }[decision.because]
       notes.push(`cc-tiers routing hint: ${task} looks like Sonnet work because ${why}. Prefer cc-tiers:implementer next time.`)
     }
+    if ((role === 'worker' || role === 'implementer') && decision.because === 'hard') {
+      notes.push(
+        `cc-tiers routing hint: ${task} looks like Opus work because it matches an Opus review keyword and hard start is opus. ` +
+          `Next time start it on Opus: ${OPUS_CEILING}.`,
+      )
+    }
   }
 
   const effort = attemptEffort(routing, role, tier, current, routed, history, input.effort)
@@ -2149,6 +2181,7 @@ export function userFromEnv(env = process.env) {
     effort_ladder: env.CLAUDE_PLUGIN_OPTION_EFFORT_LADDER || null,
     classifier: env.CLAUDE_PLUGIN_OPTION_CLASSIFIER || null,
     light_path: env.CLAUDE_PLUGIN_OPTION_LIGHT_PATH || null,
+    hard_start: env.CLAUDE_PLUGIN_OPTION_HARD_START || null,
     show_cost: env.CLAUDE_PLUGIN_OPTION_SHOW_COST || null,
     research: env.CLAUDE_PLUGIN_OPTION_RESEARCH || null,
     specify: env.CLAUDE_PLUGIN_OPTION_SPECIFY || null,
