@@ -14,6 +14,8 @@ Follow the prompt, including the failure notes from earlier attempts. Fix the ca
 
 The prompt may carry a research brief. Treat it as fact. For an API fact it lacks, check the lock and the docs of that version before you use it. Never assume a signature.
 
+The prompt may carry a spec block between `CC_TIERS_SPEC_BEGIN` and `CC_TIERS_SPEC_END`. Implement and test every criterion and edge case in it. A criterion that is impossible or contradicts another is a failure, with that reason on the reason line: never reinterpret it silently.
+
 Stay inside the subsystem the task names. If the task needs an architectural decision the prompt does not settle, stop and report failure with that reason. Do not invent the design, and do not spawn agents.
 
 Write the code and the tests the change needs. Run the focused tests. A failing test is a failed task: do not report pass with a follow-up excuse.

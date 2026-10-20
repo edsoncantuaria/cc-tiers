@@ -14,6 +14,8 @@ The prompt carries the failure notes from every earlier attempt. Read them first
 
 The prompt may carry a research brief. Treat it as fact. For an API fact it lacks, check the lock and the docs of that version before you use it. Never assume a signature.
 
+The prompt may carry a spec block between `CC_TIERS_SPEC_BEGIN` and `CC_TIERS_SPEC_END`. Implement and test every criterion and edge case in it. A criterion that is impossible or contradicts another is a failure, with that reason on the reason line: never reinterpret it silently.
+
 Stay inside the task. Write the code and the tests the change needs, and run the focused tests. A failing test is a failed task. You do not spawn agents.
 
 End every report with this trailer, last lines, one field per line:

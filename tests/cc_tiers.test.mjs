@@ -218,6 +218,22 @@ test('agents pin family aliases, including the Sonnet checker', () => {
   for (const tier of tiers.TIERS) assert.equal(defaults.effort[tier][0], efforts[tiers.IMPLEMENTERS[tier]] || 'high')
 })
 
+test('prompts specify, ask, and hand the criteria to writers and reviewers', () => {
+  for (const file of ['agents/orchestrator.md', 'agents/dispatcher.md', 'skills/tiers/SKILL.md']) {
+    const text = readFileSync(path.join(ROOT, file), 'utf8')
+    for (const needle of ['CC_TIERS_SPEC_BEGIN', 'CC_TIERS_SPEC: none - ', 'AskUserQuestion', 'Assumed:', 'at most 3', '${user_config.specify}']) {
+      assert.ok(text.includes(needle), `${file} mentions ${needle}`)
+    }
+    assert.ok(text.indexOf('Specify\n') > text.indexOf('Research\n'), `${file} specifies after research`)
+  }
+  for (const file of ['agents/implementer.md', 'agents/architect.md']) {
+    assert.ok(readFileSync(path.join(ROOT, file), 'utf8').includes('CC_TIERS_SPEC_BEGIN'), `${file} reads the spec block`)
+  }
+  for (const file of ['agents/reviewer.md', 'agents/checker.md']) {
+    assert.ok(readFileSync(path.join(ROOT, file), 'utf8').includes('acceptance criteria'), `${file} judges the criteria`)
+  }
+})
+
 test('skill and commands keep their frontmatter', () => {
   const skill = frontmatter(path.join(ROOT, 'skills/tiers/SKILL.md'))
   assert.equal(skill.name, 'tiers')
