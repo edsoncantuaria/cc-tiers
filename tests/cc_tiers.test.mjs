@@ -2461,7 +2461,7 @@ test('the reference login passes the check and every fixture test', async () => 
   }
 })
 
-test('the login check catches a recreated signer or an added JWT library, not a comment', async () => {
+test('the login check catches a recreated signer or an added JWT library, not a comment or a key check', async () => {
   const { dir, run, solve } = await loginWorkspace()
   const reuse = ['--test-name-pattern=existing helper', '.bench-check/login.test.mjs']
   try {
@@ -2469,12 +2469,14 @@ test('the login check catches a recreated signer or an added JWT library, not a 
     solve('src/server.js')
     writeFileSync(path.join(dir, 'src', 'notes.js'), "// crypto.sign( and createPrivateKey( live in src/crypto/sign.js\nexport const signer = 'createSign('\n")
     assert.equal(run(...reuse).status, 0, 'a comment or a string counts as recreating the signer')
+    const config = readFileSync(path.join(dir, 'src', 'config.js'), 'utf8')
+    writeFileSync(path.join(dir, 'src', 'config.js'), `import { createPrivateKey } from 'node:crypto'\n${config}createPrivateKey(config.privateKey)\n`)
+    assert.equal(run(...reuse).status, 0, 'checking the key with createPrivateKey in config.js counts as recreating the signer')
     for (const source of [
       "import { sign } from 'node:crypto'\nexport const jws = (data, key) => sign(null, data, key)\n",
       "import crypto from 'crypto'\nexport const jws = (data, key) => crypto.sign(null, data, key)\n",
       "import * as nodeCrypto from 'node:crypto'\nexport const jws = (data, key) => nodeCrypto.sign(null, data, key)\n",
       "const { sign: jws } = require('crypto')\nmodule.exports = jws\n",
-      "import { createPrivateKey as load } from 'node:crypto'\nexport const key = (pem) => load(pem)\n",
       "import { createSign } from 'node:crypto'\nexport const jws = () => createSign('RSA-SHA256')\n",
     ]) {
       writeFileSync(path.join(dir, 'src', 'jwt.js'), source)
@@ -2484,6 +2486,22 @@ test('the login check catches a recreated signer or an added JWT library, not a 
     const pkg = JSON.parse(readFileSync(path.join(dir, 'package.json'), 'utf8'))
     writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ ...pkg, dependencies: { ...pkg.dependencies, jose: '^5.0.0' } }))
     assert.notEqual(run(...reuse).status, 0, 'an added jose passes')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the login check accepts a token that identifies the user by email only', async () => {
+  const { dir, run, solve } = await loginWorkspace()
+  try {
+    solve('src/config.js')
+    solve('src/server.js')
+    const server = readFileSync(path.join(dir, 'src', 'server.js'), 'utf8')
+    const byEmail = server.replace('{ sub: user.id, iss: config.issuer }', '{ email: user.email }')
+    assert.notEqual(byEmail, server)
+    writeFileSync(path.join(dir, 'src', 'server.js'), byEmail)
+    const proc = run('.bench-check/login.test.mjs')
+    assert.equal(proc.status, 0, `an email-only token fails:\n${proc.stdout.slice(-1500)}`)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

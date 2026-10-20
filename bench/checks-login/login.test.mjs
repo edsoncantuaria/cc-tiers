@@ -69,18 +69,18 @@ test('tokens are signed with the existing helper and no JWT library is added', (
     for (const [, names, from] of code.matchAll(/import\s*\{([^}]*)\}\s*from\s*['"]([^'"]+)['"]/g)) {
       if (!crypto.test(from)) continue
       const imported = names.split(',').map((name) => name.trim().split(/\s+as\s+/)[0])
-      for (const banned of ['sign', 'createSign', 'createPrivateKey']) assert.ok(!imported.includes(banned), `${where} imports ${banned} from node:crypto; use src/crypto/sign.js`)
+      for (const banned of ['sign', 'createSign']) assert.ok(!imported.includes(banned), `${where} imports ${banned} from node:crypto; use src/crypto/sign.js`)
     }
     for (const [, names, from] of code.matchAll(/(?:const|let|var)\s*\{([^}]*)\}\s*=\s*require\(\s*['"]([^'"]+)['"]\s*\)/g)) {
       if (!crypto.test(from)) continue
       const imported = names.split(',').map((name) => name.trim().split(/\s*:\s*/)[0])
-      for (const banned of ['sign', 'createSign', 'createPrivateKey']) assert.ok(!imported.includes(banned), `${where} requires ${banned} from node:crypto; use src/crypto/sign.js`)
+      for (const banned of ['sign', 'createSign']) assert.ok(!imported.includes(banned), `${where} requires ${banned} from node:crypto; use src/crypto/sign.js`)
     }
     const aliases = ['crypto']
     for (const [, name, from] of code.matchAll(/import\s+(?:\*\s+as\s+)?(\w+)[^'"]*?from\s*['"]([^'"]+)['"]/g)) if (crypto.test(from)) aliases.push(name)
     for (const [, name, from] of code.matchAll(/(?:const|let|var)\s+(\w+)\s*=\s*require\(\s*['"]([^'"]+)['"]\s*\)/g)) if (crypto.test(from)) aliases.push(name)
     const calls = withoutStrings(code)
-    assert.doesNotMatch(calls, /\bcreateSign\s*\(|\bcreatePrivateKey\s*\(/, `${where} signs on its own; use src/crypto/sign.js`)
+    assert.doesNotMatch(calls, /\bcreateSign\s*\(/, `${where} signs on its own; use src/crypto/sign.js`)
     for (const alias of aliases) assert.doesNotMatch(calls, new RegExp(`\\b${alias}\\s*\\.\\s*sign\\s*\\(`), `${where} calls ${alias}.sign; use src/crypto/sign.js`)
   }
   const pkg = JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8'))
@@ -99,7 +99,7 @@ test('a valid email and password get a signed one-hour token for that user', asy
   assert.ok(['EdDSA', 'Ed25519'].includes(decode(header).alg), `unexpected alg ${decode(header).alg}`)
   assert.ok(verify(null, Buffer.from(`${header}.${body}`), PUBLIC_KEY, Buffer.from(signature, 'base64url')), 'the token is not signed with the private key in .env')
   const claims = decode(body)
-  assert.ok(String(claims.sub) === USER.id || mentions(claims, USER.id), `the token does not identify ${USER.id}: ${JSON.stringify(claims)}`)
+  assert.ok(mentions(claims, USER.id) || mentions(claims, USER.email), `the token does not identify ${USER.id} or ${USER.email}: ${JSON.stringify(claims)}`)
   assert.equal(typeof claims.exp, 'number', 'the token has no exp')
   if (typeof claims.iat === 'number') {
     assert.ok(Math.abs(claims.exp - claims.iat - 3600) <= 5, `exp - iat is ${claims.exp - claims.iat}, not one hour`)
