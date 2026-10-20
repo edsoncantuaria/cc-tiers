@@ -827,9 +827,9 @@ export function formatSessionContext(routing, projectNote, snapshot = {}) {
     verifyLine(routing),
     `A Haiku-looking task with a complexity score of ${COMPLEX_THRESHOLD} or more (several steps, many files, design or investigation wording, a long brief) starts on Sonnet.`,
     routing.light === 'inline'
-      ? 'Light path: inline. When a request is one trivial task, cc-tiers says so as it arrives: do it yourself in this session, with no delegation and no checker.'
+      ? 'Light path: inline. When a request is one trivial task, cc-tiers says so as it arrives: do it yourself in this session, with no delegation and no checker. When a request is one small change, cc-tiers says so too: if it fits in about 20 lines of one file, do it yourself with your attempt trailer and CC_TIERS_REVIEW: skip, so the verify gate checks it.'
       : routing.light === 'delegate'
-        ? 'Light path: delegate. When a request is one trivial task, cc-tiers says so as it arrives: skip the written plan and delegate it in one call.'
+        ? 'Light path: delegate. When a request is one trivial task, cc-tiers says so as it arrives: skip the written plan and delegate it in one call. When a request is one small change: one cc-tiers:implementer call with research none, a short CC_TIERS_SPEC block, and CC_TIERS_REVIEW: skip.'
         : 'Light path: off.',
     `Haiku when: ${tiers.haiku.when.join('; ')}.`,
   ]
@@ -2194,8 +2194,7 @@ export function userFromEnv(env = process.env) {
 }
 
 /**
- * The note UserPromptSubmit adds when a request is one trivial task: no written
- * plan, one delegation, and no checker pass for a lookup. Empty otherwise.
+ * The note UserPromptSubmit adds for a one-task request: trivial (no plan, no checker) or small (no plan, no research, verify gate only). Empty otherwise.
  */
 export function lightHint(prompt, routing, { history = null, conserve = false, projectDir = '' } = {}) {
   if (!routing.light || routing.light === 'off') return ''
@@ -2203,7 +2202,24 @@ export function lightHint(prompt, routing, { history = null, conserve = false, p
   if (!text || text.startsWith('/') || /^CC_TIERS_[A-Z]+:/m.test(text)) return ''
   if (text.split(/\s+/).length > 40) return ''
   const decision = decideTier(text, routing, { history, conserve, projectDir })
-  if (decision.tier !== 'haiku' || assessComplexity(text, routing, { projectDir }).score > 0) return ''
+  if (assessComplexity(text, routing, { projectDir }).score > 0) return ''
+  if (decision.tier === 'sonnet' && ['default', 'history'].includes(decision.because) && !isRisky(text, routing)) {
+    const small = 'cc-tiers small path: this request looks like one small change. Read the target first. If the change fits in about 20 lines of one file (its test file aside), has a clear expected result, and uses no library API you have not seen in the repo, '
+    const risk = 'If it is bigger, touches risky code, or you are unsure, route it as usual.'
+    if (routing.light === 'inline' && !conserve) {
+      return (
+        `${small}do it yourself in this session: no plan, no research, no subagent, and the spec is one to three criteria in a line of your message. ` +
+        'A bug fix adds or extends the test that reproduces it when the file has tests. ' +
+        'Open and close it with your attempt trailer (CC_TIERS_ROLE: orchestrator, or dispatcher in light mode) with CC_TIERS_REVIEW: skip and your CC_TIERS_VERIFY lines, so the verify gate checks it without a review pass. ' +
+        risk
+      )
+    }
+    return (
+      `${small}skip the written plan and send it to cc-tiers:implementer in one call, with a CC_TIERS_SPEC_BEGIN/CC_TIERS_SPEC_END block of one to three criteria, ` +
+      `CC_TIERS_RESEARCH: none - small local change, and CC_TIERS_REVIEW: skip, so the verify gate is the check. ${risk}`
+    )
+  }
+  if (decision.tier !== 'haiku') return ''
   if (routing.light === 'inline') {
     return (
       'cc-tiers light path: this request looks like one trivial task. Do it yourself in this session: a fresh worker context plus a checker pass ' +
