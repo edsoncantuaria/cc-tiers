@@ -78,6 +78,10 @@ const HEADER_RE = /^CC_TIERS_([A-Z]+):\s*(.*?)\s*$/
 const RESEARCH_BEGIN = 'CC_TIERS_RESEARCH_BEGIN'
 const RESEARCH_END = 'CC_TIERS_RESEARCH_END'
 const RESEARCH_NONE_RE = /^none\s*-\s*\S/
+const SPEC_BEGIN = 'CC_TIERS_SPEC_BEGIN'
+const SPEC_END = 'CC_TIERS_SPEC_END'
+const SPEC_NONE_RE = /^none\s*-\s*\S/i
+const SPEC_HEADING_RE = /^(criteria|edge cases|assumed):$/i
 const ORCHESTRATION_PHRASE = 'planning and splitting work into tasks'
 const STOP = new Set(
   `a an the to of and or for in on with from by at as is are was were be this that it its into over under out up down do does
@@ -278,6 +282,7 @@ export function mergeRouting(defaults, project = null, user = null) {
   const light = parseLightPath(config.light_path, parseLightPath(defaults.lightPath, 'inline'))
   const showCost = parseLearn(config.show_cost, parseLearn(defaults.showCost, true))
   const research = parseLearn(config.research, parseLearn(source.research, parseLearn(defaults.research, true)))
+  const specify = parseLearn(config.specify, parseLearn(source.specify, parseLearn(defaults.specify, true)))
   const prices = defaults.prices && typeof defaults.prices === 'object' ? defaults.prices : { families: {}, models: {} }
   const largeFileBytes = Number(source.largeFileBytes) > 0 ? Number(source.largeFileBytes) : Number(defaults.largeFileBytes) || 400000
 
@@ -305,6 +310,7 @@ export function mergeRouting(defaults, project = null, user = null) {
     light,
     showCost,
     research,
+    specify,
     prices,
     largeFileBytes,
     notes,
@@ -482,21 +488,49 @@ export function tokenize(text) {
   return tokens
 }
 
-/** The research brief rides in the prompt for the implementer; routing and headers ignore it. */
-export function stripResearch(text) {
+/** Drops the lines between each begin marker and its end; an unclosed block runs to the end. */
+function stripBlocks(text, blocks) {
   const kept = []
-  let inside = false
+  let end = null
   for (const line of String(text || '').split(/\n/)) {
     const marker = line.trim()
-    if (!inside && marker === RESEARCH_BEGIN) inside = true
-    else if (inside && marker === RESEARCH_END) inside = false
-    else if (!inside) kept.push(line)
+    if (end === null && Object.hasOwn(blocks, marker)) end = blocks[marker]
+    else if (end !== null && marker === end) end = null
+    else if (end === null) kept.push(line)
   }
   return kept.join('\n')
 }
 
+/** The research brief rides in the prompt for the implementer; routing and headers ignore it. */
+export function stripResearch(text) {
+  return stripBlocks(text, { [RESEARCH_BEGIN]: RESEARCH_END })
+}
+
+/** The acceptance criteria ride in the prompt too; routing and headers ignore them. */
+export function stripSpec(text) {
+  return stripBlocks(text, { [SPEC_BEGIN]: SPEC_END })
+}
+
+function stripBriefs(text) {
+  return stripBlocks(text, { [RESEARCH_BEGIN]: RESEARCH_END, [SPEC_BEGIN]: SPEC_END })
+}
+
+/** Criterion lines of the first spec block: not blank, not a heading. */
+export function specCriteria(text) {
+  const lines = String(text || '').split(/\n/)
+  const start = lines.findIndex((line) => line.trim() === SPEC_BEGIN)
+  if (start < 0) return []
+  const found = []
+  for (const line of lines.slice(start + 1)) {
+    const item = line.trim()
+    if (item === SPEC_END) break
+    if (item && !SPEC_HEADING_RE.test(item)) found.push(item)
+  }
+  return found
+}
+
 export function stripHeaders(text) {
-  return stripResearch(text)
+  return stripBriefs(text)
     .split(/\n/)
     .filter((line) => !/^CC_TIERS_[A-Z]+:/.test(line.trim()))
     .join('\n')
@@ -698,6 +732,15 @@ export function researchLine(routing) {
   )
 }
 
+export function specifyLine(routing) {
+  if (!routing.specify) return 'Specify: off. Code goes to cc-tiers:implementer or cc-tiers:architect without written acceptance criteria.'
+  return (
+    'Specify: on. Before code goes to cc-tiers:implementer or cc-tiers:architect, write its acceptance criteria between ' +
+    'CC_TIERS_SPEC_BEGIN and CC_TIERS_SPEC_END lines, under Criteria:, Edge cases:, and Assumed: when needed; cc-tiers ignores the block for routing. ' +
+    'When a task needs no criteria, add CC_TIERS_SPEC: none - <reason> instead.'
+  )
+}
+
 export function formatSessionContext(routing, projectNote, snapshot = {}) {
   const tiers = routing.tiers
   const lines = [
@@ -711,6 +754,7 @@ export function formatSessionContext(routing, projectNote, snapshot = {}) {
     effortLine(routing, snapshot.budget?.conserve === true),
     classifierLine(routing),
     researchLine(routing),
+    specifyLine(routing),
     `A Haiku-looking task with a complexity score of ${COMPLEX_THRESHOLD} or more (several steps, many files, design or investigation wording, a long brief) starts on Sonnet.`,
     routing.light === 'inline'
       ? 'Light path: inline. When a request is one trivial task, cc-tiers says so as it arrives: do it yourself in this session, with no delegation and no checker.'
@@ -924,7 +968,7 @@ export function withLock(file, fn) {
 
 export function parseHeaders(text) {
   const found = {}
-  for (const line of stripResearch(text).split(/\n/)) {
+  for (const line of stripBriefs(text).split(/\n/)) {
     const match = HEADER_RE.exec(line.trim())
     if (match) found[match[1]] = match[2].trim()
   }
@@ -1322,6 +1366,13 @@ export function checkDelegation(state, toolInput, routing, { history = null, pro
       return refuse(`cc-tiers: run cc-tiers:researcher for ${task} before delegating it, or add CC_TIERS_RESEARCH: none - <reason>.`)
     }
   }
+  if (routing.specify && (role === 'implementer' || role === 'architect')) {
+    if (!specCriteria(prompt).length && !SPEC_NONE_RE.test(headers.SPEC || '')) {
+      return refuse(
+        `cc-tiers: write the acceptance criteria for ${task} between CC_TIERS_SPEC_BEGIN and CC_TIERS_SPEC_END before delegating it, or add CC_TIERS_SPEC: none - <reason>.`,
+      )
+    }
+  }
   if (role === 'worker' && routing.classifier === 'haiku' && (headers.CLASSIFY || '').toLowerCase() === 'skip') {
     return refuse(
       'cc-tiers: the classifier is haiku, so a cc-tiers:worker prompt may not carry CC_TIERS_CLASSIFY: skip. Remove that line and call it again.',
@@ -1332,7 +1383,7 @@ export function checkDelegation(state, toolInput, routing, { history = null, pro
   const tasks = state.tasks || (state.tasks = {})
   let current = own(tasks, task)
   const notes = []
-  const routed = stripResearch(prompt)
+  const routed = stripBriefs(prompt)
   if (current && typeof current === 'object' && TIERS.includes(current.tier)) {
     if (TIER_RANK[tier] < TIER_RANK[current.tier]) {
       return refuse(
@@ -2009,6 +2060,7 @@ export function userFromEnv(env = process.env) {
     light_path: env.CLAUDE_PLUGIN_OPTION_LIGHT_PATH || null,
     show_cost: env.CLAUDE_PLUGIN_OPTION_SHOW_COST || null,
     research: env.CLAUDE_PLUGIN_OPTION_RESEARCH || null,
+    specify: env.CLAUDE_PLUGIN_OPTION_SPECIFY || null,
   }
 }
 

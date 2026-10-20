@@ -95,6 +95,13 @@
       "description": "on (default): before code goes to cc-tiers:implementer or cc-tiers:architect, cc-tiers:researcher must report pass for that task and the prompt must say CC_TIERS_RESEARCH: done, or the prompt must say CC_TIERS_RESEARCH: none - <reason>. Otherwise cc-tiers refuses the call. off: no research step is required.",
       "default": "on",
       "options": ["on", "off"]
+    },
+    "specify": {
+      "type": "string",
+      "title": "Spec gate",
+      "description": "on (default): before code goes to cc-tiers:implementer or cc-tiers:architect, the prompt must carry acceptance criteria between CC_TIERS_SPEC_BEGIN and CC_TIERS_SPEC_END lines, or say CC_TIERS_SPEC: none - <reason>. Otherwise cc-tiers refuses the call. off: no written criteria are required.",
+      "default": "on",
+      "options": ["on", "off"]
     }
   }
 }

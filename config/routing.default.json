@@ -8,6 +8,7 @@
   "lightPath": true,
   "showCost": false,
   "research": true,
+  "specify": true,
   "effort": {
     "on": true,
     "haiku": [
