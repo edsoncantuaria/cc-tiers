@@ -44,3 +44,16 @@ test('report shows the verify column', async () => {
   assert.equal(cells('c')[7], 'not validated')
   assert.equal(cells('d')[7], '—')
 })
+
+test('prompts ask for reuse, scope and conventions', () => {
+  const researcher = read('agents/researcher.md')
+  for (const needle of ['Reuse', 'Conventions']) assert.ok(researcher.includes(needle), `researcher mentions ${needle}`)
+  for (const file of ['agents/implementer.md', 'agents/architect.md']) {
+    const text = read(file)
+    for (const needle of ['never fork', 'hypothetical']) assert.ok(text.includes(needle), `${file} mentions ${needle}`)
+  }
+  for (const file of ['agents/reviewer.md', 'agents/checker.md']) {
+    const text = read(file)
+    for (const needle of ['recreates code', 'outside the task']) assert.ok(text.includes(needle), `${file} mentions ${needle}`)
+  }
+})

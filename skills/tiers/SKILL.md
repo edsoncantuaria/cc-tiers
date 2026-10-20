@@ -43,6 +43,8 @@ The session-start note is the effective phrase list, the budget line, and the Ha
 | Review of Haiku output under `cheap` or `always` | `cc-tiers:checker` (Sonnet) |
 | Review of risky, non-trivial, or ceiling work | `cc-tiers:reviewer` (Opus) |
 
+Writers reuse what exists, touch only what the task needs, and follow the conventions of the code they edit; the reviewer blocks recreated code and changes outside the task.
+
 Default to Sonnet when a task is not clearly trivial, and when a trivial-looking task has several steps, many files, or design wording. With the classifier `haiku`, a Haiku pass may refuse a worker call: send the slug to `cc-tiers:implementer`, which is not a failure. With the classifier `local`, add `CC_TIERS_CLASSIFY: skip` to every worker prompt. When the session says `Budget routing: conserve`, do not start a task on Opus. Opus remains the ceiling after Sonnet uses its attempts, and the reviewer for critical work. Split a mixed request into one slug per task (`users-pagination`).
 
 ## Attempt rule

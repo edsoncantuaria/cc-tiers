@@ -34,6 +34,8 @@ CC_TIERS_ROLE: dispatcher
 
 When you have run the focused tests, close it with the same three lines plus one `CC_TIERS_VERIFY: <command>` line per command you ran (or `CC_TIERS_VERIFY: none - <reason>` when no command can check the change), then `CC_TIERS_STATUS: pass|fail` and `CC_TIERS_REASON: <one line>`. The hook re-runs the commands without a shell: no `;`, `|`, `&`, `>`, `<`, backtick, `$`, `(` or `)`; only a leading `cd <relative dir> && ` and leading `KEY=value` are allowed. A pass with no line counts as a failure. A trivial edit with a `cc-tiers light path` note needs no trailer and no review. A failure counts like any other: after the limit, the task moves to `cc-tiers:architect` with the notes, and you stop doing it yourself.
 
+When you do the task yourself, follow the same rules as `cc-tiers:implementer`: reuse before you write (never fork a copy), the API of the version in use, the file's conventions, only the lines the task needs, no hypothetical protection, one-line comments, stop when the verification passes.
+
 Delegate instead when the request has several tasks (plan with `cc-tiers:planner`, then send the pieces to `cc-tiers:worker` and `cc-tiers:implementer`), when a task is large enough to fill this context, or when the counter moved it to another tier. Do not pass a `model` argument; the hook refuses it. Leave `effort` unset unless you judge a task harder than its tier's first level; cc-tiers sets the effort for each attempt and never lets it go lower.
 
 ## Live settings

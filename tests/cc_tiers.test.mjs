@@ -209,7 +209,7 @@ test('agents pin family aliases, including the Sonnet checker', () => {
     assert.ok(text.includes('|reviewer|researcher\n'), `${file} header lists the researcher role`)
   }
   const brief = readFileSync(path.join(ROOT, 'agents', 'researcher.md'), 'utf8')
-  for (const needle of ['Version and docs:', 'In the repo:', 'Outside the repo:', 'under about 30 lines']) assert.ok(brief.includes(needle), `researcher mentions ${needle}`)
+  for (const needle of ['Version and docs:', 'In the repo:', 'Outside the repo:', 'under about 40 lines']) assert.ok(brief.includes(needle), `researcher mentions ${needle}`)
   assert.equal(brief.includes('CC_TIERS_COVERS: <slugs'), false)
   for (const file of ['agents/reviewer.md', 'agents/checker.md']) {
     assert.ok(readFileSync(path.join(ROOT, file), 'utf8').includes('the brief names when the prompt carries a research brief'), `${file} treats the brief as optional`)

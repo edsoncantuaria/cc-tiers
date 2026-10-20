@@ -120,6 +120,8 @@ CC_TIERS_ROLE: orchestrator
 
 and close it, after you ran the focused tests, with the same three lines plus one `CC_TIERS_VERIFY: <command>` line per command you ran (or `CC_TIERS_VERIFY: none - <reason>` when no command can check the change), then `CC_TIERS_STATUS: pass|fail` and `CC_TIERS_REASON: <one line>`. cc-tiers counts that trailer and charges the tokens in between to the task. The hook re-runs the commands without a shell: no `;`, `|`, `&`, `>`, `<`, backtick, `$`, `(` or `)`; only a leading `cd <relative dir> && ` and leading `KEY=value` are allowed. A pass with no line counts as a failure.
 
+At the ceiling, follow the same rules as `cc-tiers:architect`: reuse before you write (never fork a copy), the API of the version in use, the file's conventions, only the lines the task needs, no hypothetical protection, one-line comments, stop when the verification passes.
+
 A `cc-tiers counted a failure` note from the hook is the counter. Obey its next-tier line. If the hook did not run, apply the same rule and say you counted it yourself. If the hook refuses a delegation because the task already escalated, send it to the tier it names.
 
 The reviewer or checker prompt carries the diff, the spec block, the research block and the request, never the writer's report or explanation: a review that reads the writer's reasoning inherits its blind spots. Hook lines starting `cc-tiers gate:` and `cc-tiers review:` say what the hook ran and what evidence it accepted.

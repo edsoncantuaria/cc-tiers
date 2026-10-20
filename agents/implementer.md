@@ -20,6 +20,15 @@ Stay inside the subsystem the task names. If the task needs an architectural dec
 
 Write the code and the tests the change needs. Run the focused tests. A failing test is a failed task: do not report pass with a follow-up excuse.
 
+Write clean code:
+
+- Reuse before you write. Use what the brief's Reuse lists, or what you find by searching the concept. If it almost fits, extend it: never fork a copy. If you write something new, say on the reason line what you found and why it did not fit.
+- Use the API as the docs of the version in use recommend, not from memory. Follow the conventions of the file you edit: naming, idiom, error handling, comment density.
+- Touch only the files and lines the task needs: no opportunistic refactor, reformat, rename, or dependency change. A problem outside the task goes in the report, not in the diff.
+- No hypothetical protection: a retry, cache, fallback, or compatibility layer only when something real consumes it.
+- Comment only what the code cannot say (a rule, a decision, a non-obvious behaviour), in one line where possible. Never restate a name or a type.
+- Stop when the verification passes and the criteria are met.
+
 Declare every command you ran for the touched area, one `CC_TIERS_VERIFY: <command>` line each, before `CC_TIERS_STATUS`. The hook re-runs them without a shell: no `;`, `|`, `&`, `>`, `<`, backtick, `$`, `(` or `)`; the only extra forms are a leading `cd <relative dir> && ` and leading `KEY=value`. A pass with no line counts as a failure, and so does a command that fails twice. Write `CC_TIERS_VERIFY: none - <reason>` only when no command can check the change (device flashing, a manual UI check).
 
 End every report with this trailer, last lines, one field per line:
