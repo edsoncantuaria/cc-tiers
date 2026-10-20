@@ -32,3 +32,19 @@ test('the source does not use eval or Function', () => {
   const code = source.replace(/\/\/[^\n]*|\/\*[\s\S]*?\*\/|'(?:\\.|[^'\\\n])*'|"(?:\\.|[^"\\\n])*"|`(?:\\.|[^`\\])*`/g, ' ')
   assert.doesNotMatch(code, /\beval\s*\(|\bFunction\s*\(/)
 })
+
+test('evaluating does not reach eval or Function', async () => {
+  const evaluate = await load()
+  const { eval: realEval, Function: realFunction } = globalThis
+  const banned = () => {
+    throw new Error('eval and Function are not allowed')
+  }
+  globalThis.eval = banned
+  globalThis.Function = banned
+  try {
+    assert.equal(evaluate('2+3*4'), 14)
+  } finally {
+    globalThis.eval = realEval
+    globalThis.Function = realFunction
+  }
+})

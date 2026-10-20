@@ -1952,6 +1952,9 @@ test('the calculator check ignores eval in comments and strings but catches a re
     assert.equal(clean.status, 0, `comment or string tripped the check:\n${clean.stdout.slice(-1500)}`)
     writeFileSync(path.join(dir, 'src', 'calc.js'), reference + '\nexport const run = (text) => eval(text)\n')
     assert.notEqual(check().status, 0, 'a real eval call passed the check')
+    const hidden = 'const re = /`/\nexport const evaluate = (text) => eval(text)\nexport const tick = "`"\n'
+    writeFileSync(path.join(dir, 'src', 'calc.js'), hidden)
+    assert.notEqual(check().status, 0, 'eval hidden behind a regex literal passed')
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
