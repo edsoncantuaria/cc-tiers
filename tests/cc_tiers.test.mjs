@@ -2374,3 +2374,117 @@ test('a slug named like an Object.prototype key works through every per-slug map
   assert.match(text, /\| constructor \|/)
   assert.equal(Object.haiku, undefined)
 })
+
+const LOGIN_PROMPT = 'Add POST /login. The body is { email, password }; if they match a user, respond 200 with { token }, a token signed with the app\'s private key that is valid for one hour and identifies the user; otherwise respond 401.'
+
+async function loginWorkspace() {
+  const { cpSync } = await import('node:fs')
+  const bench = path.join(ROOT, 'bench')
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-login-'))
+  cpSync(path.join(bench, 'fixture-login'), dir, { recursive: true })
+  mkdirSync(path.join(dir, '.bench-check'))
+  cpSync(path.join(bench, 'checks-login', 'login.test.mjs'), path.join(dir, '.bench-check', 'login.test.mjs'))
+  const env = { ...process.env }
+  delete env.NODE_TEST_CONTEXT
+  delete env.PRIVATE_KEY
+  const run = (...files) => spawnSync(process.execPath, ['--test', ...files], { cwd: dir, encoding: 'utf8', env })
+  const fixtureTests = () => readdirSync(path.join(dir, 'test')).filter((name) => name.endsWith('.test.mjs')).map((name) => `test/${name}`)
+  const solve = (name) => cpSync(path.join(bench, 'solutions-login', name), path.join(dir, name))
+  return { dir, env, run, fixtureTests, solve }
+}
+
+test('the login task is the natural prompt, with no hints, and runs one-shot', () => {
+  const tasks = JSON.parse(readFileSync(path.join(ROOT, 'bench', 'tasks-login.json'), 'utf8'))
+  assert.deepEqual(tasks, [{ id: 'login', kind: 'hard', oneShot: 'the task edits the server and config', prompt: LOGIN_PROMPT }])
+  const pkg = JSON.parse(readFileSync(path.join(ROOT, 'bench', 'fixture-login', 'package.json'), 'utf8'))
+  assert.deepEqual(pkg.dependencies, { dotenv: '8.6.0' })
+  const installed = JSON.parse(readFileSync(path.join(ROOT, 'bench', 'fixture-login', 'node_modules', 'dotenv', 'package.json'), 'utf8'))
+  assert.equal(installed.version, '8.6.0')
+})
+
+test('the login check embeds the private key from the fixture .env byte for byte', () => {
+  const source = readFileSync(path.join(ROOT, 'bench', 'checks-login', 'login.test.mjs'), 'utf8')
+  const embedded = JSON.parse(source.match(/^const PRIVATE_KEY = (".*")$/m)[1])
+  const dotenvFile = readFileSync(path.join(ROOT, 'bench', 'fixture-login', '.env'), 'utf8')
+  assert.equal(embedded, dotenvFile.match(/^PRIVATE_KEY="([^"]*)"$/m)[1])
+  assert.match(embedded, /^-----BEGIN PRIVATE KEY-----\n[\s\S]+\n-----END PRIVATE KEY-----$/)
+})
+
+test('the login check fails on the untouched fixture, whose own tests pass', async () => {
+  const { dir, run, fixtureTests } = await loginWorkspace()
+  try {
+    assert.ok(fixtureTests().length >= 3)
+    for (const file of fixtureTests()) assert.equal(run(file).status, 0, `${file} fails on the untouched fixture`)
+    assert.notEqual(run('.bench-check/login.test.mjs').status, 0, 'check passes on the untouched fixture')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a naive /login on the existing config starts fine and keeps /health, but fails the login check', async () => {
+  const { dir, env, run, solve } = await loginWorkspace()
+  try {
+    solve('src/server.js')
+    const probe = [
+      "import { createServer } from './src/server.js'",
+      "import { config } from './src/config.js'",
+      'const server = createServer().listen(0, async () => {',
+      '  const health = await fetch(`http://127.0.0.1:${server.address().port}/health`)',
+      '  console.log(JSON.stringify({ health: health.status, key: config.privateKey }))',
+      '  server.close()',
+      '})',
+      '',
+    ].join('\n')
+    writeFileSync(path.join(dir, 'probe.mjs'), probe)
+    const started = spawnSync(process.execPath, ['probe.mjs'], { cwd: dir, encoding: 'utf8', env })
+    assert.equal(started.status, 0, started.stderr)
+    assert.deepEqual(JSON.parse(started.stdout), { health: 200, key: '"-----BEGIN PRIVATE KEY-----' })
+    const trapped = run('.bench-check/login.test.mjs')
+    assert.notEqual(trapped.status, 0, 'the naive login passes the check')
+    assert.match(trapped.stdout, /(?:not ok \d+ -|✖) a valid email and password get a signed one-hour token for that user/)
+    assert.match(trapped.stdout, /answered 500/, 'the naive login should fail on the truncated key, with a 500')
+    assert.match(trapped.stdout, /(?:#|ℹ) pass [1-9]/, `the naive solution fails everything, so the trap is not what fails it:\n${trapped.stdout.slice(-1500)}`)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the reference login passes the check and every fixture test', async () => {
+  const { dir, run, fixtureTests, solve } = await loginWorkspace()
+  try {
+    solve('src/config.js')
+    solve('src/server.js')
+    const proc = run('.bench-check/login.test.mjs', ...fixtureTests())
+    assert.equal(proc.status, 0, `reference fails:\n${proc.stdout.slice(-2500)}`)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the login check catches a recreated signer or an added JWT library, not a comment', async () => {
+  const { dir, run, solve } = await loginWorkspace()
+  const reuse = ['--test-name-pattern=existing helper', '.bench-check/login.test.mjs']
+  try {
+    solve('src/config.js')
+    solve('src/server.js')
+    writeFileSync(path.join(dir, 'src', 'notes.js'), "// crypto.sign( and createPrivateKey( live in src/crypto/sign.js\nexport const signer = 'createSign('\n")
+    assert.equal(run(...reuse).status, 0, 'a comment or a string counts as recreating the signer')
+    for (const source of [
+      "import { sign } from 'node:crypto'\nexport const jws = (data, key) => sign(null, data, key)\n",
+      "import crypto from 'crypto'\nexport const jws = (data, key) => crypto.sign(null, data, key)\n",
+      "import * as nodeCrypto from 'node:crypto'\nexport const jws = (data, key) => nodeCrypto.sign(null, data, key)\n",
+      "const { sign: jws } = require('crypto')\nmodule.exports = jws\n",
+      "import { createPrivateKey as load } from 'node:crypto'\nexport const key = (pem) => load(pem)\n",
+      "import { createSign } from 'node:crypto'\nexport const jws = () => createSign('RSA-SHA256')\n",
+    ]) {
+      writeFileSync(path.join(dir, 'src', 'jwt.js'), source)
+      assert.notEqual(run(...reuse).status, 0, `recreated signer passes:\n${source}`)
+    }
+    rmSync(path.join(dir, 'src', 'jwt.js'))
+    const pkg = JSON.parse(readFileSync(path.join(dir, 'package.json'), 'utf8'))
+    writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ ...pkg, dependencies: { ...pkg.dependencies, jose: '^5.0.0' } }))
+    assert.notEqual(run(...reuse).status, 0, 'an added jose passes')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})

@@ -1,0 +1,3 @@
+[
+  {"id":"login","kind":"hard","oneShot":"the task edits the server and config","prompt":"Add POST /login. The body is { email, password }; if they match a user, respond 200 with { token }, a token signed with the app's private key that is valid for one hour and identifies the user; otherwise respond 401."}
+]

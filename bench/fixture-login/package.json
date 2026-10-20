@@ -1,0 +1,13 @@
+{
+  "name": "shiftlite-api",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/main.js",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "dotenv": "8.6.0"
+  }
+}
