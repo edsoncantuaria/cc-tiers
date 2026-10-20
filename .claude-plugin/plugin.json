@@ -1,6 +1,6 @@
 {
   "name": "cc-tiers",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Quality-first tiers for Pro and Max: Opus plans and reviews, Sonnet researches and builds, Haiku does the small stuff, with an effort ladder, independent review, and a quality benchmark",
   "author": {
     "name": "edsoncantuaria",
@@ -92,7 +92,7 @@
     "light_path": {
       "type": "string",
       "title": "Light path",
-      "description": "inline: when a request is one trivial task, the session agent does it itself, with no subagent and no checker; that is cheaper than a fresh worker context. delegate: skip the plan and send it to the worker in one call. off: every request is planned the usual way.",
+      "description": "inline: when a request is one trivial task, or a small change (about 20 lines in one file, a clear expected result, nothing risky), the session agent does it itself, with no subagent and no review pass; that is cheaper than a fresh worker context, and a small change still goes through the verify gate. delegate: skip the plan and send a trivial task to the worker, or a small change to the implementer with a short spec and no review, in one call. off: every request is planned the usual way.",
       "default": "inline",
       "options": ["inline", "delegate", "off"]
     },

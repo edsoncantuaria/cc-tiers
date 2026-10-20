@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.9.0 - 2026-10-20
+
+### Added
+
+- Small path. On UserPromptSubmit the hook adds a `cc-tiers small path` note when a request is 40 words or fewer, matches no Opus review keyword, has complexity score 0, and would start on Sonnet (by default, or a trivial-looking task that already failed on Haiku). The session agent reads the target first. If the change fits in about 20 lines of one file (its test file aside), has a clear expected result, and uses no library API it has not seen in the repo, then with `light_path: inline` it does it itself: no plan, research, or subagent, a spec of one to three criteria, a reproducing test for a bug fix when the file has tests, and its attempt trailer with `CC_TIERS_REVIEW: skip`, so the verify gate re-runs its `CC_TIERS_VERIFY` commands with no review pass. The light-mode dispatcher does the same with its dispatcher trailer.
+- With `light_path: delegate`, or while budget routing conserves, a small change is one `cc-tiers:implementer` call with `CC_TIERS_RESEARCH: none`, a short spec, and `CC_TIERS_REVIEW: skip`. A bigger or risky change, or doubt, takes the usual route.
+- No new option: the small path follows `light_path`, and `off` turns both off.
+
+### Changed
+
+- A one-line fix such as removing a debug log or changing a config value no longer gets research, a full spec block, a Sonnet implementer, and an Opus review; it gets one to three criteria and the verify gate. The trivial light path only caught keyword tasks (typo, rename, lint, lookup).
+
 ## 0.8.0 - 2026-10-20
 
 ### Added
