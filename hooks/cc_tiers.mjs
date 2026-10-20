@@ -18,6 +18,7 @@ import {
 } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { gateMessage, parseVerify, runGate } from './verify.mjs'
 
 export const TIERS = ['haiku', 'sonnet', 'opus']
 export const NEXT_TIER = { haiku: 'sonnet', sonnet: 'opus', opus: null }
@@ -49,6 +50,8 @@ export const SESSION_ROLES = new Set(['orchestrator', 'dispatcher'])
 export const REVIEW_ROLES = new Set(['reviewer', 'checker'])
 /** Roles whose run writes the change and so counts an attempt at its tier. */
 export const WRITER_ROLES = new Set(['worker', 'implementer', 'architect', 'dispatcher'])
+/** Writers that run as an Agent call, so their gate comes from the PostToolUse or SubagentStop hook. */
+const DELEGATED_WRITERS = new Set(['worker', 'implementer', 'architect'])
 export const REVIEW_POLICIES = new Set(['cheap', 'risky', 'always', 'never'])
 export const CLASSIFIERS = new Set(['haiku', 'local'])
 export const LIGHT_MODES = new Set(['inline', 'delegate', 'off'])
@@ -1179,6 +1182,34 @@ export function applyEvent(state, event, routing) {
   }
 
   const tasks = state.tasks || (state.tasks = {})
+  // Session-role reports get their gate in the Stop hook; until then only a gate already attached applies.
+  const gated = routing.verify && status === 'pass' && !REVIEW_ROLES.has(role) && (event.gate !== undefined || DELEGATED_WRITERS.has(role))
+  let gateNote = ''
+  let gateDetail = ''
+  let gateReason = ''
+  if (gated) {
+    const gate = event.gate || { status: 'missing', verified: [], flaky: [], unverified: [], failure: null }
+    meta.gate = gate
+    gateNote = gateMessage(task, gate)
+    if (gate.status === 'missing') {
+      status = 'fail'
+      gateReason = 'reported pass without CC_TIERS_VERIFY'
+    } else if (gate.status === 'fail') {
+      status = 'fail'
+      const { raw, code, timedOut, tail, seconds } = gate.failure
+      const last = String(tail || '').trim().split(/\r?\n/).pop() || 'no output'
+      gateReason = timedOut ? `${raw} timed out after ${seconds} s: ${last}` : `${raw} exit ${code ?? 'none'}: ${last}`
+      gateDetail = String(tail || '').trim()
+      const others = Object.keys(tasks).filter((name) => name !== task)
+      if (others.length) {
+        gateNote +=
+          `\nOther open tasks in this session (${others.join(', ')}) may share the working tree; ` +
+          'one of them may have caused this failure.'
+      }
+    }
+    if (gateNote) gateNote += '\n'
+  }
+
   let current = own(tasks, task)
   if (!current || typeof current !== 'object') current = { tier, failures: [], carried: [] }
 
@@ -1193,7 +1224,7 @@ export function applyEvent(state, event, routing) {
         state,
         meta,
         message:
-          `Task ${task} already escalated to ${current.tier}, so this ${tier} failure was not counted. ` +
+          `${gateNote}Task ${task} already escalated to ${current.tier}, so this ${tier} failure was not counted. ` +
           `Delegate it to ${implementerFor(current.tier)} with the failure notes.`,
       }
     } else {
@@ -1202,7 +1233,7 @@ export function applyEvent(state, event, routing) {
   }
   meta.tier = tier
 
-  let reason = headers.REASON || event.error || 'no reason given'
+  let reason = gateReason || headers.REASON || event.error || 'no reason given'
   reason = reason.split(/\s+/).filter(Boolean).join(' ').slice(0, MAX_REASON)
   meta.reason = reason
   const review = (headers.REVIEW || '').toLowerCase()
@@ -1239,13 +1270,13 @@ export function applyEvent(state, event, routing) {
         `Send the result to ${who}. The attempt counter stays until that review passes, or until a later report sets CC_TIERS_REVIEW: skip.`
     }
   } else {
-    const applied = applyFailure(tasks, task, current, tier, role, reason, routing)
+    const applied = applyFailure(tasks, task, current, tier, role, reason, routing, gateDetail)
     meta.outcome = applied.outcome
     message = applied.message
     meta.haikuFailure = applied.haikuFailure
     meta.sonnetEscalated = applied.sonnetEscalated
   }
-  return { state, message: `${note}${message}`, meta }
+  return { state, message: `${gateNote}${note}${message}`, meta }
 }
 
 /** A research run counts no attempt. A pass marks the task and the slugs it covers. */
@@ -1280,12 +1311,13 @@ function applyReview(tasks, task, current, tier, status, reason, routing, role) 
   return applyFailure(tasks, task, current, tier, role, reason, routing)
 }
 
-function applyFailure(tasks, task, current, tier, role, reason, routing) {
+/** detail is the gate's output tail: it rides in the failure note so the next attempt sees it. */
+function applyFailure(tasks, task, current, tier, role, reason, routing, detail = '') {
   if (current.tier !== tier) {
     current = { tier, failures: [], carried: [...(current.carried || []), ...(current.failures || [])].slice(-MAX_CARRIED) }
   }
   const failures = [...(current.failures || [])]
-  failures.push(`${tier}/${role}: ${reason}`)
+  failures.push(`${tier}/${role}: ${reason}${detail ? `\n${detail}` : ''}`)
   current.failures = failures
   current.tier = tier
   const maxAttempts = Number(routing.maxAttempts)
@@ -2193,6 +2225,24 @@ export function withSession(ctx, payload, fn) {
   })
 }
 
+/**
+ * Run the verification gate of a writer pass and attach it to a copy of the event.
+ * Commands can take minutes, so this runs before withSession, never under its lock.
+ */
+export function prepareReport(ctx, event, payload = {}) {
+  const routing = ctx.routing
+  if (!routing.verify || event?.kind !== 'report') return event
+  if (!WRITER_ROLES.has(event.role) && !SESSION_ROLES.has(event.role)) return event
+  const headers = { ...parseHeaders(event.prompt || ''), ...parseHeaders(event.text || '') }
+  if (!slug(headers.TASK || '') || (headers.STATUS || '').toLowerCase() !== 'pass') return event
+  const projectDir = ctx.projectDir || String(payload.cwd || '')
+  const options = { projectDir, allow: routing.verifyAllow, timeoutS: routing.verifyTimeout, budgetS: routing.verifyBudget }
+  if (projectDir) return { ...event, gate: runGate(event.text, options) }
+  // Nothing may run without a project dir; a declaration still tells missing from not validated.
+  const status = parseVerify(event.text).length ? 'unverified' : 'missing'
+  return { ...event, gate: { status, verified: [], flaky: [], unverified: status === 'missing' ? [] : [{ raw: '', reason: 'no project dir' }], failure: null } }
+}
+
 export function queueMessage(state, message) {
   state.pending = [...(state.pending || []), message].slice(-MAX_PENDING)
 }
@@ -2290,6 +2340,10 @@ export function logReport(state, meta) {
     if (meta.tier && !entry.tiers.includes(meta.tier)) entry.tiers.push(meta.tier)
   } else if (REVIEW_ROLES.has(meta.role)) {
     entry.reviews.push(meta.role)
+  }
+  if (meta.gate) {
+    const { verified, flaky, unverified } = meta.gate
+    entry.verify = { verified, flaky, unverified }
   }
   if (['retry', 'escalate', 'stop'].includes(meta.outcome)) entry.failures += 1
   if (meta.outcome === 'escalate') entry.escalations += 1

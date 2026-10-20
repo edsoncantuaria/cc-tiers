@@ -380,6 +380,7 @@ function riskyRouting() {
     max_attempts: 2,
     review_policy: 'risky',
     specify: 'off',
+    verify: 'off',
   })
 }
 
@@ -511,6 +512,7 @@ test('cheap review sends Haiku to the checker and risky Sonnet work to Opus', ()
 test('a cheap Haiku pass waits for the Sonnet checker, and a checker pass clears it', () => {
   const routing = tiers.mergeRouting(tiers.loadJson(path.join(ROOT, 'config/routing.default.json')), null, {
     review_policy: 'cheap',
+    verify: 'off',
   })
   const passed = apply(tiers.emptyState('sess-1'), routing, 't1', 'worker', report('worker', 'haiku', 'pass', 'pending', 'renamed'))
   assert.ok(passed.message.includes('cc-tiers:checker'))
@@ -523,6 +525,7 @@ test('a cheap Haiku pass waits for the Sonnet checker, and a checker pass clears
 test('ordinary Sonnet work is not queued for Opus under the cheap policy', () => {
   const routing = tiers.mergeRouting(tiers.loadJson(path.join(ROOT, 'config/routing.default.json')), null, {
     review_policy: 'cheap',
+    verify: 'off',
   })
   const passed = apply(
     tiers.emptyState('sess-1'),
@@ -899,7 +902,7 @@ test('the built-in lists match real task wording, in English and Portuguese', ()
 })
 
 test('a risky Sonnet pass is sent to Opus under the cheap policy', () => {
-  const routing = defaultRouting({ review_policy: 'cheap' })
+  const routing = defaultRouting({ review_policy: 'cheap', verify: 'off' })
   const prompt = 'CC_TIERS_TASK: users-pagination\nCC_TIERS_TIER: sonnet\nCC_TIERS_ROLE: implementer\nAdd OAuth authentication to /login.'
   const passed = apply(tiers.emptyState('s'), routing, 't1', 'implementer', report('implementer', 'sonnet', 'pass', 'pending', 'done'), prompt)
   assert.ok(passed.message.includes('cc-tiers:reviewer (Opus)'))
@@ -1340,7 +1343,7 @@ test('cost follows the model price table, and the Opus comparison uses current O
 test('task cost is recorded without cc-cost, and the log feeds the report', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-'))
   try {
-    const env = hookEnv(dir, { CC_TIERS_CC_COST: '0', CLAUDE_PLUGIN_OPTION_SHOW_COST: 'on', CLAUDE_PLUGIN_OPTION_RESEARCH: 'off', CLAUDE_PLUGIN_OPTION_SPECIFY: 'off' })
+    const env = hookEnv(dir, { CC_TIERS_CC_COST: '0', CLAUDE_PLUGIN_OPTION_SHOW_COST: 'on', CLAUDE_PLUGIN_OPTION_RESEARCH: 'off', CLAUDE_PLUGIN_OPTION_SPECIFY: 'off', CLAUDE_PLUGIN_OPTION_VERIFY: 'off' })
     const prompt = `${HEADER('users-pagination', 'sonnet', 'implementer')}Add pagination.`
     const failed = event('c1', 'implementer', report('implementer', 'sonnet', 'fail'), prompt)
     failed.tool_response.usage = { input_tokens: 1000, output_tokens: 500, model: 'claude-sonnet-5-5' }
@@ -1866,7 +1869,7 @@ test('a slug named like an Object.prototype key needs its own research mark', ()
 })
 
 test('an unclosed research block in the prompt does not hide the report trailer', () => {
-  const routing = defaultRouting({ review_policy: 'cheap' })
+  const routing = defaultRouting({ review_policy: 'cheap', verify: 'off' })
   const prompt = `${HEADER('csv', 'sonnet', 'implementer')}CC_TIERS_RESEARCH: done\n${BRIEF_BEGIN}\n- users table`
   const text = 'Done. Touched the login middleware.\nCC_TIERS_TASK: csv\nCC_TIERS_TIER: sonnet\nCC_TIERS_ROLE: implementer\nCC_TIERS_STATUS: pass'
   const result = apply(tiers.emptyState('s'), routing, 'i1', 'implementer', text, prompt)
@@ -2384,4 +2387,164 @@ test('session context states verify and review evidence', () => {
   const off = ctx({ verify: 'off', review_evidence: 'off' })
   assert.ok(off.includes('Verify: off'))
   assert.ok(off.includes('Review evidence: off'))
+})
+
+function gateEvent(toolUseId, text, gate) {
+  const normalized = tiers.normalizeEvent(event(toolUseId, 'implementer', text))
+  return gate === undefined ? normalized : { ...normalized, gate }
+}
+
+const GATE_BASE = { verified: [], flaky: [], unverified: [], failure: null }
+
+test('writer pass without VERIFY counts a failure', () => {
+  const state = tiers.emptyState('s')
+  const applied = apply(state, defaultRouting(), 'a', 'implementer', report('implementer', 'sonnet', 'pass'))
+  assert.equal(applied.meta.outcome, 'retry')
+  assert.ok(applied.message.startsWith('cc-tiers gate: users-pagination reported pass without CC_TIERS_VERIFY'))
+  assert.equal(applied.meta.reason, 'reported pass without CC_TIERS_VERIFY')
+  assert.ok(state.tasks['users-pagination'].failures[0].includes('reported pass without CC_TIERS_VERIFY'))
+  assert.equal(applied.meta.gate.status, 'missing')
+  const missing = tiers.applyEvent(tiers.emptyState('s'), gateEvent('b', report('implementer', 'sonnet', 'pass'), { ...GATE_BASE, status: 'missing' }), defaultRouting())
+  assert.equal(missing.meta.outcome, 'retry')
+  const review = apply(tiers.emptyState('s'), defaultRouting(), 'c', 'checker', report('checker', 'haiku', 'pass'))
+  assert.equal(review.meta.outcome, 'pass')
+  assert.equal(review.message.includes('cc-tiers gate'), false)
+})
+
+test('failed gate counts a failure with the tail in the notes and escalates after max_attempts', () => {
+  const state = tiers.emptyState('s')
+  state.tasks = { 'other-task': { tier: 'haiku', failures: [], carried: [] } }
+  const routing = defaultRouting({ max_attempts: 2 })
+  const gate = {
+    ...GATE_BASE,
+    status: 'fail',
+    failure: { raw: 'npm test', code: 1, timedOut: false, tail: 'at cursor.test.js:12\nAssertionError: boom', seconds: 300 },
+  }
+  const first = tiers.applyEvent(state, gateEvent('a', report('implementer', 'sonnet', 'pass'), gate), routing)
+  assert.equal(first.meta.outcome, 'retry')
+  assert.ok(first.message.startsWith('cc-tiers gate: users-pagination failed: npm test (exit 1)'))
+  assert.equal(first.meta.reason, 'npm test exit 1: AssertionError: boom')
+  assert.ok(first.message.includes('at cursor.test.js:12'))
+  assert.ok(first.message.includes('Other open tasks in this session (other-task) may share the working tree; one of them may have caused this failure.'))
+  assert.equal(first.meta.gate, gate)
+  const second = tiers.applyEvent(state, gateEvent('b', report('implementer', 'sonnet', 'pass'), gate), routing)
+  assert.equal(second.meta.outcome, 'escalate')
+  assert.ok(second.message.includes('The next tier is opus'))
+  assert.equal(state.tasks['users-pagination'].tier, 'opus')
+  assert.ok(state.tasks['users-pagination'].carried.every((note) => note.includes('AssertionError: boom')))
+  const timeout = { ...GATE_BASE, status: 'fail', failure: { raw: 'npm test', code: null, timedOut: true, tail: 'hanging', seconds: 300 } }
+  const alone = tiers.applyEvent(tiers.emptyState('s'), gateEvent('c', report('implementer', 'sonnet', 'pass'), timeout), routing)
+  assert.ok(alone.message.startsWith('cc-tiers gate: users-pagination timed out: npm test after 300 s'))
+  assert.equal(alone.meta.reason, 'npm test timed out after 300 s: hanging')
+  assert.equal(alone.message.includes('Other open tasks'), false)
+})
+
+test('unverified gate keeps the pass and says not validated', () => {
+  const state = tiers.emptyState('s')
+  const gate = { ...GATE_BASE, status: 'unverified', unverified: [{ raw: 'none - docs only', reason: 'docs only' }] }
+  const applied = tiers.applyEvent(state, gateEvent('a', report('implementer', 'sonnet', 'pass', 'skip'), gate), defaultRouting())
+  assert.equal(applied.meta.outcome, 'pass')
+  assert.ok(applied.message.startsWith('cc-tiers gate: users-pagination not validated: docs only\n'))
+  tiers.logReport(state, applied.meta)
+  assert.deepEqual(state.log['users-pagination'].verify, { verified: [], flaky: [], unverified: [{ raw: 'none - docs only', reason: 'docs only' }] })
+  const passed = { ...GATE_BASE, status: 'pass', verified: ['npm test'], flaky: ['npm test'] }
+  const ok = tiers.applyEvent(tiers.emptyState('s'), gateEvent('b', report('implementer', 'sonnet', 'pass', 'skip'), passed), defaultRouting())
+  assert.equal(ok.meta.outcome, 'pass')
+  assert.ok(ok.message.startsWith('cc-tiers gate: users-pagination verified: npm test\ncc-tiers gate: users-pagination flaky: npm test\n'))
+})
+
+test('verify off keeps 0.6 behavior', () => {
+  const routing = defaultRouting({ verify: 'off' })
+  const applied = apply(tiers.emptyState('s'), routing, 'a', 'implementer', report('implementer', 'sonnet', 'pass', 'skip'))
+  assert.equal(applied.meta.outcome, 'pass')
+  assert.equal(applied.message.includes('cc-tiers gate'), false)
+  assert.equal(applied.meta.gate, undefined)
+  const ctx = { routing, projectDir: '/tmp' }
+  const prepared = tiers.prepareReport(ctx, tiers.normalizeEvent(event('b', 'implementer', report('implementer', 'sonnet', 'pass'))))
+  assert.equal(prepared.gate, undefined)
+})
+
+test('prepareReport gates only a writer pass with a slug', () => {
+  const ctx = { routing: defaultRouting(), projectDir: '' }
+  const prepare = (role, text, payload = {}) => tiers.prepareReport(ctx, tiers.normalizeEvent(event('a', role, text)), payload)
+  assert.equal(prepare('implementer', report('implementer', 'sonnet', 'fail')).gate, undefined)
+  assert.equal(prepare('reviewer', report('reviewer', 'opus', 'pass')).gate, undefined)
+  assert.equal(prepare('implementer', 'CC_TIERS_STATUS: pass').gate, undefined)
+  assert.equal(prepare('implementer', report('implementer', 'sonnet', 'pass')).gate.status, 'missing')
+  const declared = `${report('implementer', 'sonnet', 'pass')}\nCC_TIERS_VERIFY: npm test`
+  const nowhere = prepare('implementer', declared).gate
+  assert.equal(nowhere.status, 'unverified')
+  assert.deepEqual(nowhere.unverified, [{ raw: '', reason: 'no project dir' }])
+  const original = tiers.normalizeEvent(event('a', 'worker', `${report('worker', 'haiku', 'pass')}\nCC_TIERS_VERIFY: none - docs only`))
+  const copy = tiers.prepareReport(ctx, original, { cwd: os.tmpdir() })
+  assert.equal(original.gate, undefined)
+  assert.deepEqual(copy.gate.unverified, [{ raw: 'none - docs only', reason: 'docs only' }])
+})
+
+test('prepareReport runs outside the lock', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const project = path.join(dir, 'project')
+    mkdirSync(project)
+    writeFileSync(
+      path.join(project, 'probe.mjs'),
+      "import { existsSync, writeFileSync } from 'node:fs'\nwriteFileSync(process.argv[3], String(existsSync(process.argv[2])))\n",
+    )
+    const env = hookEnv(dir, { CC_TIERS_CC_COST: '0', CLAUDE_PLUGIN_OPTION_VERIFY_ALLOW: 'node probe.mjs', CLAUDE_PLUGIN_OPTION_RESEARCH: 'off', CLAUDE_PLUGIN_OPTION_SPECIFY: 'off' })
+    const lock = path.join(dir, 'data', 'session-sess-1.json.lock')
+    const out = path.join(dir, 'out-fg')
+    const raw = event('fg', 'implementer', `${report('implementer', 'sonnet', 'pass', 'skip')}\nCC_TIERS_VERIFY: node probe.mjs ${lock} ${out}`)
+    raw.cwd = project
+    const proc = runHook('after_agent.mjs', raw, env)
+    assert.equal(proc.status, 0, proc.stderr)
+    assert.equal(readFileSync(out, 'utf8'), 'false')
+    const message = JSON.parse(proc.stdout).hookSpecificOutput.additionalContext
+    assert.ok(message.includes(`cc-tiers gate: users-pagination verified: node probe.mjs ${lock} ${out}`))
+    let state = JSON.parse(readFileSync(path.join(dir, 'data', 'session-sess-1.json'), 'utf8'))
+    assert.deepEqual(state.log['users-pagination'].verify.verified, [`node probe.mjs ${lock} ${out}`])
+
+    const prompt = 'CC_TIERS_TASK: users-pagination\nCC_TIERS_TIER: sonnet\nCC_TIERS_ROLE: implementer\nAdd pagination.'
+    const launch = runHook(
+      'after_agent.mjs',
+      {
+        session_id: 'sess-1',
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Agent',
+        tool_use_id: 'bg1',
+        cwd: project,
+        tool_input: { subagent_type: 'cc-tiers:implementer', prompt },
+        tool_response: { status: 'async_launched', agentId: 'agent-9', prompt },
+      },
+      env,
+    )
+    assert.equal(launch.status, 0, launch.stderr)
+    const bgOut = path.join(dir, 'out-bg')
+    const stop = runHook(
+      'subagent_stop.mjs',
+      {
+        session_id: 'sess-1',
+        hook_event_name: 'SubagentStop',
+        agent_id: 'agent-9',
+        agent_type: 'cc-tiers:implementer',
+        cwd: project,
+        last_assistant_message: `${report('implementer', 'sonnet', 'pass', 'skip')}\nCC_TIERS_VERIFY: node probe.mjs ${lock} ${bgOut}`,
+      },
+      env,
+    )
+    assert.equal(stop.status, 0, stop.stderr)
+    assert.equal(readFileSync(bgOut, 'utf8'), 'false')
+    state = JSON.parse(readFileSync(path.join(dir, 'data', 'session-sess-1.json'), 'utf8'))
+    assert.equal(state.background['agent-9'], undefined)
+    assert.ok(state.pending.some((text) => text.includes('cc-tiers gate: users-pagination verified:')))
+    assert.equal(readdirSync(path.join(dir, 'data')).some((name) => name.endsWith('.lock') || name.endsWith('.tmp')), false)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('hooks.json gives the gate 660 s', () => {
+  const events = JSON.parse(readFileSync(path.join(ROOT, 'hooks/hooks.json'), 'utf8')).hooks
+  for (const name of ['PostToolUse', 'PostToolUseFailure', 'SubagentStop', 'Stop']) assert.equal(events[name][0].hooks[0].timeout, 660, name)
+  for (const name of ['SessionStart', 'UserPromptSubmit']) assert.equal(events[name][0].hooks[0].timeout, 15, name)
+  assert.equal(events.PreToolUse[0].hooks[0].timeout, 15)
 })

@@ -11,6 +11,7 @@ import {
   matchRole,
   openContext,
   parsePayload,
+  prepareReport,
   processReport,
   queueMessage,
   readStdin,
@@ -23,20 +24,30 @@ function main() {
   if (!agentId) return
   const ctx = openContext(payload)
 
+  // Read the launch first, run the gate with no lock held, then count under the lock.
+  const launched = withSession(ctx, payload, (state) => state.background?.[agentId])
+  if (!launched) return
+  const role = launched.role || matchRole(payload.agent_type)
+  const event = role
+    ? prepareReport(
+        ctx,
+        {
+          kind: 'report',
+          id: `agent:${agentId}`,
+          role,
+          prompt: launched.prompt || '',
+          text: String(payload.last_assistant_message || ''),
+          error: '',
+        },
+        payload,
+      )
+    : null
+
   withSession(ctx, payload, (state) => {
-    const launched = state.background?.[agentId]
-    if (!launched) return
+    // Another SubagentStop for the same agent may have counted it while the gate ran.
+    if (!state.background?.[agentId]) return
     delete state.background[agentId]
-    const role = launched.role || matchRole(payload.agent_type)
-    if (!role) return
-    const event = {
-      kind: 'report',
-      id: `agent:${agentId}`,
-      role,
-      prompt: launched.prompt || '',
-      text: String(payload.last_assistant_message || ''),
-      error: '',
-    }
+    if (!event) return
     const { totals, cost } = agentTranscriptUsage(payload.agent_transcript_path, ctx.routing)
     const message = processReport(ctx, state, event, { key: agentId, totals, cost })
     if (message) queueMessage(state, message)

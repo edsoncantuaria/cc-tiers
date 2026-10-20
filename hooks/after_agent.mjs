@@ -6,6 +6,7 @@ import {
   normalizeEvent,
   openContext,
   parsePayload,
+  prepareReport,
   processReport,
   readStdin,
   takePending,
@@ -16,9 +17,11 @@ import {
 function main() {
   const payload = parsePayload(readStdin())
   if (!Object.keys(payload).length) return
-  const event = normalizeEvent(payload)
-  if (!event) return
+  const normalized = normalizeEvent(payload)
+  if (!normalized) return
   const ctx = openContext(payload)
+  // The gate runs its commands here, before the session lock is taken.
+  const event = prepareReport(ctx, normalized, payload)
 
   const message = withSession(ctx, payload, (state) => {
     let text
