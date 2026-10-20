@@ -53,7 +53,7 @@ A hook note that begins `cc-tiers counted a failure` is the counter. Follow its 
 
 ### Research
 
-Before a task goes to `cc-tiers:implementer` or `cc-tiers:architect`, run `cc-tiers:researcher` for it, with the same `CC_TIERS_TASK` slug. Send independent researches in parallel. One research may cover several slugs: add `CC_TIERS_COVERS: <slug>, <slug>` to its prompt, and a pass marks all of them. Before your own attempt at the ceiling, write the block in your own message before the first edit: no hook checks it.
+Before a task goes to `cc-tiers:implementer` or `cc-tiers:architect`, run `cc-tiers:researcher` for it, with the same `CC_TIERS_TASK` slug. Send independent researches in parallel. One research may cover several slugs: add `CC_TIERS_COVERS: <slug>, <slug>` to its prompt, and a pass marks all of them. Before your own attempt at the ceiling, research it too: no hook checks that case.
 
 When the researcher reports `CC_TIERS_STATUS: pass`, paste its entire report, trailer included, between two lines that hold only `CC_TIERS_RESEARCH_BEGIN` and `CC_TIERS_RESEARCH_END`. Put that block under the writer's `CC_TIERS_TASK/TIER/ROLE` header, outside the block, and add `CC_TIERS_RESEARCH: done`. The hook strips the block before it reads headers. If the research fails, fix what it says is missing or use the next option.
 
