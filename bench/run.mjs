@@ -219,6 +219,16 @@ export function transcriptFile(sessionId, home = process.env.CLAUDE_CONFIG_DIR |
  */
 export function escalationsIn(lines, from = 0) {
   const found = []
+  for (const text of hookTexts(lines, from)) {
+    for (const { kind, pattern } of ESCALATIONS) {
+      for (const match of text.matchAll(pattern)) found.push(`${match[1]}->${match[2]} (${kind})`)
+    }
+  }
+  return found
+}
+
+/** Text of each hook output (hook attachments and system messages) after `from`, with `\n` unescaped. */
+function* hookTexts(lines, from) {
   for (const line of lines.slice(from)) {
     let row
     try {
@@ -227,13 +237,23 @@ export function escalationsIn(lines, from = 0) {
       continue
     }
     const fromHook = (row.type === 'attachment' && String(row.attachment?.type || '').startsWith('hook')) || row.type === 'system'
-    if (!fromHook) continue
-    const text = JSON.stringify(row.attachment ?? row).replace(/\\n/g, '\n')
-    for (const { kind, pattern } of ESCALATIONS) {
-      for (const match of text.matchAll(pattern)) found.push(`${match[1]}->${match[2]} (${kind})`)
-    }
+    if (fromHook) yield JSON.stringify(row.attachment ?? row).replace(/\\n/g, '\n')
   }
-  return found
+}
+
+const count = (text, pattern) => [...text.matchAll(pattern)].length
+
+/** How often the gate and the evidence review spoke in hook output after `from`; the model's own text never counts. */
+export function qualityIn(lines, from = 0) {
+  const quality = { gateBlocked: 0, flaky: 0, notValidated: 0, discarded: 0, noEvidence: 0 }
+  for (const text of hookTexts(lines, from)) {
+    quality.gateBlocked += count(text, /cc-tiers gate: \S+ (?:failed: |timed out: |reported pass without CC_TIERS_VERIFY)/g)
+    quality.flaky += count(text, /cc-tiers gate: \S+ flaky: /g)
+    quality.notValidated += count(text, /cc-tiers gate: \S+ not validated: /g)
+    quality.noEvidence += count(text, /cc-tiers review: \S+ rejected without evidence/g)
+    for (const match of text.matchAll(/cc-tiers review: \S+ discarded (\d+) finding\(s\)/g)) quality.discarded += Number(match[1])
+  }
+  return quality
 }
 
 const ROLE_TIER = {
@@ -333,7 +353,7 @@ export function stepUsage(json, previous) {
   return { ...json, modelUsage, total_cost_usd: (Number(json.total_cost_usd) || 0) - (Number(previous.total_cost_usd) || 0) }
 }
 
-export function summarize(config, task, rep, run, verdict, escalations = null, route = null) {
+export function summarize(config, task, rep, run, verdict, escalations = null, route = null, quality = null) {
   const json = run.json || {}
   const models = {}
   const tokens = {}
@@ -375,6 +395,8 @@ export function summarize(config, task, rep, run, verdict, escalations = null, r
     route: route?.path ?? null,
     routedAsDocumented: route?.ok ?? null,
     delegations: route?.steps ?? null,
+    quality,
+    reviewRounds: route?.steps ? route.steps.filter((step) => step.agent === 'cc-tiers:reviewer' || step.agent === 'cc-tiers:checker').length : null,
     error: json.is_error ? String(json.result || '').slice(0, 300) : run.code === 0 ? '' : run.stderr.slice(-300),
     checkOutput: verdict.resolved ? '' : verdict.output,
   }
@@ -478,6 +500,7 @@ export function table(results) {
   if (difference.length) lines.push('', ...difference)
   lines.push('', ...kindTable(results))
   if (results.some((row) => row.routedAsDocumented != null)) lines.push('', ...routingTable(results))
+  if (results.some((row) => row.quality)) lines.push('', ...qualityTable(results))
   return lines.join('\n')
 }
 
@@ -525,6 +548,23 @@ export function kindTable(results) {
     const routed = results.filter((row) => row.config === config && row.routedAsDocumented != null)
     const share = routed.length ? `${routed.filter((row) => row.routedAsDocumented).length}/${routed.length}` : '—'
     lines.push(`| ${label(config)} | ${cells.join(' | ')} | ${escalations} | ${share} |`)
+  }
+  return lines
+}
+
+/** Gate and review events per cc-tiers configuration; rows from older result files have no `quality`. */
+export function qualityTable(results) {
+  const rows = results.filter((row) => row.quality)
+  const configs = [...new Set(rows.map((row) => row.config))]
+  const lines = [
+    '| Configuration | Pass blocked by gate | Flaky | Not validated | Findings discarded | Rejections without evidence | Review rounds per task |',
+    '| --- | --: | --: | --: | --: | --: | --: |',
+  ]
+  for (const config of configs) {
+    const mine = rows.filter((row) => row.config === config)
+    const sum = (key) => mine.reduce((total, row) => total + (row.quality[key] || 0), 0)
+    const rounds = mine.reduce((total, row) => total + (row.reviewRounds || 0), 0) / mine.length
+    lines.push(`| ${label(config)} | ${sum('gateBlocked')} | ${sum('flaky')} | ${sum('notValidated')} | ${sum('discarded')} | ${sum('noEvidence')} | ${rounds.toFixed(1)} |`)
   }
   return lines
 }
@@ -589,11 +629,11 @@ async function main() {
   process.stderr.write(`Running ${jobs.length} ${session ? 'sessions' : 'jobs'} (${configs.length} configs x ${tasks.length} tasks x ${repeat}) on ${path.relative(ROOT, fixture)}, ${parallel} at a time.\n`)
   // Escalations and routing exist only where cc-tiers routes; elsewhere they stay null rather than 0.
   const transcriptFor = (config, sessionId, from, kind, changed) => {
-    if (!config.startsWith('cc-tiers')) return { found: null, route: null, seen: from }
+    if (!config.startsWith('cc-tiers')) return { found: null, route: null, quality: null, seen: from }
     const lines = readLines(transcriptFile(sessionId))
     const steps = inlineSteps(routeIn(lines, from), changed)
     const route = { ...routing(kind, steps, config === 'cc-tiers-light' ? 'sonnet' : 'opus'), steps }
-    return { found: escalationsIn(lines, from), route, seen: lines.length }
+    return { found: escalationsIn(lines, from), route, quality: qualityIn(lines, from), seen: lines.length }
   }
   const sessionJob = async ({ rep, config }) => {
     const dir = workspace(fixture)
@@ -615,7 +655,7 @@ async function main() {
         rmSync(path.join(dir, '.bench-check'), { recursive: true, force: true })
         const step = { ...run, json: stepUsage(run.json, previous) }
         if (run.json) previous = run.json
-        const row = { ...summarize(nameOf(config), task, rep, step, verdict, read.found, read.route), mode: 'session' }
+        const row = { ...summarize(nameOf(config), task, rep, step, verdict, read.found, read.route, read.quality), mode: 'session' }
         process.stderr.write(`${progress(row)} ${row.config} ${task.id} ${kilo(row.freshTokens)} tokens ${row.seconds}s${row.escalations ? ` escalations ${row.escalationPath.join(', ')}` : ''}${row.route ? ` route ${row.route}${row.routedAsDocumented === false ? ' (off)' : ''}` : ''}\n`)
         rows.push(row)
       }
@@ -634,7 +674,7 @@ async function main() {
       const verdict = grade(dir, task, run.json?.result, checks, before)
       const name = tag && config.startsWith('cc-tiers') ? `${config}@${tag}` : config
       const read = transcriptFor(config, run.json?.session_id, 0, task.kind, changed)
-      const row = summarize(name, task, rep, run, verdict, read.found, read.route)
+      const row = summarize(name, task, rep, run, verdict, read.found, read.route, read.quality)
       process.stderr.write(`${progress(row)} ${name} ${task.id} ${kilo(row.freshTokens)} tokens ${row.seconds}s\n`)
       return row
     } finally {
