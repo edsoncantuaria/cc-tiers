@@ -2124,27 +2124,33 @@ export function agentTranscriptSpend(file) {
   return agentTranscriptUsage(file).totals
 }
 
-/** Fresh tokens per tier, and with routing the dollar cost, of one subagent transcript. */
-export function agentTranscriptUsage(file, routing = null) {
-  const totals = { haiku: 0, sonnet: 0, opus: 0 }
-  const cost = {}
-  const done = () => ({ totals, cost: cost.run || null })
-  if (!file || !existsSync(file)) return done()
+/** Parsed rows of a transcript file; an unreadable file or a malformed line gives none. */
+function transcriptRows(file) {
+  if (!file || !existsSync(file)) return []
   let text
   try {
     text = readFileSync(file, 'utf8')
   } catch {
-    return done()
+    return []
   }
-  const ids = new Set()
+  const rows = []
   for (const line of text.split(/\n/)) {
     if (!line.trim()) continue
-    let row
     try {
-      row = JSON.parse(line)
+      rows.push(JSON.parse(line))
     } catch {
-      continue
+      // Lines that are not JSON are not rows.
     }
+  }
+  return rows
+}
+
+/** Fresh tokens per tier, and with routing the dollar cost, of one subagent transcript. */
+export function agentTranscriptUsage(file, routing = null) {
+  const totals = { haiku: 0, sonnet: 0, opus: 0 }
+  const cost = {}
+  const ids = new Set()
+  for (const row of transcriptRows(file)) {
     const message = row?.message && typeof row.message === 'object' ? row.message : null
     if (!message || !message.usage) continue
     const id = message.id || row.uuid || ''
@@ -2154,7 +2160,21 @@ export function agentTranscriptUsage(file, routing = null) {
     if (tier) totals[tier] += freshTokens(message.usage)
     if (routing) addCost(cost, 'run', usageCost(message.usage, message.model, routing))
   }
-  return done()
+  return { totals, cost: cost.run || null }
+}
+
+/** The report a background subagent delivered through its last SubagentHandback call, or ''. */
+export function agentHandbackReport(file) {
+  let report = ''
+  for (const row of transcriptRows(file)) {
+    if (row?.type !== 'assistant' || !row.message || typeof row.message !== 'object') continue
+    for (const block of messageBlocks(row.message)) {
+      if (block?.type === 'tool_use' && block.name === 'SubagentHandback' && typeof block.input?.message === 'string') {
+        report = block.input.message
+      }
+    }
+  }
+  return report
 }
 
 export function usageFromToolResponse(response, role, routing = null) {

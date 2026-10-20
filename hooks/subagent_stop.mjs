@@ -7,9 +7,11 @@
  */
 
 import {
+  agentHandbackReport,
   agentTranscriptUsage,
   matchRole,
   openContext,
+  parseHeaders,
   parsePayload,
   prepareReport,
   processReport,
@@ -28,6 +30,9 @@ function main() {
   const launched = withSession(ctx, payload, (state) => state.background?.[agentId])
   if (!launched) return
   const role = launched.role || matchRole(payload.agent_type)
+  // A background agent delivers its report through the SubagentHandback tool, so the last message is not the trailer.
+  let text = String(payload.last_assistant_message || '')
+  if (!parseHeaders(text).STATUS) text = agentHandbackReport(payload.agent_transcript_path) || text
   const event = role
     ? prepareReport(
         ctx,
@@ -36,7 +41,7 @@ function main() {
           id: `agent:${agentId}`,
           role,
           prompt: launched.prompt || '',
-          text: String(payload.last_assistant_message || ''),
+          text,
           error: '',
         },
         payload,

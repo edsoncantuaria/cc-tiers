@@ -12,6 +12,10 @@
 
 - A one-line fix such as removing a debug log or changing a config value no longer gets research, a full spec block, a Sonnet implementer, and an Opus review; it gets one to three criteria and the verify gate. The trivial light path only caught keyword tasks (typo, rename, lint, lookup).
 
+### Fixed
+
+- A background subagent that delivers its report through the `SubagentHandback` tool is counted: when the last assistant message has no `CC_TIERS_STATUS`, SubagentStop reads the report from the last `SubagentHandback` call in the agent transcript instead of reporting "finished without CC_TIERS_STATUS".
+
 ## 0.8.0 - 2026-10-20
 
 ### Added

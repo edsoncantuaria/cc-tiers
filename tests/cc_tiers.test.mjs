@@ -1112,6 +1112,87 @@ test('a background agent is counted at SubagentStop and reported at Stop', async
   }
 })
 
+const HANDBACK = (message) => ({ type: 'tool_use', name: 'SubagentHandback', input: { message } })
+const HANDBACK_RESULT = JSON.stringify({
+  type: 'user',
+  message: { content: [{ type: 'tool_result', content: [{ type: 'text', text: '{"success":true,"message":"Report delivered to your caller."}' }] }] },
+})
+
+test('the last SubagentHandback report is read from a subagent transcript', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const file = path.join(dir, 'agent.jsonl')
+    writeFileSync(
+      file,
+      [
+        assistantRow('claude-sonnet-4-5', {}, [HANDBACK('first draft')], { id: 'h1' }),
+        'not json',
+        assistantRow('claude-sonnet-4-5', {}, [{ type: 'text', text: 'between' }], { id: 'h2' }),
+        assistantRow('claude-sonnet-4-5', {}, [HANDBACK('final report')], { id: 'h3' }),
+        HANDBACK_RESULT,
+      ].join('\n'),
+    )
+    assert.equal(tiers.agentHandbackReport(file), 'final report')
+    assert.equal(tiers.agentHandbackReport(path.join(dir, 'missing.jsonl')), '')
+    assert.equal(tiers.agentHandbackReport(undefined), '')
+    writeFileSync(file, `${assistantRow('claude-sonnet-4-5', {}, [{ type: 'text', text: 'no handback' }], { id: 'h4' })}\n`)
+    assert.equal(tiers.agentHandbackReport(file), '')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a background report delivered through SubagentHandback is counted at SubagentStop', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const env = hookEnv(dir)
+    const launch = (role, id, task = 'users-pagination') => {
+      const prompt = `CC_TIERS_TASK: ${task}\nCC_TIERS_TIER: sonnet\nCC_TIERS_ROLE: ${role}\nWork.`
+      runHook(
+        'after_agent.mjs',
+        {
+          session_id: 'sess-1',
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Agent',
+          tool_use_id: `bg-${id}`,
+          tool_input: { subagent_type: `cc-tiers:${role}`, prompt },
+          tool_response: { status: 'async_launched', agentId: id, prompt },
+        },
+        env,
+      )
+    }
+    const stop = (role, id, message, last = '') => {
+      const file = path.join(dir, `${id}.jsonl`)
+      writeFileSync(file, [assistantRow('claude-sonnet-4-5', { input_tokens: 40 }, [HANDBACK(message)], { id: `m-${id}` }), HANDBACK_RESULT].join('\n'))
+      return runHook(
+        'subagent_stop.mjs',
+        { session_id: 'sess-1', hook_event_name: 'SubagentStop', agent_id: id, agent_type: `cc-tiers:${role}`, agent_transcript_path: file, last_assistant_message: last },
+        env,
+      )
+    }
+
+    launch('implementer', 'agent-f')
+    assert.equal(stop('implementer', 'agent-f', report('implementer', 'sonnet', 'fail', '', 'cursor off by one')).status, 0)
+    const end = runHook('stop.mjs', { session_id: 'sess-1', hook_event_name: 'Stop', stop_hook_active: false }, env)
+    const decision = JSON.parse(end.stdout)
+    assert.equal(decision.decision, 'block')
+    assert.ok(decision.reason.includes('Retry on sonnet'))
+    assert.ok(!decision.reason.includes('without CC_TIERS_STATUS'))
+
+    launch('researcher', 'agent-p')
+    assert.equal(stop('researcher', 'agent-p', 'brief\nCC_TIERS_STATUS: pass').status, 0)
+    const file = tiers.sessionPath(path.join(dir, 'data'), 'sess-1')
+    assert.deepEqual(tiers.loadState(file, 'sess-1').researched, { 'users-pagination': true })
+
+    // A last message that carries the trailer wins over the transcript.
+    launch('researcher', 'agent-w', 'csv')
+    stop('researcher', 'agent-w', 'brief\nCC_TIERS_STATUS: fail', 'CC_TIERS_TASK: csv\nCC_TIERS_ROLE: researcher\nCC_TIERS_STATUS: pass')
+    assert.deepEqual(tiers.loadState(file, 'sess-1').researched, { 'users-pagination': true, csv: true })
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('a ceiling trailer in the transcript is counted at Stop', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-'))
   try {
