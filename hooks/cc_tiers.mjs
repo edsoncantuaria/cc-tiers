@@ -87,6 +87,7 @@ const RESEARCH_NONE_RE = /^none\s*-\s*\S/
 const SPEC_BEGIN = 'CC_TIERS_SPEC_BEGIN'
 const SPEC_END = 'CC_TIERS_SPEC_END'
 const SPEC_NONE_RE = /^none\s*-\s*\S/i
+const RISK_NONE_RE = /^none\s*-\s*\S/i
 const SPEC_HEADING_RE = /^[*_#\s]*(criteria|edge cases|assumed)[*_#\s]*:?[*_#\s]*$/i
 const SPEC_BULLET_RE = /^(?:[-*•]|\d+\.)\s*/
 const SPEC_ORIGIN_RE = /\((?:request|user|(?:repo|docs|decided):[^)]*)\)/gi
@@ -390,7 +391,9 @@ export function matchesKeyword(text, keywords) {
   })
 }
 
-export function isRisky(text, routing) {
+export function isRisky(text, routing, { waivable = true } = {}) {
+  // The orchestrator waives a keyword that is only text in the prompt (docs, a git command); a reason is required.
+  if (waivable && RISK_NONE_RE.test(parseHeaders(text).RISK || '')) return false
   const opus = routing?.tiers?.opus
   return matchesAny(stripHeaders(text), opus?.reviewWhen) || matchesKeyword(stripHeaders(text), opus?.reviewKeywords)
 }
@@ -1302,7 +1305,7 @@ export function applyEvent(state, event, routing) {
     const next = selectReviewer({
       policy: routing.reviewPolicy,
       writerTier: tier,
-      risky: isRisky(event.prompt || '', routing) || isRisky(event.text || '', routing),
+      risky: isRisky(event.prompt || '', routing) || isRisky(event.text || '', routing, { waivable: false }),
       conserve: routing.conserve === true,
     })
     if (next == null) {

@@ -7,6 +7,7 @@
 - Small path. On UserPromptSubmit the hook adds a `cc-tiers small path` note when a request is 40 words or fewer, matches no Opus review keyword, has complexity score 0, and would start on Sonnet (by default, or a trivial-looking task that already failed on Haiku). The session agent reads the target first. If the change fits in about 20 lines of one file (its test file aside), has a clear expected result, and uses no library API it has not seen in the repo, then with `light_path: inline` it does it itself: no plan, research, or subagent, a spec of one to three criteria, a reproducing test for a bug fix when the file has tests, and its attempt trailer with `CC_TIERS_REVIEW: skip`, so the verify gate re-runs its `CC_TIERS_VERIFY` commands with no review pass. The light-mode dispatcher does the same with its dispatcher trailer.
 - With `light_path: delegate`, or while budget routing conserves, a small change is one `cc-tiers:implementer` call with `CC_TIERS_RESEARCH: none`, a short spec, and `CC_TIERS_REVIEW: skip`. A bigger or risky change, or doubt, takes the usual route.
 - No new option: the small path follows `light_path`, and `off` turns both off.
+- `CC_TIERS_RISK: none - <reason>` in a delegation waives an Opus review keyword that is only text there (docs, a quoted example, `git checkout` in an instruction): no hard start, no effort boost, no routing hint. A line with no reason is ignored, and the writer's report is still checked for risk, ignoring any `CC_TIERS_RISK` line it echoes.
 
 ### Changed
 

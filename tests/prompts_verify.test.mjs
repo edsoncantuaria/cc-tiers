@@ -71,6 +71,6 @@ test('prompts send a hard task to Opus from the start', () => {
 test('session prompts handle the small path note', () => {
   for (const file of ['agents/orchestrator.md', 'agents/dispatcher.md', 'skills/tiers/SKILL.md']) {
     const text = read(file)
-    for (const needle of ['cc-tiers small path', 'CC_TIERS_REVIEW: skip']) assert.ok(text.includes(needle), `${file} mentions ${needle}`)
+    for (const needle of ['cc-tiers small path', 'CC_TIERS_REVIEW: skip', 'CC_TIERS_RISK: none - <reason>']) assert.ok(text.includes(needle), `${file} mentions ${needle}`)
   }
 })

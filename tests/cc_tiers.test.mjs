@@ -941,6 +941,31 @@ test('hard start: a risky task starts on Opus unless the option says sonnet or t
   assert.equal(tiers.checkDelegation(tiers.emptyState('s'), { subagent_type: 'cc-tiers:implementer', prompt }, sonnet).context.includes('Opus work'), false)
 })
 
+test('CC_TIERS_RISK: none with a reason waives a keyword that is only text, and the report is still checked', () => {
+  const routing = defaultRouting({ verify: 'off' })
+  const header = 'CC_TIERS_TASK: users-pagination\nCC_TIERS_TIER: sonnet\nCC_TIERS_ROLE: implementer\nCC_TIERS_RESEARCH: none - x\nCC_TIERS_SPEC: none - x\n'
+  const task = 'Fix the off-by-one in the users list. Do not stash, reset or checkout.'
+  assert.equal(tiers.isRisky(`${header}${task}`, routing), true)
+  const waived = `${header}CC_TIERS_RISK: none - checkout is a git command here\n${task}`
+  assert.equal(tiers.isRisky(waived, routing), false)
+  assert.deepEqual([tiers.decideTier(waived, routing).tier, tiers.decideTier(waived, routing).effort], ['sonnet', 'high'])
+  const call = tiers.checkDelegation(tiers.emptyState('s'), { subagent_type: 'cc-tiers:implementer', prompt: waived }, routing)
+  assert.equal(call.context.includes('Opus work'), false)
+  assert.equal(call.input, null)
+  assert.equal(tiers.checkDelegation(tiers.emptyState('s'), { subagent_type: 'cc-tiers:implementer', prompt: `${header}${task}` }, routing).input.effort, 'xhigh')
+  assert.equal(tiers.isRisky(`${header}CC_TIERS_RISK: none\n${task}`, routing), true)
+  assert.equal(tiers.isRisky(`${header}CC_TIERS_RISK: None - git command\n${task}`, routing), false)
+  assert.equal(tiers.isRisky(`${header}CC_TIERS_RISK: NONE - git command\n${task}`, routing), false)
+
+  const cheap = defaultRouting({ review_policy: 'cheap', verify: 'off' })
+  const plain = apply(tiers.emptyState('s'), cheap, 't1', 'implementer', report('implementer', 'sonnet', 'pass', 'pending', 'done'), waived)
+  assert.ok(plain.message.includes('no review is due'))
+  const touched = apply(tiers.emptyState('s'), cheap, 't2', 'implementer', `Changed the checkout total in src/cart.js.\n${report('implementer', 'sonnet', 'pass', 'pending', 'done')}`, waived)
+  assert.ok(touched.message.includes('cc-tiers:reviewer (Opus)'))
+  const echoed = `Changed the checkout total in src/cart.js.\nCC_TIERS_RISK: none - echoed\n${report('implementer', 'sonnet', 'pass', 'pending', 'done')}`
+  assert.ok(apply(tiers.emptyState('s'), cheap, 't3', 'implementer', echoed, waived).message.includes('cc-tiers:reviewer (Opus)'))
+})
+
 test('a risky Sonnet pass is sent to Opus under the cheap policy', () => {
   const routing = defaultRouting({ review_policy: 'cheap', verify: 'off' })
   const prompt = 'CC_TIERS_TASK: users-pagination\nCC_TIERS_TIER: sonnet\nCC_TIERS_ROLE: implementer\nAdd OAuth authentication to /login.'
