@@ -18,7 +18,9 @@ import {
 } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { gateMessage, parseVerify, runGate } from './verify.mjs'
+import { findingsNote, fold, gateMessage, judgeFindings, parseFindings, parseVerify, reviewMessage, runGate } from './verify.mjs'
+
+export { fold }
 
 export const TIERS = ['haiku', 'sonnet', 'opus']
 export const NEXT_TIER = { haiku: 'sonnet', sonnet: 'opus', opus: null }
@@ -363,14 +365,6 @@ export function mergeRouting(defaults, project = null, user = null) {
   }
 }
 
-/** Lowercase and drop diacritics, so "Migração" and "migracao" compare equal. */
-export function fold(text) {
-  return String(text || '')
-    .normalize('NFD')
-    .replace(/[̀-ͯ]/g, '')
-    .toLowerCase()
-}
-
 function matchesAny(text, phrases) {
   const hay = fold(text)
   return (phrases || []).some((phrase) => phrase && hay.includes(fold(phrase)))
@@ -545,6 +539,16 @@ export function stripSpec(text) {
 
 function stripBriefs(text) {
   return stripBlocks(text, { [RESEARCH_BEGIN]: RESEARCH_END, [SPEC_BEGIN]: SPEC_END })
+}
+
+/** The content of the first spec block, '' when the text has none. */
+export function specText(text) {
+  const lines = String(text || '').split(/\n/)
+  const start = lines.findIndex((line) => line.trim() === SPEC_BEGIN)
+  if (start < 0) return ''
+  const rest = lines.slice(start + 1)
+  const end = rest.findIndex((line) => line.trim() === SPEC_END)
+  return (end < 0 ? rest : rest.slice(0, end)).join('\n')
 }
 
 /** Criterion lines of the first spec block: a heading, a bare bullet, or an origin tag alone does not count. */
@@ -1241,9 +1245,27 @@ export function applyEvent(state, event, routing) {
 
   let message
   if (REVIEW_ROLES.has(role)) {
-    const applied = applyReview(tasks, task, current, tier, status, reason, routing, role)
+    // Evidence review: a rejection with no blocking finding approves; with findings, only they reach the writer.
+    const judged = routing.reviewEvidence && event.judged ? event.judged : null
+    let reviewLine = ''
+    let applied
+    if (judged) {
+      meta.review = { blocking: judged.blocking.length, discarded: judged.discarded.length, notes: judged.notes.length, invalid: judged.invalid.length }
+      reviewLine = reviewMessage(task, judged, { failed: status === 'fail' })
+      if (status === 'fail' && judged.blocking.length) {
+        const lines = findingsNote(judged).split('\n')
+        const more = lines.length > 1 ? ` (+${lines.length - 1} more)` : ''
+        applied = applyFailure(tasks, task, current, tier, role, `${lines[0]}${more}`.slice(0, MAX_REASON), routing, lines.length > 1 ? lines.join('\n') : '')
+        meta.reason = `${lines[0]}${more}`.slice(0, MAX_REASON)
+      } else {
+        applied = applyReview(tasks, task, current, tier, 'pass', reason, routing, role)
+        if (status === 'fail') applied.message += ' The rejection had no blocking finding backed by evidence, so it counts as a pass.'
+      }
+    } else {
+      applied = applyReview(tasks, task, current, tier, status, reason, routing, role)
+    }
     meta.outcome = applied.outcome
-    message = applied.message
+    message = reviewLine ? `${reviewLine}\n${applied.message}` : applied.message
     meta.haikuFailure = applied.haikuFailure
     meta.sonnetEscalated = applied.sonnetEscalated === true
   } else if (status === 'pass' && review === 'skip') {
@@ -2239,16 +2261,31 @@ export function withSession(ctx, payload, fn) {
  */
 export function prepareReport(ctx, event, payload = {}) {
   const routing = ctx.routing
-  if (!routing.verify || event?.kind !== 'report') return event
-  if (!WRITER_ROLES.has(event.role) && !SESSION_ROLES.has(event.role)) return event
+  if (event?.kind !== 'report') return event
   const headers = { ...parseHeaders(event.prompt || ''), ...parseHeaders(event.text || '') }
-  if (!slug(headers.TASK || '') || (headers.STATUS || '').toLowerCase() !== 'pass') return event
+  const status = (headers.STATUS || '').toLowerCase()
   const projectDir = ctx.projectDir || String(payload.cwd || '')
+  if (REVIEW_ROLES.has(event.role)) return routing.reviewEvidence ? prepareReview(routing, event, status, projectDir) : event
+  if (!routing.verify) return event
+  if (!WRITER_ROLES.has(event.role) && !SESSION_ROLES.has(event.role)) return event
+  if (!slug(headers.TASK || '') || status !== 'pass') return event
   const options = { projectDir, allow: routing.verifyAllow, timeoutS: routing.verifyTimeout, budgetS: routing.verifyBudget }
   if (projectDir) return { ...event, gate: runGate(event.text, options) }
   // Nothing may run without a project dir; a declaration still tells missing from not validated.
-  const status = parseVerify(event.text).length ? 'unverified' : 'missing'
-  return { ...event, gate: { status, verified: [], flaky: [], unverified: status === 'missing' ? [] : [{ raw: '', reason: 'no project dir' }], failure: null } }
+  const gate = parseVerify(event.text).length ? 'unverified' : 'missing'
+  return { ...event, gate: { status: gate, verified: [], flaky: [], unverified: gate === 'missing' ? [] : [{ raw: '', reason: 'no project dir' }], failure: null } }
+}
+
+/** A reviewer fail is judged finding by finding (commands run here, outside the lock); a pass only keeps its notes. */
+function prepareReview(routing, event, status, projectDir) {
+  if (status !== 'fail' && status !== 'pass') return event
+  let findings = parseFindings(event.text)
+  if (status === 'pass') findings = findings.filter((f) => f.valid && f.severity === 'note')
+  if (!findings.length && status === 'pass') return event
+  const options = { allow: routing.verifyAllow, projectDir, timeoutS: routing.verifyTimeout, budgetS: routing.verifyBudget }
+  // Nothing may run without a project dir: a command finding then stays blocking, unchecked.
+  const judged = judgeFindings(findings, { ...options, specText: specText(event.prompt), run: projectDir ? undefined : () => ({ code: 1 }) })
+  return { ...event, judged }
 }
 
 function parkReport(state, report) {

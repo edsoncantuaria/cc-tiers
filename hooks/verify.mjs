@@ -289,12 +289,12 @@ export function judgeFindings(findings, { specText, allow, projectDir, timeoutS,
 }
 
 /** The two review lines the benchmark greps, plus the notes list. */
-export function reviewMessage(task, judged) {
+export function reviewMessage(task, judged, { failed = false } = {}) {
   const prefix = `cc-tiers review: ${task}`
   const lines = []
   if (judged.discarded.length) lines.push(`${prefix} discarded ${judged.discarded.length} finding(s): the evidence command passed`)
-  const rejected = judged.invalid.length + judged.discarded.length
-  if (!judged.blocking.length && rejected) lines.push(`${prefix} rejected without evidence; ${rejected} finding(s) became notes`)
+  const demoted = judged.invalid.length + judged.discarded.length + judged.notes.length
+  if (failed && !judged.blocking.length) lines.push(`${prefix} rejected without evidence; ${demoted} finding(s) became notes`)
   if (judged.notes.length) {
     lines.push('Notes:')
     for (const note of judged.notes.slice(0, MAX_NOTES)) lines.push(`- ${note.category} @ ${note.where}`)

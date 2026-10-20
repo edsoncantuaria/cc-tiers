@@ -2654,3 +2654,102 @@ test('hooks.json gives the gate 660 s', () => {
   for (const name of ['SessionStart', 'UserPromptSubmit']) assert.equal(events[name][0].hooks[0].timeout, 15, name)
   assert.equal(events.PreToolUse[0].hooks[0].timeout, 15)
 })
+
+function findingBlock(fields) {
+  const base = { category: 'correctness', severity: 'blocking', evidence: 'trace', where: 'src/a.js:1', expected: 'closed', observed: 'stays open' }
+  return ['CC_TIERS_FINDING_BEGIN', ...Object.entries({ ...base, ...fields }).map(([key, value]) => `${key}: ${value}`), 'CC_TIERS_FINDING_END'].join('\n')
+}
+
+const SPEC_PROMPT = 'Review it.\nCC_TIERS_SPEC_BEGIN\nCriteria:\n- the slot is freed\nCC_TIERS_SPEC_END'
+
+/** prepareReport then applyEvent on a task already waiting for review, like the entrypoints do. */
+async function reviewFlow(role, text, { prompt = '', routing = defaultRouting({ specify: 'off', verify: 'off' }), probes = {} } = {}) {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-review-'))
+  try {
+    for (const [name, code] of Object.entries(probes)) writeFileSync(path.join(dir, name), `process.exit(${code})\n`)
+    const ctx = { routing: { ...routing, verifyAllow: [['node', 'ok.mjs'], ['node', 'bad.mjs']] }, projectDir: dir }
+    const state = tiers.emptyState('s')
+    state.tasks = { 'users-pagination': { tier: 'sonnet', failures: [], carried: [] } }
+    const prepared = tiers.prepareReport(ctx, tiers.normalizeEvent(event('r', role, text, prompt)))
+    return { prepared, applied: tiers.applyEvent(state, prepared, ctx.routing) }
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+}
+
+test('specText returns the first spec block', () => {
+  assert.equal(tiers.specText(SPEC_PROMPT), 'Criteria:\n- the slot is freed')
+  assert.equal(tiers.specText('no block here'), '')
+})
+
+test('review fail without evidence is approved with notes', async () => {
+  const text = `${report('reviewer', 'sonnet', 'fail', '', 'looks wrong')}\n${findingBlock({ evidence: 'trace', observed: '' })}\n${findingBlock({ severity: 'note', where: 'src/n.js:2' })}`
+  const { applied } = await reviewFlow('reviewer', text)
+  assert.equal(applied.meta.outcome, 'pass')
+  assert.equal(applied.state.tasks['users-pagination'], undefined)
+  assert.match(applied.message, /^cc-tiers review: users-pagination rejected without evidence; 2 finding\(s\) became notes\n/)
+  assert.match(applied.message, /Notes:\n- correctness @ src\/n\.js:2/)
+  assert.match(applied.message, /passed Opus review/)
+  assert.deepEqual(applied.meta.review, { blocking: 0, discarded: 0, notes: 1, invalid: 1 })
+  const bare = await reviewFlow('reviewer', report('reviewer', 'sonnet', 'fail', '', 'no idea'))
+  assert.equal(bare.applied.meta.outcome, 'pass')
+  assert.match(bare.applied.message, /rejected without evidence; 0 finding\(s\) became notes/)
+})
+
+test('review fail with a failing evidence command counts against the writer tier', async () => {
+  const text = `${report('reviewer', 'sonnet', 'fail', '', 'broken')}\n${findingBlock({ evidence: 'command', command: 'node bad.mjs' })}`
+  const { applied } = await reviewFlow('reviewer', text, { probes: { 'bad.mjs': 1 } })
+  assert.equal(applied.meta.outcome, 'retry')
+  assert.deepEqual(applied.meta.review, { blocking: 1, discarded: 0, notes: 0, invalid: 0 })
+  assert.deepEqual(applied.state.tasks['users-pagination'].failures, ['sonnet/reviewer: correctness @ src/a.js:1: closed / stays open'])
+  const many = `${text}\n${findingBlock({ where: 'src/b.js:2' })}`
+  const two = await reviewFlow('reviewer', many, { probes: { 'bad.mjs': 1 } })
+  const failure = two.applied.state.tasks['users-pagination'].failures[0]
+  assert.match(failure, /^sonnet\/reviewer: correctness @ src\/a\.js:1: closed \/ stays open \(\+1 more\)\ncorrectness @ src\/a\.js:1: .*\ncorrectness @ src\/b\.js:2: /)
+})
+
+test('discarded finding is reported', async () => {
+  const text = `${report('reviewer', 'sonnet', 'fail', '', 'broken')}\n${findingBlock({ evidence: 'command', command: 'node ok.mjs' })}`
+  const { applied } = await reviewFlow('reviewer', text, { probes: { 'ok.mjs': 0 } })
+  assert.equal(applied.meta.outcome, 'pass')
+  assert.match(applied.message, /^cc-tiers review: users-pagination discarded 1 finding\(s\): the evidence command passed\ncc-tiers review: users-pagination rejected without evidence; 1 finding\(s\) became notes\n/)
+  assert.equal(applied.meta.review.discarded, 1)
+})
+
+test('coverage finding counts only with the criterion in the spec block', async () => {
+  const finding = findingBlock({ evidence: 'coverage', criterion: 'the slot is freed', expected: '', observed: '' })
+  const text = `${report('reviewer', 'sonnet', 'fail', '', 'gap')}\n${finding}`
+  const listed = await reviewFlow('reviewer', text, { prompt: SPEC_PROMPT })
+  assert.equal(listed.applied.meta.outcome, 'retry')
+  const unlisted = await reviewFlow('reviewer', text.replace('the slot is freed', 'something else'), { prompt: SPEC_PROMPT })
+  assert.equal(unlisted.applied.meta.outcome, 'pass')
+  const noSpec = await reviewFlow('reviewer', text)
+  assert.equal(noSpec.applied.meta.outcome, 'pass')
+})
+
+test('checker follows the same rule', async () => {
+  const none = await reviewFlow('checker', report('checker', 'haiku', 'fail', '', 'nope'))
+  assert.equal(none.applied.meta.outcome, 'pass')
+  assert.match(none.applied.message, /passed Sonnet review/)
+  const blocking = await reviewFlow('checker', `${report('checker', 'haiku', 'fail', '', 'nope')}\n${findingBlock({})}`)
+  assert.equal(blocking.applied.meta.outcome, 'retry')
+})
+
+test('review pass keeps its note findings', async () => {
+  const text = `${report('reviewer', 'sonnet', 'pass')}\n${findingBlock({ severity: 'note', where: 'src/n.js:2' })}\n${findingBlock({ where: 'src/b.js:1' })}`
+  const { applied } = await reviewFlow('reviewer', text)
+  assert.equal(applied.meta.outcome, 'pass')
+  assert.doesNotMatch(applied.message, /rejected without evidence/)
+  assert.match(applied.message, /^Notes:\n- correctness @ src\/n\.js:2\n/)
+  assert.deepEqual(applied.meta.review, { blocking: 0, discarded: 0, notes: 1, invalid: 0 })
+})
+
+test('review_evidence off keeps 0.6 behavior', async () => {
+  const routing = defaultRouting({ specify: 'off', verify: 'off', review_evidence: 'off' })
+  const text = `${report('reviewer', 'sonnet', 'fail', '', 'cursor is not validated')}\n${findingBlock({ severity: 'note' })}`
+  const { prepared, applied } = await reviewFlow('reviewer', text, { routing })
+  assert.equal(prepared.judged, undefined)
+  assert.equal(applied.meta.outcome, 'retry')
+  assert.equal(applied.meta.review, undefined)
+  assert.equal(applied.message.includes('cc-tiers review'), false)
+})
