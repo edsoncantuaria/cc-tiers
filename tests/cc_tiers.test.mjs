@@ -1676,6 +1676,11 @@ test('the benchmark sees inline work that only changed the workspace tree', asyn
   assert.deepEqual(inlineSteps(delegated, true), delegated)
   const edited = [{ agent: 'inline', task: '' }]
   assert.deepEqual(inlineSteps(edited, true), edited)
+  for (const [agent, tier] of [['general-purpose', 'general-purpose'], ['cc-tiers:orchestrator', 'opus']]) {
+    const steps = inlineSteps([{ agent: 'cc-tiers:reviewer', task: '' }, { agent, task: 'csv' }], true)
+    assert.equal(routing('normal', steps, 'sonnet').path, `${tier} (+ Opus review)`, agent)
+  }
+  assert.equal(routing('normal', inlineSteps([{ agent: 'Explore', task: '' }], true), 'sonnet').path, 'inline sonnet')
 })
 
 test('a run with no JSON has no token count', async () => {

@@ -218,8 +218,10 @@ const ROLE_TIER = {
   'cc-tiers:checker': 'sonnet',
   'cc-tiers:reviewer': 'opus',
   'cc-tiers:planner': 'opus',
+  'cc-tiers:orchestrator': 'opus',
 }
 const WRITERS = new Set(['cc-tiers:worker', 'cc-tiers:implementer', 'cc-tiers:architect'])
+const READ_ONLY = new Set(['cc-tiers:reviewer', 'cc-tiers:checker', 'cc-tiers:researcher', 'cc-tiers:planner', 'Explore', 'Plan'])
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
 
 /**
@@ -249,10 +251,14 @@ export function routeIn(lines, from = 0) {
   return steps
 }
 
-/** Files changed with no writer delegation and no Edit/Write step: the session wrote them itself, through Bash. */
+/**
+ * Files changed with no writer delegation and no Edit/Write step: someone wrote them through Bash.
+ * The last delegation that is not read-only gets the credit (`by`); with none, the session did.
+ */
 export function inlineSteps(steps, changed) {
   if (!changed || steps.some((step) => step.agent === 'inline' || WRITERS.has(step.agent))) return steps
-  return [...steps, { agent: 'inline', task: '' }]
+  const by = steps.findLast((step) => step.agent !== 'inline' && !READ_ONLY.has(step.agent))?.agent
+  return [...steps, { agent: 'inline', task: '', ...(by && { by }) }]
 }
 
 /**
@@ -264,7 +270,7 @@ export function inlineSteps(steps, changed) {
 export function routing(kind, steps, sessionTier) {
   const writers = steps
     .filter((step) => step.agent === 'inline' || WRITERS.has(step.agent))
-    .map((step) => (step.agent === 'inline' ? `inline ${sessionTier}` : ROLE_TIER[step.agent]))
+    .map((step) => (step.agent !== 'inline' ? ROLE_TIER[step.agent] : step.by ? ROLE_TIER[step.by] || step.by : `inline ${sessionTier}`))
   const first = writers[0] || 'none'
   const tierOf = (writer) => writer.replace('inline ', '')
   const path = [...new Set(writers)].join(' -> ') || 'none'
