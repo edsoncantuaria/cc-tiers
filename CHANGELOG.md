@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.8.0 - 2026-10-20
+
+### Added
+
+- `hard_start` option (`opus` / `sonnet`, default `opus`). A hard task starts on Opus: one that matches an Opus review keyword (auth, payments, migrations, schema, security, concurrency, plus `risky_extra`), or that needs an architecture decision with trade-offs, a bug fix with no clear reproduction or across modules, or an investigation with competing hypotheses. The orchestrator implements it with the Opus attempt trailer, and in light mode the dispatcher sends it to `cc-tiers:architect`; research, the spec, the verify gate, and the Opus review still apply. While budget routing conserves, it starts on Sonnet one effort level up.
+- `decideTier` and `/cc-tiers:route` return `because: hard` for such a task. The PreToolUse hook adds a routing hint when one goes to the worker or the implementer.
+
+### Changed
+
+- Under the default `hard_start: opus`, a task that matches a review keyword no longer starts on Sonnet. `hard_start: sonnet` restores 0.7.
+- The planner may now give a task the `opus` tier.
+
 ## 0.7.0 - 2026-10-20
 
 ### Added

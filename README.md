@@ -1,8 +1,8 @@
 # 🎚️ cc-tiers
 
-### Opus plans and reviews. Sonnet builds. Haiku does the small stuff.
+### Opus plans, reviews, and builds the hard parts. Sonnet builds the rest. Haiku does the small stuff.
 
-A Claude Code plugin for Pro and Max subscribers who want work done right the first time. The point is your time and the code, not tokens. You make a short request and do not write the spec: cc-tiers researches the project and writes the acceptance criteria itself. The code follows the docs of the version you have installed and the conventions of your own project, reuses what already exists, and stays inside the task, without you asking for clean code or writing rules for it. The hooks re-run the tests before a pass counts, and a review counts only with a reproduced defect, so you do not have to ask again. Each task goes to the model it needs: Haiku for the simple stuff, Sonnet for normal work, Opus to plan, review, and take what Sonnet could not finish, so Opus is not spent on a typo. On the clock a run takes longer than plain Opus; the [benchmark](#-benchmark) measures whether the result is better.
+A Claude Code plugin for Pro and Max subscribers who want work done right the first time. The point is your time and the code, not tokens. You make a short request and do not write the spec: cc-tiers researches the project and writes the acceptance criteria itself. The code follows the docs of the version you have installed and the conventions of your own project, reuses what already exists, and stays inside the task, without you asking for clean code or writing rules for it. The hooks re-run the tests before a pass counts, and a review counts only with a reproduced defect, so you do not have to ask again. Each task goes to the model it needs: Haiku for the simple stuff, Sonnet for normal work, Opus to plan, review, build the hard tasks (auth, payments, migrations, concurrency, architecture), and take what Sonnet could not finish, so Opus is not spent on a typo. On the clock a run takes longer than plain Opus; the [benchmark](#-benchmark) measures whether the result is better.
 
 [![Claude Code](https://img.shields.io/badge/Claude_Code-2.1.295%2B-d97757?style=for-the-badge&logo=anthropic&logoColor=white)](https://claude.com/claude-code)
 [![Plugin](https://img.shields.io/badge/type-plugin-8a63d2?style=for-the-badge)](#-install)
@@ -38,7 +38,7 @@ claude --plugin-dir /path/to/cc-tiers
 
 | Tier | Agent | Model | Does |
 | :-: | --- | --- | --- |
-| Plan | `cc-tiers:orchestrator` | Opus | Splits the request, delegates, and implements only the ceiling |
+| Plan | `cc-tiers:orchestrator` | Opus | Splits the request, delegates, and implements hard tasks and the ceiling |
 | Research | `cc-tiers:researcher` | Sonnet | Finds the installed version, that version's docs, existing usage, reusable code, and conventions before code is written. Does not edit |
 | Default | `cc-tiers:implementer` | Sonnet | Features, bug fixes, tests, local refactors |
 | Trivial | `cc-tiers:worker` | Haiku | Renames, typos, formatting, lookups, simple searches, ~15-line edits |
@@ -46,7 +46,7 @@ claude --plugin-dir /path/to/cc-tiers
 | Review | `cc-tiers:reviewer` | Opus | A fresh pass over risky or non-trivial work. Does not edit |
 | Light mode | `cc-tiers:dispatcher` | Sonnet | Optional session agent for when the window is tight: it routes on Sonnet and calls Opus only when needed |
 | Light plan | `cc-tiers:planner` | Opus | Plans a multi-task request for the dispatcher. Does not edit |
-| Light ceiling | `cc-tiers:architect` | Opus | Implements the ceiling for the dispatcher |
+| Light ceiling | `cc-tiers:architect` | Opus | Implements hard tasks and the ceiling for the dispatcher |
 
 While the plugin is enabled, `settings.json` sets the session agent to `orchestrator`. Your own `agent` in `~/.claude/settings.json` still wins. If you override it, `/cc-tiers:tiers` runs the same workflow.
 
@@ -56,12 +56,14 @@ The agents pin `model: haiku`, `sonnet`, or `opus`. The orchestrator does not pa
 flowchart LR
     A[Opus orchestrator] --> B{Task}
     B -- trivial --> C[Haiku worker]
-    B -- normal --> R[Sonnet researcher]
+    B -- normal or hard --> R[Sonnet researcher]
     R -- brief --> D[Sonnet implementer]
+    R -- brief, hard --> E
     C -- fail twice --> D
     D -- fail twice --> E[Opus implements]
     C -- pass --> V{Verify gate}
     D -- pass --> V
+    E -- pass --> V
     V -- command fails --> C
     V -- command fails --> D
     V -- verified --> H[Sonnet checker]
@@ -196,6 +198,8 @@ A failure is a failed test, a rejected review, or a subagent error. The task may
 
 **Haiku → Sonnet → Opus**
 
+**Hard tasks start on Opus** (`hard_start: opus`, the default). A task that matches an Opus review keyword (auth, payments, migrations, schema, security, concurrency, plus `risky_extra`), or that needs an architecture decision with trade-offs, a bug fix with no clear reproduction or across modules, or an investigation with competing hypotheses, skips Sonnet. It still gets research, the spec, the verify gate, and the Opus review. The orchestrator implements it (in light mode, `cc-tiers:architect`), and if the Opus attempts fail it stops and tells you. While budget routing conserves, it starts on Sonnet one effort level up. `hard_start: sonnet` restores the 0.7 behavior: Opus implements only what Sonnet could not finish.
+
 The new tier starts at zero. Opus is the last stop: the orchestrator does that work itself, and if those attempts fail too it stops and tells you. A review rejection counts against the tier that wrote the diff, not against the checker or the reviewer. Budget routing does not block this ceiling.
 
 A hook on the Agent tool keeps the counter. When it reports `cc-tiers counted a failure`, that count is the one the orchestrator follows.
@@ -224,7 +228,7 @@ Each tier also has an effort ladder. A retry at the same tier runs one effort le
 | Sonnet | `high` | `xhigh` | `xhigh` |
 | Opus (`cc-tiers:architect`) | `high` | `xhigh` | `xhigh` |
 
-The PreToolUse hook sets `effort` on the Agent call (Claude Code's per-call `effort`, 2.1.292+), so the orchestrator cannot forget it. It may ask for a higher level, never a lower one, and never above the top of the ladder. A risky Sonnet task, one that matches a review keyword, starts at `xhigh`. While budget routing is conserving, effort stops at `high`. When the Opus orchestrator implements the ceiling itself, it keeps its own session effort. `CLAUDE_CODE_EFFORT_LEVEL`, when set, wins over all of this.
+The PreToolUse hook sets `effort` on the Agent call (Claude Code's per-call `effort`, 2.1.292+), so the orchestrator cannot forget it. It may ask for a higher level, never a lower one, and never above the top of the ladder. A risky task, one that matches a review keyword, starts one level up: on Sonnet (`hard_start: sonnet`, or while conserving) at `xhigh`, and on `cc-tiers:architect` at `xhigh` too. While budget routing is conserving, effort stops at `high`. When the Opus orchestrator implements the ceiling itself, it keeps its own session effort. `CLAUDE_CODE_EFFORT_LEVEL`, when set, wins over all of this.
 
 `effort_ladder: off` leaves each agent at the effort its file pins. A project can replace a ladder in `.claude/cc-tiers.json` with `effort.haiku`, `effort.sonnet`, `effort.opus`, and `effort.conserveCap`.
 
@@ -245,7 +249,7 @@ The keyword lists are a first guess. Two checks stand behind them before a task 
 Plan, research, and review in separate contexts use more of your window than one thread. Light mode is for when the window is tight. The Opus orchestrator reads every request, even a typo fix, and every subagent starts a fresh context, so for a small task that overhead can cost more than the task. Two things cut it:
 
 - **Light path** (`light_path: inline`, the default). When a request is one trivial task, the UserPromptSubmit hook tells the session agent to do it itself: no plan, no worker, no checker. `delegate` sends it to the worker in one call instead (the 0.4 behavior), and `off` plans every request.
-- **Light mode**, the `cc-tiers:dispatcher` session agent on Sonnet. It does one ordinary task itself, marking the attempt with a `CC_TIERS_ROLE: dispatcher` trailer that the hooks count, so two failures still move it to Opus. It calls Opus only for three things: `cc-tiers:planner` for a request with more than one task or a design decision, `cc-tiers:architect` for a task that used its attempts on Sonnet, and `cc-tiers:reviewer` for risky work.
+- **Light mode**, the `cc-tiers:dispatcher` session agent on Sonnet. It does one ordinary task itself, marking the attempt with a `CC_TIERS_ROLE: dispatcher` trailer that the hooks count, so two failures still move it to Opus. It calls Opus only for three things: `cc-tiers:planner` for a request with more than one task or a design decision, `cc-tiers:architect` for a hard task or one that used its attempts on Sonnet, and `cc-tiers:reviewer` for risky work.
 
 Turn on light mode for one session with `claude --agent cc-tiers:dispatcher`, or for good with `"agent": "cc-tiers:dispatcher"` in `~/.claude/settings.json`. The planner starts in a fresh context, so for a long conversation that keeps building on earlier turns, the orchestrator is the better fit.
 
@@ -284,7 +288,7 @@ The advisor's tokens count toward `/usage`. cc-tiers does not see them per task,
 
 ## 🧠 Learning from Haiku and Sonnet
 
-With `learn` set to `on` (the default), a Haiku failure is appended to `.claude/cc-tiers-history.json` in the project. The next task with the same slug, or enough of the same words, starts on Sonnet instead of Haiku. A task that used its attempts on Sonnet is recorded too, and a similar task later starts on Sonnet at the top of its effort ladder (`xhigh`) instead of climbing it again. Opus still never starts a task. Words are compared without accents, so `migração` and `migracao` match. `off` writes nothing and ignores the file.
+With `learn` set to `on` (the default), a Haiku failure is appended to `.claude/cc-tiers-history.json` in the project. The next task with the same slug, or enough of the same words, starts on Sonnet instead of Haiku. A task that used its attempts on Sonnet is recorded too, and a similar task later starts on Sonnet at the top of its effort ladder (`xhigh`) instead of climbing it again. Opus starts only hard tasks (`hard_start`). Words are compared without accents, so `migração` and `migracao` match. `off` writes nothing and ignores the file.
 
 The first write adds the file to `.git/info/exclude` when the project is a git checkout (worktrees included), so it stays out of git without touching your tracked `.gitignore`. The plugin repo ignores that path too.
 
@@ -335,6 +339,7 @@ Open `/config` and set the cc-tiers rows. They apply on the next session (the Se
 | `effort_ladder` | `on` | Raise effort on a retry before changing model. `off` keeps each agent's own effort |
 | `classifier` | `haiku` | `haiku` adds the Haiku check on worker calls. `local` uses only keywords and the complexity score |
 | `light_path` | `inline` | One trivial task: `inline` does it in the session, `delegate` sends it to the worker, `off` plans it |
+| `hard_start` | `opus` | Where a hard task (review keyword, architecture, unclear bug) starts: `opus`, or `sonnet` to implement on Opus only after Sonnet fails |
 | `show_cost` | `off` | `on` shows the estimated cost of each task and the session next to Opus rates |
 | `research` | `on` | Require a researcher brief, or a `none - <reason>` line, before code goes to the implementer or the architect. `off` removes the step |
 | `specify` | `on` | Require acceptance criteria, or a `CC_TIERS_SPEC: none - <reason>` line, before code goes to the implementer or the architect, and let the orchestrator ask what changes the result. `off` removes the step |

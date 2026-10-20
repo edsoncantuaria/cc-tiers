@@ -1,8 +1,8 @@
 # 🎚️ cc-tiers
 
-### O Opus planeja e revisa. O Sonnet constrói. O Haiku faz o simples.
+### O Opus planeja, revisa e constrói o difícil. O Sonnet constrói o resto. O Haiku faz o simples.
 
-Um plugin do Claude Code para assinantes Pro e Max que querem o trabalho certo da primeira vez. O ponto é o seu tempo e o código, não tokens. Você faz um pedido curto e não escreve a spec: o cc-tiers pesquisa o projeto e escreve os critérios de aceite sozinho. O código segue a documentação da versão instalada e as convenções do seu próprio projeto, reaproveita o que já existe e fica dentro da tarefa, sem você precisar pedir código limpo nem escrever regras para isso. Os hooks rodam os testes de novo antes de um pass valer, e uma revisão só conta com um defeito reproduzido, então você não precisa pedir de novo. Cada tarefa vai para o modelo de que precisa: Haiku para o simples, Sonnet para o trabalho normal, Opus para planejar, revisar e pegar o que o Sonnet não terminou, para o Opus não ser gasto num typo. No relógio, uma execução demora mais que o Opus sozinho; o [benchmark](#-benchmark) mede se o resultado sai melhor.
+Um plugin do Claude Code para assinantes Pro e Max que querem o trabalho certo da primeira vez. O ponto é o seu tempo e o código, não tokens. Você faz um pedido curto e não escreve a spec: o cc-tiers pesquisa o projeto e escreve os critérios de aceite sozinho. O código segue a documentação da versão instalada e as convenções do seu próprio projeto, reaproveita o que já existe e fica dentro da tarefa, sem você precisar pedir código limpo nem escrever regras para isso. Os hooks rodam os testes de novo antes de um pass valer, e uma revisão só conta com um defeito reproduzido, então você não precisa pedir de novo. Cada tarefa vai para o modelo de que precisa: Haiku para o simples, Sonnet para o trabalho normal, Opus para planejar, revisar, construir as tarefas difíceis (auth, pagamento, migration, concorrência, arquitetura) e pegar o que o Sonnet não terminou, para o Opus não ser gasto num typo. No relógio, uma execução demora mais que o Opus sozinho; o [benchmark](#-benchmark) mede se o resultado sai melhor.
 
 [![Claude Code](https://img.shields.io/badge/Claude_Code-2.1.295%2B-d97757?style=for-the-badge&logo=anthropic&logoColor=white)](https://claude.com/claude-code)
 [![Plugin](https://img.shields.io/badge/tipo-plugin-8a63d2?style=for-the-badge)](#-instala%C3%A7%C3%A3o)
@@ -38,7 +38,7 @@ claude --plugin-dir /caminho/para/cc-tiers
 
 | Nível | Agente | Modelo | Faz |
 | :-: | --- | --- | --- |
-| Plano | `cc-tiers:orchestrator` | Opus | Divide o pedido, delega e só implementa o teto |
+| Plano | `cc-tiers:orchestrator` | Opus | Divide o pedido, delega e implementa as tarefas difíceis e o teto |
 | Pesquisa | `cc-tiers:researcher` | Sonnet | Acha a versão instalada, a documentação dessa versão, o uso existente, o código reaproveitável e as convenções antes de o código ser escrito. Não edita |
 | Padrão | `cc-tiers:implementer` | Sonnet | Features, bugs, testes, refactors locais |
 | Miúdo | `cc-tiers:worker` | Haiku | Renomear, typos, formatação, buscas simples, edições de ~15 linhas |
@@ -46,7 +46,7 @@ claude --plugin-dir /caminho/para/cc-tiers
 | Revisão | `cc-tiers:reviewer` | Opus | Uma passada nova sobre trabalho arriscado ou não trivial. Não edita |
 | Modo leve | `cc-tiers:dispatcher` | Sonnet | Agente de sessão opcional para quando a janela está apertada: encaminha no Sonnet e só chama o Opus quando precisa |
 | Plano leve | `cc-tiers:planner` | Opus | Planeja um pedido com várias tarefas para o dispatcher. Não edita |
-| Teto leve | `cc-tiers:architect` | Opus | Implementa o teto para o dispatcher |
+| Teto leve | `cc-tiers:architect` | Opus | Implementa as tarefas difíceis e o teto para o dispatcher |
 
 Com o plugin ativo, o `settings.json` define o agente da sessão como `orchestrator`. O seu `agent` em `~/.claude/settings.json` continua valendo. Se você substituir, `/cc-tiers:tiers` roda o mesmo fluxo.
 
@@ -56,12 +56,14 @@ Os agentes fixam `model: haiku`, `sonnet` ou `opus`. O orquestrador não passa m
 flowchart LR
     A[Orquestrador Opus] --> B{Tarefa}
     B -- miúda --> C[Worker Haiku]
-    B -- normal --> R[Researcher Sonnet]
+    B -- normal ou difícil --> R[Researcher Sonnet]
     R -- briefing --> D[Implementer Sonnet]
+    R -- briefing, difícil --> E
     C -- falha duas vezes --> D
     D -- falha duas vezes --> E[Opus implementa]
     C -- passa --> V{Gate de verificação}
     D -- passa --> V
+    E -- passa --> V
     V -- comando falha --> C
     V -- comando falha --> D
     V -- verificado --> H[Checker Sonnet]
@@ -196,6 +198,8 @@ Falha é teste que quebrou, revisão rejeitada ou erro do subagente. A tarefa po
 
 **Haiku → Sonnet → Opus**
 
+**Tarefa difícil começa no Opus** (`hard_start: opus`, o padrão). Uma tarefa que bate numa palavra-chave de revisão do Opus (auth, pagamento, migration, schema, segurança, concorrência, mais o `risky_extra`), ou que pede uma decisão de arquitetura com trade-offs, um bug sem reprodução clara ou que atravessa módulos, ou uma investigação com hipóteses concorrentes, pula o Sonnet. Ela continua com pesquisa, spec, gate de verificação e revisão do Opus. O orquestrador implementa (no modo leve, o `cc-tiers:architect`), e se as tentativas no Opus falharem ele para e te conta. Enquanto o orçamento está economizando, ela começa no Sonnet um nível de effort acima. `hard_start: sonnet` volta ao comportamento da 0.7: o Opus só implementa o que o Sonnet não terminou.
+
 O nível novo começa do zero. O Opus é o último degrau: o orquestrador faz esse trabalho e, se essas tentativas também falharem, ele para e te conta. Rejeição de revisão conta contra o nível que escreveu o diff, não contra o checker nem contra o revisor. O roteamento de orçamento não bloqueia esse teto.
 
 Um hook na ferramenta Agent guarda o contador. Quando ele diz `cc-tiers counted a failure`, essa contagem é a que o orquestrador segue.
@@ -224,7 +228,7 @@ Cada nível também tem uma escada de effort. Uma nova tentativa no mesmo nível
 | Sonnet | `high` | `xhigh` | `xhigh` |
 | Opus (`cc-tiers:architect`) | `high` | `xhigh` | `xhigh` |
 
-O hook PreToolUse define o `effort` na chamada Agent (o `effort` por chamada do Claude Code, 2.1.292+), então o orquestrador não tem como esquecer. Ele pode pedir um nível mais alto, nunca um mais baixo, e nunca acima do topo da escada. Uma tarefa arriscada do Sonnet, que bate numa palavra-chave de revisão, começa em `xhigh`. Enquanto o orçamento está economizando, o effort para em `high`. Quando o orquestrador Opus implementa o teto ele mesmo, ele mantém o effort da própria sessão. `CLAUDE_CODE_EFFORT_LEVEL`, quando definido, ganha de tudo isso.
+O hook PreToolUse define o `effort` na chamada Agent (o `effort` por chamada do Claude Code, 2.1.292+), então o orquestrador não tem como esquecer. Ele pode pedir um nível mais alto, nunca um mais baixo, e nunca acima do topo da escada. Uma tarefa arriscada, que bate numa palavra-chave de revisão, começa um nível acima: no Sonnet (`hard_start: sonnet`, ou economizando) em `xhigh`, e no `cc-tiers:architect` também em `xhigh`. Enquanto o orçamento está economizando, o effort para em `high`. Quando o orquestrador Opus implementa o teto ele mesmo, ele mantém o effort da própria sessão. `CLAUDE_CODE_EFFORT_LEVEL`, quando definido, ganha de tudo isso.
 
 `effort_ladder: off` deixa cada agente no effort que o arquivo dele fixa. Um projeto pode trocar uma escada em `.claude/cc-tiers.json` com `effort.haiku`, `effort.sonnet`, `effort.opus` e `effort.conserveCap`.
 
@@ -245,7 +249,7 @@ As listas de palavras-chave são um primeiro palpite. Duas checagens ficam atrá
 Plano, pesquisa e revisão em contextos separados gastam mais da sua janela que uma thread só. O modo leve é para quando a janela está apertada. O orquestrador Opus lê todo pedido, até uma correção de typo, e todo subagente começa num contexto novo, então numa tarefa pequena esse custo fixo pode sair mais caro que a tarefa. Duas coisas cortam isso:
 
 - **Caminho leve** (`light_path: inline`, o padrão). Quando um pedido é uma tarefa miúda só, o hook UserPromptSubmit diz ao agente da sessão para fazer ele mesmo: sem plano, sem worker, sem checker. `delegate` manda para o worker numa chamada (o comportamento da 0.4), e `off` planeja todo pedido.
-- **Modo leve**, o agente de sessão `cc-tiers:dispatcher` no Sonnet. Ele faz sozinho uma tarefa comum, marcando a tentativa com um trailer `CC_TIERS_ROLE: dispatcher` que os hooks contam, então duas falhas ainda levam a tarefa para o Opus. Ele só chama o Opus para três coisas: `cc-tiers:planner` para um pedido com mais de uma tarefa ou uma decisão de design, `cc-tiers:architect` para uma tarefa que esgotou as tentativas no Sonnet, e `cc-tiers:reviewer` para trabalho arriscado.
+- **Modo leve**, o agente de sessão `cc-tiers:dispatcher` no Sonnet. Ele faz sozinho uma tarefa comum, marcando a tentativa com um trailer `CC_TIERS_ROLE: dispatcher` que os hooks contam, então duas falhas ainda levam a tarefa para o Opus. Ele só chama o Opus para três coisas: `cc-tiers:planner` para um pedido com mais de uma tarefa ou uma decisão de design, `cc-tiers:architect` para uma tarefa difícil ou que esgotou as tentativas no Sonnet, e `cc-tiers:reviewer` para trabalho arriscado.
 
 Ligue o modo leve numa sessão com `claude --agent cc-tiers:dispatcher`, ou de vez com `"agent": "cc-tiers:dispatcher"` em `~/.claude/settings.json`. O planner começa num contexto novo, então para uma conversa longa que vai construindo em cima dos turnos anteriores, o orquestrador é a escolha melhor.
 
@@ -284,7 +288,7 @@ Os tokens do advisor entram no `/usage`. O cc-tiers não enxerga esses tokens po
 
 ## 🧠 Aprendendo com o Haiku e o Sonnet
 
-Com `learn` em `on` (o padrão), uma falha do Haiku vai para `.claude/cc-tiers-history.json` no projeto. A tarefa seguinte com o mesmo slug, ou palavras suficientes em comum, começa no Sonnet em vez do Haiku. Uma tarefa que esgotou as tentativas no Sonnet também é gravada, e uma parecida depois começa no Sonnet já no topo da escada de effort (`xhigh`), em vez de subir tudo de novo. O Opus continua nunca começando uma tarefa. As palavras são comparadas sem acento, então `migração` e `migracao` casam. `off` não grava nada e ignora o arquivo.
+Com `learn` em `on` (o padrão), uma falha do Haiku vai para `.claude/cc-tiers-history.json` no projeto. A tarefa seguinte com o mesmo slug, ou palavras suficientes em comum, começa no Sonnet em vez do Haiku. Uma tarefa que esgotou as tentativas no Sonnet também é gravada, e uma parecida depois começa no Sonnet já no topo da escada de effort (`xhigh`), em vez de subir tudo de novo. O Opus só começa tarefas difíceis (`hard_start`). As palavras são comparadas sem acento, então `migração` e `migracao` casam. `off` não grava nada e ignora o arquivo.
 
 A primeira gravação adiciona o arquivo ao `.git/info/exclude` quando o projeto é um checkout git (worktrees incluídas), então ele fica fora do git sem mexer no `.gitignore` versionado. O repositório do plugin também ignora esse caminho.
 
@@ -335,6 +339,7 @@ Abra `/config` e ajuste as linhas do cc-tiers. Valem na sessão seguinte (o hook
 | `effort_ladder` | `on` | Sobe o effort numa nova tentativa antes de trocar de modelo. `off` mantém o effort de cada agente |
 | `classifier` | `haiku` | `haiku` adiciona a checagem do Haiku nas chamadas ao worker. `local` usa só palavras-chave e a pontuação de complexidade |
 | `light_path` | `inline` | Uma tarefa miúda: `inline` faz na sessão, `delegate` manda para o worker, `off` planeja |
+| `hard_start` | `opus` | Onde começa a tarefa difícil (palavra-chave de revisão, arquitetura, bug sem reprodução): `opus`, ou `sonnet` para o Opus implementar só depois que o Sonnet falhar |
 | `show_cost` | `off` | `on` mostra o custo estimado de cada tarefa e da sessão ao lado do preço do Opus |
 | `research` | `on` | Exige um briefing do pesquisador, ou uma linha `none - <motivo>`, antes de o código ir para o implementer ou o architect. `off` tira o passo |
 | `specify` | `on` | Exige critérios de aceite, ou uma linha `CC_TIERS_SPEC: none - <motivo>`, antes de o código ir para o implementer ou o architect, e deixa o orquestrador perguntar o que muda o resultado. `off` tira o passo |
