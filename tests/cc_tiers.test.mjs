@@ -1967,7 +1967,7 @@ test('the calculator check ignores eval in comments and strings but catches a re
   }
 })
 
-test('a slug named like an Object.prototype key works through every per-slug map', () => {
+test('a slug named like an Object.prototype key works through every per-slug map', async () => {
   const routing = riskyRouting()
   const task = 'constructor'
   const trailer = (role, status) => `ok\nCC_TIERS_TASK: ${task}\nCC_TIERS_TIER: sonnet\nCC_TIERS_ROLE: ${role}\nCC_TIERS_STATUS: ${status}\n`
@@ -1984,4 +1984,16 @@ test('a slug named like an Object.prototype key works through every per-slug map
   for (const map of ['log', 'cost', 'spend']) assert.ok(Object.hasOwn(reviewed.state[map], task), map)
   assert.equal(reviewed.state.cost[task].sonnet, 1)
   assert.equal(reviewed.state.spend[task].sonnet, 10)
+  assert.equal(Object.haiku, undefined)
+  tiers.mergeCost(reviewed.state.cost, { [task]: { haiku: 1 } })
+  assert.equal(reviewed.state.cost[task].haiku, 1)
+  const ctx = { routing, ccCost: false, projectDir: '' }
+  const fresh = tiers.emptyState('s')
+  tiers.processReport(ctx, fresh, tiers.normalizeEvent(event('r9', 'researcher', 'CC_TIERS_STATUS: pass', `CC_TIERS_TASK: ${task}\nx`)), { key: 'r9', cost: { haiku: 0.5, opusRate: 1 } })
+  assert.ok(Object.hasOwn(fresh.cost, task))
+  assert.equal(Object.haiku, undefined)
+  const { renderReport } = await import(pathToFileURL(path.join(ROOT, 'hooks', 'report.mjs')).href)
+  const text = renderReport([JSON.parse(JSON.stringify(reviewed.state))])
+  assert.match(text, /\| constructor \|/)
+  assert.equal(Object.haiku, undefined)
 })

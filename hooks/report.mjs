@@ -9,7 +9,7 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { OVERHEAD, TIERS, costSummary, costTotal, dollars, formatSpend } from './cc_tiers.mjs'
+import { OVERHEAD, TIERS, costSummary, costTotal, dollars, formatSpend, own } from './cc_tiers.mjs'
 
 function readState(file) {
   try {
@@ -39,12 +39,12 @@ export function renderReport(states) {
   for (const state of states) {
     for (const [task, entry] of Object.entries(state.log || {})) log[task] = entry
     for (const [task, row] of Object.entries(state.cost || {})) {
-      const current = cost[task] || { haiku: 0, sonnet: 0, opus: 0, opusRate: 0 }
+      const current = own(cost, task) || { haiku: 0, sonnet: 0, opus: 0, opusRate: 0 }
       for (const key of [...TIERS, 'opusRate']) current[key] += Number(row?.[key]) || 0
       cost[task] = current
     }
     for (const [task, row] of Object.entries(state.spend || {})) {
-      const current = spend[task] || { haiku: 0, sonnet: 0, opus: 0 }
+      const current = own(spend, task) || { haiku: 0, sonnet: 0, opus: 0 }
       for (const tier of TIERS) current[tier] += Number(row?.[tier]) || 0
       spend[task] = current
     }
@@ -57,8 +57,8 @@ export function renderReport(states) {
     '| --- | --- | --: | --: | --- | --- | --- | --: | --: |',
   ]
   for (const task of tasks) {
-    const entry = log[task] || {}
-    const row = cost[task]
+    const entry = own(log, task) || {}
+    const row = own(cost, task)
     const effort = Object.entries(entry.effort || {})
       .map(([tier, level]) => `${tier} ${level}`)
       .join(', ')

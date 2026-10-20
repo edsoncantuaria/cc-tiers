@@ -793,7 +793,7 @@ function freshCursor() {
 }
 
 /** Per-slug maps are plain objects: a slug like `constructor` must not read an inherited property. */
-const own = (map, key) => (map && Object.hasOwn(map, key) ? map[key] : undefined)
+export const own = (map, key) => (map && Object.hasOwn(map, key) ? map[key] : undefined)
 
 export function emptyState(sessionId) {
   return {
@@ -1571,7 +1571,7 @@ export function addCost(cost, task, entry) {
 
 export function mergeCost(target, delta) {
   for (const [task, row] of Object.entries(delta || {})) {
-    const current = target[task] || { haiku: 0, sonnet: 0, opus: 0, opusRate: 0 }
+    const current = own(target, task) || { haiku: 0, sonnet: 0, opus: 0, opusRate: 0 }
     for (const key of [...TIERS, 'opusRate']) current[key] = (Number(current[key]) || 0) + (Number(row?.[key]) || 0)
     target[task] = current
   }
