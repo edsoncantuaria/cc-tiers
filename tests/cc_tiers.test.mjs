@@ -2000,6 +2000,10 @@ test('the spec gate refuses a writer without criteria', () => {
   assert.equal(call('', 'cc-tiers:architect').deny, refusal)
   assert.equal(call(`${SPEC_BEGIN}\nCriteria:\nEdge cases:\nAssumed:\n${SPEC_END}\n`).deny, refusal)
   assert.equal(call('CC_TIERS_SPEC: none -\n').deny, refusal)
+  for (const body of ['-', '- (request)', '**', '1. (repo: src/a.js:3)', '• (decided: simpler) (user)']) {
+    assert.equal(call(`${SPEC_BEGIN}\nCriteria:\n${body}\n${SPEC_END}\n`).deny, refusal, body)
+  }
+  assert.equal(call(`${BRIEF_BEGIN}\n${SPEC_BEGIN}\nCriteria:\n- a CSV with a header row (request)\n${SPEC_END}\n${BRIEF_END}\n`).deny, refusal)
   assert.deepEqual(state.tasks, {})
   assert.deepEqual(state.log, {})
 
@@ -2011,6 +2015,7 @@ test('the spec gate refuses a writer without criteria', () => {
 
   assert.equal(tiers.checkDelegation(tiers.emptyState('s'), { subagent_type: 'cc-tiers:implementer', prompt: `${HEADER('csv', 'sonnet', 'implementer')}CC_TIERS_SPEC: none - typo-level change\nGo.` }, routing).deny, '')
   assert.equal(tiers.checkDelegation(tiers.emptyState('s'), { subagent_type: 'cc-tiers:implementer', prompt: `${HEADER('csv', 'sonnet', 'implementer')}${SPEC_BEGIN}\nCriteria:\n- a CSV with a header row (request)\n${SPEC_END}\nGo.` }, routing).deny, '')
+  assert.equal(tiers.checkDelegation(tiers.emptyState('s'), { subagent_type: 'cc-tiers:implementer', prompt: `${HEADER('csv', 'sonnet', 'implementer')}${SPEC_BEGIN}\nCriteria:\n- returns {} when both files are missing (request)\n${SPEC_END}\nGo.` }, routing).deny, '')
   assert.equal(tiers.checkDelegation(tiers.emptyState('s'), { subagent_type: 'cc-tiers:implementer', prompt: `${HEADER('csv', 'sonnet', 'implementer')}Go.` }, defaultRouting({ research: 'off', specify: 'off' })).deny, '')
   const worker = tiers.checkDelegation(
     tiers.emptyState('s'),

@@ -82,6 +82,8 @@ const SPEC_BEGIN = 'CC_TIERS_SPEC_BEGIN'
 const SPEC_END = 'CC_TIERS_SPEC_END'
 const SPEC_NONE_RE = /^none\s*-\s*\S/i
 const SPEC_HEADING_RE = /^(criteria|edge cases|assumed):$/i
+const SPEC_BULLET_RE = /^(?:[-*•]|\d+\.)\s*/
+const SPEC_ORIGIN_RE = /\((?:request|user|(?:repo|docs|decided):[^)]*)\)/gi
 const ORCHESTRATION_PHRASE = 'planning and splitting work into tasks'
 const STOP = new Set(
   `a an the to of and or for in on with from by at as is are was were be this that it its into over under out up down do does
@@ -515,7 +517,7 @@ function stripBriefs(text) {
   return stripBlocks(text, { [RESEARCH_BEGIN]: RESEARCH_END, [SPEC_BEGIN]: SPEC_END })
 }
 
-/** Criterion lines of the first spec block: not blank, not a heading. */
+/** Criterion lines of the first spec block: a heading, a bare bullet, or an origin tag alone does not count. */
 export function specCriteria(text) {
   const lines = String(text || '').split(/\n/)
   const start = lines.findIndex((line) => line.trim() === SPEC_BEGIN)
@@ -524,7 +526,8 @@ export function specCriteria(text) {
   for (const line of lines.slice(start + 1)) {
     const item = line.trim()
     if (item === SPEC_END) break
-    if (item && !SPEC_HEADING_RE.test(item)) found.push(item)
+    if (SPEC_HEADING_RE.test(item)) continue
+    if (/[\p{L}\p{N}]/u.test(item.replace(SPEC_BULLET_RE, '').replace(SPEC_ORIGIN_RE, ''))) found.push(item)
   }
   return found
 }
@@ -1367,7 +1370,7 @@ export function checkDelegation(state, toolInput, routing, { history = null, pro
     }
   }
   if (routing.specify && (role === 'implementer' || role === 'architect')) {
-    if (!specCriteria(prompt).length && !SPEC_NONE_RE.test(headers.SPEC || '')) {
+    if (!specCriteria(stripResearch(prompt)).length && !SPEC_NONE_RE.test(headers.SPEC || '')) {
       return refuse(
         `cc-tiers: write the acceptance criteria for ${task} between CC_TIERS_SPEC_BEGIN and CC_TIERS_SPEC_END before delegating it, or add CC_TIERS_SPEC: none - <reason>.`,
       )
