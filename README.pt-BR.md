@@ -292,14 +292,14 @@ node bench/run.mjs --tasks-file bench/tasks-hard.json --session --repeat 3 --tim
 
 O runner carrega só as configurações de projeto e locais, então seu CLAUDE.md, agentes e plugins ficam fora da medição. No modo sessão ele guarda o uso por passo, porque o Claude Code reporta o uso acumulado da sessão no `--resume`. No cc-tiers ele também lê, do transcript da sessão, as escalações que os hooks anunciaram e se cada tarefa foi roteada como este README diz.
 
-**Resultados.** As colunas são `Configuração`, `pass@1`, `pass^k`, `Resolvidas`, `Regressões`, `Tokens por tarefa resolvida` e `Δ tokens vs só Opus`.
+**Resultados.** As colunas são `Configuração`, `pass@1`, `pass^k`, `Resolvidas`, `Regressões`, `Tokens por tarefa resolvida`, `Δ tokens vs só Opus` e `Δ pass@1 vs só Opus`. A última é o pass@1 da configuração menos o do só Opus, em pontos percentuais (`+33 pp`, `−17 pp`), então o ganho ou a perda do orquestrador se lê numa célula. Abaixo da tabela por tarefa, **Where it made a difference** lista só as tarefas em que alguma configuração resolveu uma parcela de rodadas diferente da do só Opus, como `resolvidas/k`; quando nenhuma resolveu, diz `No task differs from Opus only.`
 
-| Configuração | pass@1 | pass^k | Resolvidas | Regressões | Tokens por tarefa resolvida | Δ tokens vs só Opus |
-| --- | --: | --: | --: | --: | --: | --: |
-| Só Opus | ainda não medido | ainda não medido | ainda não medido | ainda não medido | ainda não medido | — |
-| Só Sonnet | ainda não medido | ainda não medido | ainda não medido | ainda não medido | ainda não medido | ainda não medido |
-| cc-tiers (orquestrador Opus) | ainda não medido | ainda não medido | ainda não medido | ainda não medido | ainda não medido | ainda não medido |
-| cc-tiers light (dispatcher Sonnet) | ainda não medido | ainda não medido | ainda não medido | ainda não medido | ainda não medido | ainda não medido |
+| Configuração | pass@1 | pass^k | Resolvidas | Regressões | Tokens por tarefa resolvida | Δ tokens vs só Opus | Δ pass@1 vs só Opus |
+| --- | --: | --: | --: | --: | --: | --: | --: |
+| Só Opus | ainda não medido | ainda não medido | ainda não medido | ainda não medido | ainda não medido | — | — |
+| Só Sonnet | ainda não medido | ainda não medido | ainda não medido | ainda não medido | ainda não medido | ainda não medido | ainda não medido |
+| cc-tiers (orquestrador Opus) | ainda não medido | ainda não medido | ainda não medido | ainda não medido | ainda não medido | ainda não medido | ainda não medido |
+| cc-tiers light (dispatcher Sonnet) | ainda não medido | ainda não medido | ainda não medido | ainda não medido | ainda não medido | ainda não medido | ainda não medido |
 
 **O que os dados da 0.5 podem e não podem dizer.**
 

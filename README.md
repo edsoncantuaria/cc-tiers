@@ -292,14 +292,14 @@ node bench/run.mjs --tasks-file bench/tasks-hard.json --session --repeat 3 --tim
 
 The runner loads only project and local settings, so your own CLAUDE.md, agents, and plugins stay out of the measurement. In session mode it stores usage per step, because Claude Code reports usage cumulative over a session on `--resume`. For cc-tiers it also reads, from the session transcript, the escalations the hooks announced and whether each task was routed as this README says.
 
-**Results.** The columns are `Configuration`, `pass@1`, `pass^k`, `Resolved`, `Regressions`, `Tokens per resolved task`, and `Δ tokens vs Opus only`.
+**Results.** The columns are `Configuration`, `pass@1`, `pass^k`, `Resolved`, `Regressions`, `Tokens per resolved task`, `Δ tokens vs Opus only`, and `Δ pass@1 vs Opus only`. The last one is the configuration's pass@1 minus Opus only's, in percentage points (`+33 pp`, `−17 pp`), so the gain or loss from the orchestrator is read in one cell. Below the per-task table, **Where it made a difference** lists only the tasks where some configuration resolved a different share of runs than Opus only, as `resolved/k`; when none did, it says `No task differs from Opus only.`
 
-| Configuration | pass@1 | pass^k | Resolved | Regressions | Tokens per resolved task | Δ tokens vs Opus only |
-| --- | --: | --: | --: | --: | --: | --: |
-| Opus only | not measured yet | not measured yet | not measured yet | not measured yet | not measured yet | — |
-| Sonnet only | not measured yet | not measured yet | not measured yet | not measured yet | not measured yet | not measured yet |
-| cc-tiers (Opus orchestrator) | not measured yet | not measured yet | not measured yet | not measured yet | not measured yet | not measured yet |
-| cc-tiers light (Sonnet dispatcher) | not measured yet | not measured yet | not measured yet | not measured yet | not measured yet | not measured yet |
+| Configuration | pass@1 | pass^k | Resolved | Regressions | Tokens per resolved task | Δ tokens vs Opus only | Δ pass@1 vs Opus only |
+| --- | --: | --: | --: | --: | --: | --: | --: |
+| Opus only | not measured yet | not measured yet | not measured yet | not measured yet | not measured yet | — | — |
+| Sonnet only | not measured yet | not measured yet | not measured yet | not measured yet | not measured yet | not measured yet | not measured yet |
+| cc-tiers (Opus orchestrator) | not measured yet | not measured yet | not measured yet | not measured yet | not measured yet | not measured yet | not measured yet |
+| cc-tiers light (Sonnet dispatcher) | not measured yet | not measured yet | not measured yet | not measured yet | not measured yet | not measured yet | not measured yet |
 
 **What the 0.5 data can and cannot say.**
 

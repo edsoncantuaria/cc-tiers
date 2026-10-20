@@ -1441,8 +1441,8 @@ test('the benchmark fixture is green, and every hidden check fails before the ta
     { config: 'opus', task: 'typo', kind: 'trivial', resolved: false, f2p: true, p2p: false, freshTokens: 8000 },
   ]
   const text = table(rows)
-  assert.ok(text.includes('| Configuration | pass@1 | pass^k | Resolved | Regressions | Tokens per resolved task | Δ tokens vs Opus only |'))
-  assert.ok(text.includes('| Opus only | 50% | 0% (k=2) | 1/2 | 1 | 20.0k | — |'))
+  assert.ok(text.includes('| Configuration | pass@1 | pass^k | Resolved | Regressions | Tokens per resolved task | Δ tokens vs Opus only | Δ pass@1 vs Opus only |'))
+  assert.ok(text.includes('| Opus only | 50% | 0% (k=2) | 1/2 | 1 | 20.0k | — | — |'))
   assert.ok(text.includes('| `typo` (trivial) | 🟡 1/2 |'))
   assert.equal(text.includes('$'), false)
 })
@@ -1507,12 +1507,49 @@ test('quality metrics: pass@1, pass^k, regressions, tokens', async () => {
   assert.deepEqual(metrics(rows.filter((r) => r.config === 'opus')), { pass1: 0.75, passK: 0.5, k: 2, resolved: 3, runs: 4, regressions: 0, tokensPerResolved: 30000 })
   assert.deepEqual(metrics(rows.filter((r) => r.config === 'cc-tiers')), { pass1: 0.75, passK: 0.5, k: 2, resolved: 3, runs: 4, regressions: 1, tokensPerResolved: 45000 })
   const text = table(rows)
-  assert.ok(text.includes('| Opus only | 75% | 50% (k=2) | 3/4 | 0 | 30.0k | — |'))
-  assert.ok(text.includes('| cc-tiers (Opus orchestrator) | 75% | 50% (k=2) | 3/4 | 1 | 45.0k | +50% |'))
-  assert.ok(text.includes('| Sonnet only | 100% | 100% (k=2) | 4/4 | 0 | 27.6k | −8% |'))
+  assert.ok(text.includes('| Opus only | 75% | 50% (k=2) | 3/4 | 0 | 30.0k | — | — |'))
+  assert.ok(text.includes('| cc-tiers (Opus orchestrator) | 75% | 50% (k=2) | 3/4 | 1 | 45.0k | +50% | 0 pp |'))
+  assert.ok(text.includes('| Sonnet only | 100% | 100% (k=2) | 4/4 | 0 | 27.6k | −8% | +25 pp |'))
   assert.ok(text.includes('| `b` (normal) | 🟡 1/2 | 🟡 1/2 | ✅ 2/2 |'))
   assert.equal(text.includes('$'), false)
-  assert.ok(table(rows.filter((r) => r.config !== 'opus')).includes('| cc-tiers (Opus orchestrator) | 75% | 50% (k=2) | 3/4 | 1 | 45.0k | — |'))
+  assert.ok(table(rows.filter((r) => r.config !== 'opus')).includes('| cc-tiers (Opus orchestrator) | 75% | 50% (k=2) | 3/4 | 1 | 45.0k | — | — |'))
+})
+
+test('the tables show where cc-tiers and Sonnet differ from Opus only', async () => {
+  const { table, differenceTable } = await import(pathToFileURL(path.join(ROOT, 'bench', 'run.mjs')).href)
+  const row = (config, task, resolved) => ({ config, task, kind: 'hard', resolved, f2p: resolved, p2p: true, freshTokens: 10000 })
+  const rows = [
+    row('opus', 'same', true), row('opus', 'same', true),
+    row('opus', 'trap', true), row('opus', 'trap', false),
+    row('sonnet', 'same', true), row('sonnet', 'same', true),
+    row('sonnet', 'trap', false), row('sonnet', 'trap', false),
+    row('cc-tiers', 'same', true), row('cc-tiers', 'same', true),
+    row('cc-tiers', 'trap', true), row('cc-tiers', 'trap', true),
+  ]
+  const trap = rows.filter((r) => r.task === 'trap')
+  const text = table(trap)
+  assert.ok(text.includes('| Opus only | 50% | 0% (k=2) | 1/2 | 0 | 20.0k | — | — |'))
+  assert.ok(text.includes('| Sonnet only | 0% | 0% (k=2) | 0/2 | 0 | — | — | −50 pp |'))
+  assert.ok(text.includes('| cc-tiers (Opus orchestrator) | 100% | 100% (k=2) | 2/2 | 0 | 10.0k | −50% | +50 pp |'))
+  assert.deepEqual(differenceTable(rows), [
+    '**Where it made a difference** (resolved runs per task vs Opus only)',
+    '',
+    '| Task | Opus only | Sonnet only | cc-tiers (Opus orchestrator) |',
+    '| --- | --: | --: | --: |',
+    '| `trap` | 1/2 | 0/2 | 2/2 |',
+  ])
+  const full = table(rows)
+  const perTask = full.indexOf('| `trap` (hard) |')
+  const section = full.indexOf('**Where it made a difference**')
+  assert.ok(perTask >= 0 && section > perTask && section < full.indexOf('hard: pass@1'))
+  const same = rows.filter((r) => r.task === 'same')
+  assert.deepEqual(differenceTable(same), ['No task differs from Opus only.'])
+  assert.ok(table(same).includes('\nNo task differs from Opus only.\n'))
+  const noOpus = rows.filter((r) => r.config !== 'opus')
+  assert.deepEqual(differenceTable(noOpus), [])
+  assert.equal(table(noOpus).includes('No task differs'), false)
+  assert.equal(table(noOpus).includes('Where it made a difference'), false)
+  assert.ok(table(noOpus).includes('| Sonnet only | 50% | 50% (k=2) | 2/4 | 0 | 20.0k | — | — |'))
 })
 
 test('old result rows render with pass as resolved', async () => {
@@ -1525,8 +1562,8 @@ test('old result rows render with pass as resolved', async () => {
     { config: 'sonnet', task: 'typo', kind: 'trivial', pass: false, cost: 0.1, models: {} },
   ]
   const text = table(rows)
-  assert.ok(text.includes('| Opus only | 50% | 0% (k=2) | 1/2 | — | 10.0k | — |'))
-  assert.ok(text.includes('| Sonnet only | 50% | 0% (k=2) | 1/2 | — | — | — |'))
+  assert.ok(text.includes('| Opus only | 50% | 0% (k=2) | 1/2 | — | 10.0k | — | — |'))
+  assert.ok(text.includes('| Sonnet only | 50% | 0% (k=2) | 1/2 | — | — | — | 0 pp |'))
   assert.ok(text.includes('| `typo` (trivial) | 🟡 1/2 | 🟡 1/2 |'))
   assert.equal(text.includes('$'), false)
   const mixed = [

@@ -412,10 +412,11 @@ export function metrics(rows) {
 /** The README table: one row per configuration, then one per task, then one per task kind. */
 export function table(results) {
   const configs = [...new Set(results.map((row) => row.config))]
-  const baseline = configs.includes('opus') ? metrics(results.filter((row) => row.config === 'opus')).tokensPerResolved : null
+  const opus = configs.includes('opus') ? metrics(results.filter((row) => row.config === 'opus')) : null
+  const baseline = opus?.tokensPerResolved
   const lines = [
-    `| Configuration | pass@1 | pass^k | Resolved | Regressions | Tokens per resolved task | Δ tokens vs ${label('opus')} |`,
-    '| --- | --: | --: | --: | --: | --: | --: |',
+    `| Configuration | pass@1 | pass^k | Resolved | Regressions | Tokens per resolved task | Δ tokens vs ${label('opus')} | Δ pass@1 vs ${label('opus')} |`,
+    '| --- | --: | --: | --: | --: | --: | --: | --: |',
   ]
   for (const config of configs) {
     const m = metrics(results.filter((row) => row.config === config))
@@ -424,8 +425,13 @@ export function table(results) {
       const change = Math.round((m.tokensPerResolved / baseline - 1) * 100)
       delta = change < 0 ? `−${-change}%` : `+${change}%`
     }
+    let points = '—'
+    if (config !== 'opus' && opus) {
+      const change = Math.round((m.pass1 - opus.pass1) * 100)
+      points = change < 0 ? `−${-change} pp` : change > 0 ? `+${change} pp` : '0 pp'
+    }
     const tokens = kilo(m.tokensPerResolved)
-    lines.push(`| ${label(config)} | ${percent(m.pass1)} | ${percent(m.passK)} (k=${m.k}) | ${m.resolved}/${m.runs} | ${m.regressions ?? '—'} | ${tokens} | ${delta} |`)
+    lines.push(`| ${label(config)} | ${percent(m.pass1)} | ${percent(m.passK)} (k=${m.k}) | ${m.resolved}/${m.runs} | ${m.regressions ?? '—'} | ${tokens} | ${delta} | ${points} |`)
   }
   lines.push('')
   const tasks = [...new Set(results.map((row) => row.task))]
@@ -441,9 +447,36 @@ export function table(results) {
     const kind = results.find((row) => row.task === task)?.kind
     lines.push(`| \`${task}\` (${kind}) | ${cells.join(' | ')} |`)
   }
+  const difference = differenceTable(results)
+  if (difference.length) lines.push('', ...difference)
   lines.push('', ...kindTable(results))
   if (results.some((row) => row.routedAsDocumented != null)) lines.push('', ...routingTable(results))
   return lines.join('\n')
+}
+
+/** The tasks where some configuration resolved a different share of runs than the baseline; empty without a baseline. */
+export function differenceTable(results, baseline = 'opus') {
+  const configs = [...new Set(results.map((row) => row.config))]
+  if (!configs.includes(baseline)) return []
+  const share = (config, task) => {
+    const rows = results.filter((row) => row.config === config && row.task === task)
+    return rows.length ? { resolved: rows.filter(resolvedOf).length, runs: rows.length } : null
+  }
+  const lines = []
+  for (const task of new Set(results.map((row) => row.task))) {
+    const base = share(baseline, task)
+    const cells = configs.map((config) => share(config, task))
+    if (!base || !cells.some((cell) => cell && cell.resolved / cell.runs !== base.resolved / base.runs)) continue
+    lines.push(`| \`${task}\` | ${cells.map((cell) => (cell ? `${cell.resolved}/${cell.runs}` : '—')).join(' | ')} |`)
+  }
+  if (!lines.length) return [`No task differs from ${label(baseline)}.`]
+  return [
+    `**Where it made a difference** (resolved runs per task vs ${label(baseline)})`,
+    '',
+    `| Task | ${configs.map(label).join(' | ')} |`,
+    `| --- | ${configs.map(() => '--:').join(' | ')} |`,
+    ...lines,
+  ]
 }
 
 /** pass@1 for each kind of task, plus the escalations cc-tiers announced and how often it routed as documented. */
