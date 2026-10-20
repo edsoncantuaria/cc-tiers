@@ -1684,7 +1684,7 @@ test('the benchmark sees inline work that only changed the workspace tree', asyn
 })
 
 test('a run with no JSON has no token count', async () => {
-  const { metrics, summarize } = await import(pathToFileURL(path.join(ROOT, 'bench', 'run.mjs')).href)
+  const { kilo, metrics, summarize } = await import(pathToFileURL(path.join(ROOT, 'bench', 'run.mjs')).href)
   const verdict = { f2p: false, p2p: true, ownTests: true, resolved: false, regressions: [], output: 'timeout' }
   const task = { id: 'calc', kind: 'normal' }
   // A timeout can still leave a passing workspace behind.
@@ -1694,6 +1694,8 @@ test('a run with no JSON has no token count', async () => {
   const ran = summarize('sonnet', task, 2, { code: 0, json: usage, stderr: '', seconds: 30 }, { ...verdict, f2p: true, resolved: true })
   assert.equal(ran.freshTokens, 150)
   assert.equal(metrics([crashed, ran]).tokensPerResolved, 150)
+  assert.equal(kilo(crashed.freshTokens), '—')
+  assert.equal(kilo(1500), '1.5k')
 })
 
 test('quality defaults: risky review, cost hidden, Sonnet starts at high', () => {

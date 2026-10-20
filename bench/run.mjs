@@ -374,7 +374,7 @@ async function pool(items, size, fn) {
 
 const resolvedOf = (row) => Boolean(row.resolved ?? row.pass)
 const percent = (share) => `${Math.round(share * 100)}%`
-const kilo = (tokens) => `${(tokens / 1000).toFixed(1)}k`
+export const kilo = (tokens) => (tokens == null ? '—' : `${(tokens / 1000).toFixed(1)}k`)
 
 /** Fresh tokens of a row; older result files only have the per-model `tokens`. Null when the run left no usage. */
 function freshOf(row) {
@@ -424,7 +424,7 @@ export function table(results) {
       const change = Math.round((m.tokensPerResolved / baseline - 1) * 100)
       delta = change < 0 ? `−${-change}%` : `+${change}%`
     }
-    const tokens = m.tokensPerResolved == null ? '—' : kilo(m.tokensPerResolved)
+    const tokens = kilo(m.tokensPerResolved)
     lines.push(`| ${label(config)} | ${percent(m.pass1)} | ${percent(m.passK)} (k=${m.k}) | ${m.resolved}/${m.runs} | ${m.regressions ?? '—'} | ${tokens} | ${delta} |`)
   }
   lines.push('')
