@@ -272,11 +272,12 @@ The escalation order is fixed. Routing phrases and keywords, the retry limit, th
 
 Tests the model wrote do not count toward resolved; they are kept in the raw JSON as `ownTests`. A task in a tasks file may also list `changesTests`: the original test files that task legitimately changes. They are left out of PASS_TO_PASS. Nothing is recorded per run.
 
-**Three suites.**
+**Four suites.**
 
 - `bench/tasks.json`: seven small tasks (3 trivial, 2 normal, 1 mixed, 1 hard) on `bench/fixture/`.
 - `bench/tasks-hard.json`: twelve tasks on `bench/fixture-hard/`, a 1,600-line Node service with shared state, time zones, and async booking. It has 4 trivial, 3 normal, 3 hard (a race that only shows under concurrent requests, a path-traversal fix whose naive version passes the visible tests, a multi-tenant refactor that must keep the public API), and 2 large requests that each mix a trivial, a normal, and a hard change. Each hidden check in `bench/checks-hard/` fails on the untouched fixture and passes with the reference fix in `bench/solutions-hard/`.
 - `bench/tasks-calc.json`: one normal task on `bench/fixture-calc/`, an expression evaluator (`src/calc.js`) with precedence, unary minus, and error cases. The hidden check is in `bench/checks-calc/` and the reference in `bench/solutions-calc/calc.js`. It is the showcase: one task, repeated.
+- `bench/tasks-trap.json`: one hard task on `bench/fixture-trap/`, a `loadConfig` that reads `.env` and `.env.local` with the installed dotenv. The installed version is 8.6.0, older than what models remember: it has no multi-line values and keeps ` # comment` in an unquoted value, and code written for a newer dotenv runs without an error and returns the wrong values. Research (reading the installed version and its docs) and validation (testing the rules the task states) are what catch it. The hidden check is in `bench/checks-trap/` and the reference in `bench/solutions-trap/config.js`; `npm test` also checks that a naive dotenv 8.6.0 solution fails it.
 
 `npm test` verifies both sides of every check: it fails on the fixture and passes with the reference.
 
@@ -289,6 +290,14 @@ node bench/run.mjs --tasks-file bench/tasks-hard.json --session --repeat 3 --tim
 
 > [!WARNING]
 > A run uses your real Claude Code login, so on Pro or Max it spends your usage window. A `--repeat 3` run of four configurations is many sessions. Start with the calculator suite. `npm run bench:table -- <result files>` prints the table from saved results.
+
+**Cheap comparison.** The tasks that tell the configurations apart are the trap and two hard tasks. This runs only those, against Opus only, Sonnet only, and cc-tiers, and merges the results into one table:
+
+```bash
+npm run bench -- --tasks-file bench/tasks-trap.json --configs opus,sonnet,cc-tiers --repeat 3 --out bench/results/trap.json
+npm run bench -- --tasks-file bench/tasks-hard.json --tasks traversal,race --configs opus,sonnet,cc-tiers --repeat 3 --out bench/results/hard-pair.json
+npm run bench:table -- bench/results/trap.json bench/results/hard-pair.json
+```
 
 The runner loads only project and local settings, so your own CLAUDE.md, agents, and plugins stay out of the measurement. In session mode it stores usage per step, because Claude Code reports usage cumulative over a session on `--resume`. For cc-tiers it also reads, from the session transcript, the escalations the hooks announced and whether each task was routed as this README says.
 
@@ -346,7 +355,7 @@ claude --plugin-dir .
 | `hooks/route.mjs` | The heuristic behind `/cc-tiers:route` |
 | `hooks/report.mjs` | The table behind `/cc-tiers:report` |
 | `commands/report.md` | `/cc-tiers:report` |
-| `bench/` | The benchmark: three fixtures (including the calculator suite), tasks, hidden checks, runner, and results |
+| `bench/` | The benchmark: four fixtures (including the calculator and dotenv trap suites), tasks, hidden checks, runner, and results |
 | `.github/workflows/ci.yml` | Tests on Linux, macOS, and Windows, and `claude plugin validate` |
 | `CHANGELOG.md` | Release notes |
 

@@ -1978,6 +1978,47 @@ test('the calculator check fails on the empty fixture and passes with the refere
   }
 })
 
+test('the dotenv trap check fails on the fixture and on a naive dotenv 8.6.0 parse, and passes with the reference', async () => {
+  const bench = path.join(ROOT, 'bench')
+  const tasks = JSON.parse(readFileSync(path.join(bench, 'tasks-trap.json'), 'utf8'))
+  assert.deepEqual(tasks.map((task) => [task.id, task.kind]), [['config', 'hard']])
+  assert.ok(tasks[0].prompt.includes('Use the dotenv package that is already installed'))
+  const { cpSync } = await import('node:fs')
+  const env = { ...process.env }
+  delete env.NODE_TEST_CONTEXT
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-trap-'))
+  try {
+    cpSync(path.join(bench, 'fixture-trap'), dir, { recursive: true })
+    assert.equal(JSON.parse(readFileSync(path.join(dir, 'node_modules', 'dotenv', 'package.json'), 'utf8')).version, '8.6.0')
+    mkdirSync(path.join(dir, '.bench-check'))
+    cpSync(path.join(bench, 'checks-trap', 'config.test.mjs'), path.join(dir, '.bench-check', 'config.test.mjs'))
+    const run = (...files) => spawnSync(process.execPath, ['--test', ...files], { cwd: dir, encoding: 'utf8', env })
+    assert.equal(run('test/smoke.test.mjs').status, 0)
+    assert.notEqual(run('.bench-check/config.test.mjs').status, 0, 'check passes on the untouched fixture')
+    const naive = [
+      "import { existsSync, readFileSync } from 'node:fs'",
+      "import path from 'node:path'",
+      "import dotenv from 'dotenv'",
+      'const read = (file) => (existsSync(file) ? dotenv.parse(readFileSync(file)) : {})',
+      'export function loadConfig({ cwd = process.cwd(), env = process.env } = {}) {',
+      "  const merged = { ...read(path.join(cwd, '.env')), ...read(path.join(cwd, '.env.local')) }",
+      '  for (const key of Object.keys(merged)) if (env[key] !== undefined) merged[key] = env[key]',
+      '  return merged',
+      '}',
+      '',
+    ].join('\n')
+    writeFileSync(path.join(dir, 'src', 'config.js'), naive)
+    const trapped = run('.bench-check/config.test.mjs')
+    assert.notEqual(trapped.status, 0, 'a naive dotenv 8.6.0 parse passes the check')
+    assert.match(trapped.stdout, /(?:#|ℹ) pass [1-9]/, `the naive solution fails everything, so the trap is not what fails it:\n${trapped.stdout.slice(-1500)}`)
+    cpSync(path.join(bench, 'solutions-trap', 'config.js'), path.join(dir, 'src', 'config.js'))
+    const proc = run('.bench-check/config.test.mjs', 'test/smoke.test.mjs')
+    assert.equal(proc.status, 0, `reference fails:\n${proc.stdout.slice(-1500)}`)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('the calculator check ignores eval in comments and strings but catches a real call', async () => {
   const bench = path.join(ROOT, 'bench')
   const { cpSync } = await import('node:fs')

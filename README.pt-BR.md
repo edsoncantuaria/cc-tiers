@@ -272,11 +272,12 @@ O `bench/` corrige cada rodada com checks ocultos e reporta métricas que vêm d
 
 Testes que o modelo escreveu não contam para resolvida; ficam no JSON bruto como `ownTests`. Uma tarefa no arquivo de tarefas também pode listar `changesTests`: os arquivos de teste originais que ela muda de propósito. Eles ficam fora do PASS_TO_PASS. Nada é gravado por rodada.
 
-**Três suítes.**
+**Quatro suítes.**
 
 - `bench/tasks.json`: sete tarefas pequenas (3 triviais, 2 normais, 1 mista, 1 difícil) em `bench/fixture/`.
 - `bench/tasks-hard.json`: doze tarefas em `bench/fixture-hard/`, um serviço Node de 1.600 linhas com estado compartilhado, fusos horários e reservas assíncronas. São 4 triviais, 3 normais, 3 difíceis (uma condição de corrida que só aparece com requisições concorrentes, uma correção de path traversal cuja versão ingênua passa nos testes visíveis, uma refatoração multi-tenant que precisa manter a API pública) e 2 pedidos grandes, cada um misturando uma mudança trivial, uma normal e uma difícil. Cada check oculto em `bench/checks-hard/` falha na fixture intocada e passa com a correção de referência em `bench/solutions-hard/`.
 - `bench/tasks-calc.json`: uma tarefa normal em `bench/fixture-calc/`, um avaliador de expressões (`src/calc.js`) com precedência, menos unário e casos de erro. O check oculto fica em `bench/checks-calc/` e a referência em `bench/solutions-calc/calc.js`. É a vitrine: uma tarefa, repetida.
+- `bench/tasks-trap.json`: uma tarefa difícil em `bench/fixture-trap/`, um `loadConfig` que lê `.env` e `.env.local` com o dotenv instalado. A versão instalada é a 8.6.0, mais antiga do que os modelos lembram: não tem valores em várias linhas e mantém ` # comentário` num valor sem aspas, e o código escrito para um dotenv mais novo roda sem erro e devolve valores errados. Pesquisa (ler a versão instalada e a documentação dela) e validação (testar as regras que a tarefa enuncia) são o que pegam isso. O check oculto fica em `bench/checks-trap/` e a referência em `bench/solutions-trap/config.js`; o `npm test` também confere que uma solução ingênua com o dotenv 8.6.0 falha nele.
 
 O `npm test` confere os dois lados de cada check: falha na fixture e passa com a referência.
 
@@ -289,6 +290,14 @@ node bench/run.mjs --tasks-file bench/tasks-hard.json --session --repeat 3 --tim
 
 > [!WARNING]
 > Uma rodada usa o seu login real do Claude Code, então no Pro ou no Max ela gasta a sua janela de uso. Uma rodada com `--repeat 3` de quatro configurações são muitas sessões. Comece pela suíte da calculadora. `npm run bench:table -- <arquivos de resultado>` imprime a tabela a partir de resultados salvos.
+
+**Comparação barata.** As tarefas que separam as configurações são a armadilha e duas tarefas difíceis. Isto roda só essas, contra só Opus, só Sonnet e cc-tiers, e junta os resultados numa tabela:
+
+```bash
+npm run bench -- --tasks-file bench/tasks-trap.json --configs opus,sonnet,cc-tiers --repeat 3 --out bench/results/trap.json
+npm run bench -- --tasks-file bench/tasks-hard.json --tasks traversal,race --configs opus,sonnet,cc-tiers --repeat 3 --out bench/results/hard-pair.json
+npm run bench:table -- bench/results/trap.json bench/results/hard-pair.json
+```
 
 O runner carrega só as configurações de projeto e locais, então seu CLAUDE.md, agentes e plugins ficam fora da medição. No modo sessão ele guarda o uso por passo, porque o Claude Code reporta o uso acumulado da sessão no `--resume`. No cc-tiers ele também lê, do transcript da sessão, as escalações que os hooks anunciaram e se cada tarefa foi roteada como este README diz.
 
@@ -346,7 +355,7 @@ claude --plugin-dir .
 | `hooks/route.mjs` | A heurística por trás do `/cc-tiers:route` |
 | `hooks/report.mjs` | A tabela por trás do `/cc-tiers:report` |
 | `commands/report.md` | `/cc-tiers:report` |
-| `bench/` | O benchmark: três fixtures (com a suíte da calculadora), tarefas, checagens ocultas, executor e resultados |
+| `bench/` | O benchmark: quatro fixtures (com as suítes da calculadora e da armadilha do dotenv), tarefas, checagens ocultas, executor e resultados |
 | `.github/workflows/ci.yml` | Testes no Linux, macOS e Windows, e `claude plugin validate` |
 | `CHANGELOG.md` | Notas da versão |
 

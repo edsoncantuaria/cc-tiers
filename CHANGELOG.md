@@ -10,6 +10,7 @@
 - Quality metrics in the benchmark: FAIL_TO_PASS and PASS_TO_PASS (SWE-bench), pass@1 (HumanEval), pass^k (tau-bench), regressions, and fresh tokens per resolved task. `changesTests` is recorded per task, and session mode stores usage per step.
 - Calculator suite: `bench/tasks-calc.json`, `bench/fixture-calc/`, `bench/checks-calc/`, and `bench/solutions-calc/calc.js`, one task meant to be repeated (`npm run bench -- --tasks-file bench/tasks-calc.json --repeat 3`).
 - Benchmark table column `Δ pass@1 vs Opus only` (percentage points), and a **Where it made a difference** section that lists only the tasks where a configuration resolved a different share of runs than Opus only.
+- Dotenv trap suite: `bench/tasks-trap.json`, `bench/fixture-trap/` (with dotenv 8.6.0 vendored), `bench/checks-trap/`, and `bench/solutions-trap/config.js`. Code written from memory of a newer dotenv fails silently there, so research and validation can show their worth. The README adds a cheap comparison that runs only the trap and the hard `traversal` and `race` tasks.
 
 ### Changed
 

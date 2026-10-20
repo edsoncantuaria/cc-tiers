@@ -1,0 +1,1 @@
+{"name":"config-fixture","private":true,"type":"module","dependencies":{"dotenv":"8.6.0"},"scripts":{"test":"node --test test/"}}
