@@ -60,8 +60,12 @@ flowchart LR
     R -- briefing --> D[Implementer Sonnet]
     C -- falha duas vezes --> D
     D -- falha duas vezes --> E[Opus implementa]
-    C -- passa --> H[Checker Sonnet]
-    D -- passa, arriscada --> F[Revisor Opus]
+    C -- passa --> V{Gate de verificação}
+    D -- passa --> V
+    V -- comando falha --> C
+    V -- comando falha --> D
+    V -- verificado --> H[Checker Sonnet]
+    V -- verificado, arriscada --> F[Revisor Opus]
     H -- rejeita --> C
     F -- rejeita --> D
     H -- aprova --> G[Pronto]
@@ -105,6 +109,69 @@ Uma tarefa que não precisa de critérios (edição mecânica, consulta) diz o m
 
 ---
 
+## ✅ Verificar
+
+Um `pass` era a palavra do agente. Com o gate, o hook roda a checagem ele mesmo. Todo relatório de quem escreve (worker, implementer, architect, o teto Opus, a tarefa do próprio dispatcher) lista os comandos que provam o trabalho, um por linha, antes do status:
+
+```
+CC_TIERS_VERIFY: node --test test/booking.test.mjs
+CC_TIERS_VERIFY: npx tsc --noEmit
+CC_TIERS_STATUS: pass
+```
+
+Quando nada verifica a mudança (gravar no aparelho, tela conferida à mão), o relatório diz isso: `CC_TIERS_VERIFY: none - <motivo>`. O comando é o focado na área tocada, o mesmo que quem escreveu rodou, não o projeto inteiro.
+
+**O que o hook roda.** Só quando o relatório é `pass`. Ele roda cada comando como argv, sem shell, no diretório do projeto. Uma linha com qualquer um de `` ; | & > < ` $ ( ) `` ou quebra de linha é recusada. Duas formas o próprio hook interpreta: `KEY=valor` no começo vira variável de ambiente (`APP_ENV=testing vendor/bin/phpunit`; `PATH`, `LD_*` e `DYLD_*` são recusadas), e `cd <dir> && <comando>` roda em `<dir>`, que tem de ser relativo e ficar dentro do projeto. A lista de prefixos é conferida no que sobra.
+
+**Lista de prefixos.** `verify_allow` é uma lista de prefixos separados por vírgula, comparados por palavras inteiras: `npm test` casa `npm test -- x`, não `npm testx`. O padrão cobre `npm test`, `node --test`, `npx tsc`, `npx eslint`, `npx vitest`, `npx jest`, `npx playwright test`, PHPUnit, PHPStan, PHPCS, `pytest`, `go test` e `cargo test`. `docker exec` fica fora do padrão, porque com ele qualquer comando roda dentro do container. Se você usa, por exemplo num projeto PHP em Docker, acrescente `docker exec` em `/config`. A lista restringe a forma do comando, não o que um teste executa: teste é código do repositório, e o agente já pode escrever código.
+
+**Resultados.**
+
+- Um comando que sai com código diferente de zero roda mais uma vez. Passar na segunda é pass, informado como `flaky`. Falhar duas vezes é falha, e a nota da próxima tentativa leva o comando, o código de saída e as últimas 40 linhas da saída.
+- Um comando que estoura o `verify_timeout` (padrão 300 s) conta como falha: teste que trava é defeito ou ambiente quebrado, e nos dois casos o pass não vale.
+- `verify_budget` (padrão 600 s) limita o relatório inteiro, segundas tentativas incluídas. Os comandos depois dele não rodam e entram como não validados. Isso não é falha, então uma suíte lenta não empurra a tarefa para o Opus.
+- Uma falha interrompe os comandos que vêm depois.
+- Um comando fora da lista, uma linha `none` ou uma linha recusada fica **não validado**: nada roda e não é falha. A mensagem diz qual prefixo acrescentar em `/config`.
+- Um `pass` sem nenhuma linha `CC_TIERS_VERIFY` conta como falha.
+
+O relatório final diz, por tarefa, `verified: <comandos>`, `flaky: <comando>` ou `not validated: <motivo>`, e o `/cc-tiers:report` tem uma coluna Verify para isso. O gate roda onde o relatório é contado. O teto Opus e o dispatcher não têm chamada Agent, então o pass espera até o hook Stop, que roda os comandos fora do lock da sessão. Um reprovado bloqueia o Stop uma vez com a nota. O caminho leve (tarefa trivial feita inline) fica fora do gate. `verify: off` tira o gate.
+
+**Limites.** O gate prova que o comando declarado passa, não que ele cobre a mudança: quem escreve pode declarar um teste que não toca o que mudou, e a revisão é quem pega isso. Sessões paralelas no mesmo checkout podem fazer um comando falhar por causa de outra tarefa; a mensagem de falha diz isso quando há outra tarefa ativa. Os comandos rodam pelo hook, não pelas suas regras de permissão, e é por isso que a lista existe.
+
+---
+
+## 🧾 Revisão com evidência
+
+Uma revisão rejeitava com "uma razão concreta", e isso pesava igual com prova ou sem. Agora uma rejeição só conta quando traz um defeito bloqueante com um jeito de reproduzir. O revisor recebe o diff, o bloco de spec, o bloco de pesquisa e o pedido, e nunca o relatório nem a explicação de quem escreveu: um revisor que lê o raciocínio do autor herda os pontos cegos dele.
+
+O revisor passa por corretude, regressão, segurança, estado (ordem, idempotência, atomicidade) e escopo, nessa ordem. Cada achado é um bloco antes do trailer:
+
+```
+CC_TIERS_FINDING_BEGIN
+category: state
+severity: blocking
+evidence: command
+command: node --test test/booking.test.mjs
+expected: an old event does not close the reopened shift
+observed: 'reopen keeps open' fails: expected open, got closed
+where: src/booking.js:142
+CC_TIERS_FINDING_END
+```
+
+`category` é `correctness`, `regression`, `security`, `state` ou `scope`. `severity` é `blocking` ou `note`. O achado descreve o defeito, nunca a correção: quem escreve escolhe a correção. Endurecimento que o spec não pede, estilo e o que é de outra issue são sempre notas.
+
+**O que conta.** `CC_TIERS_STATUS: fail` só é falha com pelo menos um achado bloqueante válido. `evidence` é um de três:
+
+- `command`: um comando no formato do `CC_TIERS_VERIFY`, mais `expected`, `observed` e `where`. O hook roda uma vez quando o comando está na lista. Se **passa**, o achado é descartado como falso positivo. Se falha, o achado vale. Fora da lista, vale como `trace`.
+- `trace`: uma entrada concreta, `expected`, `observed` e `where: arquivo:linha`. O hook não confere.
+- `coverage`: um critério ou caso de borda do spec que nenhum teste exercita, com `criterion:` (a linha do spec, copiada) e `where:` (os testes que o revisor leu). Só vale quando o critério aparece no bloco de spec daquela tarefa, então não vira endurecimento que o pedido não pediu. Tarefa com `CC_TIERS_SPEC: none` não admite achado `coverage`.
+
+Um bloco incompleto não conta. Um `fail` sem achado bloqueante válido não é falha: a mensagem diz `rejected without evidence; <n> finding(s) became notes` e a tarefa é tratada como aprovada. As notas vão para o relatório final como lista, e a nota enviada a quem escreve numa falha de verdade leva só os achados bloqueantes. O revisor não edita arquivos; pode rodar comandos de leitura e testes que já existem, e não acrescenta testes ao repositório.
+
+`review_evidence: off` volta à 0.6: qualquer `fail` do revisor conta. Limite: o hook não confere a evidência `trace`, então um trace inventado ainda conta.
+
+---
+
 ## 🔁 Escalonamento
 
 Falha é teste que quebrou, revisão rejeitada ou erro do subagente. A tarefa pode falhar **duas vezes** no nível (`max_attempts`, padrão 2). A tentativa seguinte sobe, e as notas vão junto:
@@ -120,6 +187,8 @@ Os hooks garantem o que os prompts pedem:
 - **Antes de uma delegação** (PreToolUse), a chamada a um agente do cc-tiers é recusada quando passa `model`, não tem o header `CC_TIERS_TASK` ou manda uma tarefa já escalada de volta para um nível abaixo. Subir uma tarefa antes do limite (`/cc-tiers:escalate`) move o contador junto, com as notas.
 - **Pesquisa** (`research: on`, o padrão): a chamada ao implementer ou ao architect é recusada quando a tarefa não tem nem um pass do researcher nem a linha `CC_TIERS_RESEARCH: none - <motivo>`.
 - **Especificação** (`specify: on`, o padrão): a chamada ao implementer ou ao architect é recusada quando o prompt não tem um bloco `CC_TIERS_SPEC_BEGIN` / `CC_TIERS_SPEC_END` com conteúdo nem a linha `CC_TIERS_SPEC: none - <motivo>`.
+- **Verificação** (`verify: on`, o padrão): um `pass` de quem escreve só vale depois de o hook rodar os comandos de `CC_TIERS_VERIFY` que estão na lista. Um `pass` sem essas linhas, ou com um comando que falha, conta como falha. O teto Opus e o dispatcher são verificados no Stop.
+- **Evidência** (`review_evidence: on`, o padrão): um `fail` do revisor ou do checker só conta com um achado bloqueante válido. O hook roda o comando do achado e descarta o que passa, e um `fail` sem achado vira notas.
 - **Agentes em background** também contam. O lançamento grava o id do agente, e o SubagentStop conta o relatório quando ele termina. O aviso chega ao orquestrador na próxima delegação ou no fim do turno.
 - **O teto Opus** não tem chamada Agent, então o orquestrador marca a própria tentativa com o header `CC_TIERS_TASK` / `CC_TIERS_TIER: opus` / `CC_TIERS_ROLE: orchestrator` e fecha com `CC_TIERS_STATUS`. O hook conta esse trailer como qualquer outro relatório.
 - Agentes em paralelo dividem um arquivo de contador por sessão, com lock e gravação atômica.
@@ -210,7 +279,7 @@ A primeira gravação adiciona o arquivo ao `.git/info/exclude` quando o projeto
 | `/cc-tiers:tiers [tarefa]` | Planeja, encaminha e executa |
 | `/cc-tiers:route [tarefa]` | Diz o nível e para. Usa a mesma heurística dos hooks. Sem editar |
 | `/cc-tiers:escalate [slug]` | Sobe essa tarefa um nível agora, com as notas |
-| `/cc-tiers:report [--all]` | Tabela por tarefa da sessão: níveis, tentativas, effort, revisão, status e custo ao lado do preço do Opus |
+| `/cc-tiers:report [--all]` | Tabela por tarefa da sessão: níveis, tentativas, effort, revisão, verify, status e custo ao lado do preço do Opus. A coluna Verify diz `ok`, `flaky` ou `not validated` |
 
 Dá também para pedir em linguagem comum. A skill `tiers` entra quando o pedido é implementar, corrigir, renomear ou revisar. Mencione um agente direto com `@agent-cc-tiers:worker`, `@agent-cc-tiers:implementer`, `@agent-cc-tiers:checker` ou `@agent-cc-tiers:reviewer`.
 
@@ -251,6 +320,13 @@ Abra `/config` e ajuste as linhas do cc-tiers. Valem na sessão seguinte (o hook
 | `show_cost` | `off` | `on` mostra o custo estimado de cada tarefa e da sessão ao lado do preço do Opus |
 | `research` | `on` | Exige um briefing do pesquisador, ou uma linha `none - <motivo>`, antes de o código ir para o implementer ou o architect. `off` tira o passo |
 | `specify` | `on` | Exige critérios de aceite, ou uma linha `CC_TIERS_SPEC: none - <motivo>`, antes de o código ir para o implementer ou o architect, e deixa o orquestrador perguntar o que muda o resultado. `off` tira o passo |
+| `verify` | `on` | O `pass` de quem escreve precisa listar os comandos que o provam em linhas `CC_TIERS_VERIFY`, e o hook roda os que estão na lista. `off` aceita o pass só pelo relatório |
+| `verify_allow` | veja abaixo | Prefixos de comando, separados por vírgula, que o gate pode rodar, comparados por palavras inteiras. `docker exec` não está no padrão. Vazio usa o padrão |
+| `verify_timeout` | `300` | Segundos que um comando do gate pode rodar antes de contar como falha. 10–600 |
+| `verify_budget` | `600` | Segundos que o gate pode gastar em um relatório. Comandos além disso ficam não validados, não reprovados. 30–600 |
+| `review_evidence` | `on` | O `fail` do revisor só conta com um achado bloqueante que tenha evidência. `off` conta qualquer `fail` |
+
+O `verify_allow` padrão é `npm test, npm run test, node --test, npx tsc, npx eslint, npx vitest, npx jest, npx playwright test, vendor/bin/phpunit, ./vendor/bin/phpunit, vendor/bin/phpstan, ./vendor/bin/phpstan, vendor/bin/phpcs, ./vendor/bin/phpcs, pytest, python -m pytest, go test, cargo test`.
 
 `risky` é o padrão: o Opus revisa trabalho não trivial num contexto novo e pula um passe trivial do Haiku. `cheap` manda a saída do Haiku para o checker Sonnet e só manda revisão Opus para uma frase de revisão ou para o teto. `always` revisa todo passe (Haiku no Sonnet, o resto no Opus). `never` pula a revisão. Enquanto uma janela de orçamento está economizando, a revisão Opus fica para o trabalho crítico mesmo em `risky` ou `always`.
 
@@ -272,7 +348,7 @@ Para trocar uma lista inteira, crie `.claude/cc-tiers.json` no projeto. A lista 
 }
 ```
 
-A ordem de escalonamento é fixa. As frases e palavras-chave de roteamento, o limite de tentativas, as escadas de effort, a política de revisão, o gate de pesquisa, o gate de especificação, o classificador, o aprendizado e os dois limiares de orçamento são os controles.
+A ordem de escalonamento é fixa. As frases e palavras-chave de roteamento, o limite de tentativas, as escadas de effort, a política de revisão, o gate de pesquisa, o gate de especificação, o gate de verificação e a revisão com evidência, o classificador, o aprendizado e os dois limiares de orçamento são os controles.
 
 ---
 
@@ -308,15 +384,16 @@ O `npm test` confere os dois lados de cada check: falha na fixture e passa com a
 ```bash
 npm run bench -- --tasks-file bench/tasks-login.json --configs opus,sonnet,cc-tiers --repeat 2 --out bench/results/login.json
 npm run bench -- --tasks-file bench/tasks-hard.json --tasks traversal,race --configs opus,sonnet,cc-tiers --repeat 3 --out bench/results/hard-pair.json
+npm run bench -- --tasks-file bench/tasks-hard.json --tasks race,cancel,instances,traversal,date-filter,csv-escape,offboarding,recurring-pack --configs opus,cc-tiers --repeat 2 --out bench/results/verify-evidence.json
 npm run bench:table -- bench/results/login.json
 ```
 
 > [!WARNING]
 > Uma rodada usa o seu login real do Claude Code, então no Pro ou no Max ela gasta a sua janela de uso. `npm run bench:table -- <arquivos de resultado>` imprime as tabelas a partir de resultados salvos.
 
-A suíte de login roda só em one-shot: a tarefa edita o servidor e a configuração, então o `--session` é recusado. O runner carrega só as configurações de projeto e locais, então seu CLAUDE.md, agentes e plugins ficam fora da medição. Ele desliga o `AskUserQuestion` em toda configuração, só Opus e só Sonnet incluídos: uma rodada headless nega a pergunta de qualquer jeito e ninguém responderia. Os prompts do cc-tiers mandam tomar a opção recomendada e registrá-la em `Assumed:` (`agents/orchestrator.md`, Specify). No cc-tiers o runner também lê, do transcript da sessão, as escalações que os hooks anunciaram e se cada tarefa foi roteada como este README diz.
+A suíte de login roda só em one-shot: a tarefa edita o servidor e a configuração, então o `--session` é recusado. O runner carrega só as configurações de projeto e locais, então seu CLAUDE.md, agentes e plugins ficam fora da medição. Ele desliga o `AskUserQuestion` em toda configuração, só Opus e só Sonnet incluídos: uma rodada headless nega a pergunta de qualquer jeito e ninguém responderia. Os prompts do cc-tiers mandam tomar a opção recomendada e registrá-la em `Assumed:` (`agents/orchestrator.md`, Specify). No cc-tiers o runner também lê, do transcript da sessão, as escalações que os hooks anunciaram e se cada tarefa foi roteada como este README diz. Para o cc-tiers, uma tabela de camadas de qualidade mostra o que o gate e a revisão fizeram: passes barrados pelo gate, comandos flaky, tarefas não validadas, achados descartados, rejeições sem evidência e rodadas de revisão por tarefa. O comando da suíte de verificação e evidência (as 8 tarefas não triviais da suíte difícil, Opus puro contra cc-tiers) é o último da lista acima.
 
-**Resultados**, como medidos, em one-shot.
+**Resultados**, como medidos, em one-shot. Os resultados abaixo são da 0.6, sem o gate e sem a revisão com evidência.
 
 Login (`bench/results/login.json`, k=2, cc-tiers no commit `18a1222` do plugin):
 
@@ -383,6 +460,8 @@ Par difícil (`bench/results/hard-pair.json`, `traversal` e `race`, k=3, cc-tier
 
 **O que os dados não mostram:** o cc-tiers vencendo o Opus puro em tarefas com as regras enunciadas. No par difícil, o Opus puro também resolveu todas as rodadas.
 
+**Gate e revisão com evidência (0.7), suíte difícil, k=2:** resultados pendentes. Empate com o Opus puro em qualidade é um resultado possível e será informado como tal.
+
 ---
 
 ## 📋 Requisitos
@@ -418,6 +497,7 @@ claude --plugin-dir .
 | `hooks/hooks.json` | Resumo no SessionStart, as checagens, o effort, o classificador Haiku e o contador do Agent, SubagentStop, Stop e UserPromptSubmit |
 | `hooks/cc_tiers.mjs` | Regras de merge, o contador, gasto, orçamento e histórico |
 | `hooks/route.mjs` | A heurística por trás do `/cc-tiers:route` |
+| `hooks/verify.mjs` | O gate de verificação: ler `CC_TIERS_VERIFY`, a lista de prefixos, rodar os comandos e julgar os achados |
 | `hooks/report.mjs` | A tabela por trás do `/cc-tiers:report` |
 | `commands/report.md` | `/cc-tiers:report` |
 | `bench/` | O benchmark: as suítes de login e difícil (tarefas, fixtures, checagens ocultas, referências), o executor e os resultados medidos |

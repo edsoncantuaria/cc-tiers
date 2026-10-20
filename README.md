@@ -60,8 +60,12 @@ flowchart LR
     R -- brief --> D[Sonnet implementer]
     C -- fail twice --> D
     D -- fail twice --> E[Opus implements]
-    C -- pass --> H[Sonnet checker]
-    D -- pass, risky --> F[Opus reviewer]
+    C -- pass --> V{Verify gate}
+    D -- pass --> V
+    V -- command fails --> C
+    V -- command fails --> D
+    V -- verified --> H[Sonnet checker]
+    V -- verified, risky --> F[Opus reviewer]
     H -- reject --> C
     F -- reject --> D
     H -- approve --> G[Done]
@@ -105,6 +109,69 @@ A task that needs no criteria (a mechanical edit, a lookup) says why with `CC_TI
 
 ---
 
+## ✅ Verify
+
+A `pass` used to be the agent's word. With the gate, the hook runs the check itself. Every report from a writer (worker, implementer, architect, the Opus ceiling, the dispatcher's own task) lists the commands that prove the work, one per line, before the status:
+
+```
+CC_TIERS_VERIFY: node --test test/booking.test.mjs
+CC_TIERS_VERIFY: npx tsc --noEmit
+CC_TIERS_STATUS: pass
+```
+
+When nothing can verify the change (a device write, a screen checked by hand), the report says so: `CC_TIERS_VERIFY: none - <reason>`. The command is the one focused on the area touched, the same one the writer ran, not the whole project.
+
+**What the hook runs.** Only when the report is `pass`. It runs each command as argv, without a shell, in the project directory. A line with any of `` ; | & > < ` $ ( ) `` or a line break is refused. Two forms are read by the hook itself: `KEY=value` at the start becomes an environment variable (`APP_ENV=testing vendor/bin/phpunit`; `PATH`, `LD_*`, and `DYLD_*` are refused), and `cd <dir> && <command>` runs in `<dir>`, which must be relative and inside the project. The allow list is checked on what is left.
+
+**Allow list.** `verify_allow` is a comma-separated list of prefixes, compared on whole words: `npm test` matches `npm test -- x`, not `npm testx`. The default covers `npm test`, `node --test`, `npx tsc`, `npx eslint`, `npx vitest`, `npx jest`, `npx playwright test`, PHPUnit, PHPStan, PHPCS, `pytest`, `go test`, and `cargo test`. `docker exec` is off by default, because with it any command runs inside the container. If you use it, for example on a PHP project in Docker, add `docker exec` in `/config`. The list limits the shape of the command, not what a test executes: a test is repository code, and the agent can already write code.
+
+**Outcomes.**
+
+- A command that exits non-zero runs once more. Passing the second time is a pass, reported as `flaky`. Failing twice is a failure, and the note for the next attempt carries the command, the exit code, and the last 40 lines of output.
+- A command that hits `verify_timeout` (default 300 s) counts as a failure: a test that hangs is a defect or a broken environment, and either way the pass is not valid.
+- `verify_budget` (default 600 s) caps the whole report, retries included. Commands past it do not run and are listed as not validated. That is not a failure, so a slow suite does not push the task up to Opus.
+- A failure stops the commands after it.
+- A command outside the list, a `none` line, or a refused line is **not validated**: nothing runs and it is not a failure. The message says which prefix to add in `/config`.
+- A `pass` with no `CC_TIERS_VERIFY` line counts as a failure.
+
+The final report says, per task, `verified: <commands>`, `flaky: <command>`, or `not validated: <reason>`, and `/cc-tiers:report` has a Verify column for it. The gate runs where the report is counted. For the Opus ceiling and the dispatcher there is no Agent call, so the pass waits until the Stop hook, which runs the commands outside the session lock. A rejected one blocks Stop once with the note. The light path (a trivial task done inline) is outside the gate. `verify: off` removes it.
+
+**Limits.** The gate proves that the declared command passes, not that it covers the change: a writer can declare a test that does not touch what changed, and the review is what catches that. Parallel sessions that share a checkout can fail a command because of another task; the failure message says so when another task is active. Commands run through the hook, not through your permission rules, which is why the allow list exists.
+
+---
+
+## 🧾 Evidence-based review
+
+A review used to reject with "a concrete reason", and that weighed the same with a proof or without one. Now a rejection counts only when it carries a blocking defect with a way to reproduce it. The reviewer receives the diff, the spec block, the research block, and the request, and never the writer's report or explanation: a reviewer that reads the writer's reasoning inherits its blind spots.
+
+The reviewer goes through correctness, regression, security, state (order, idempotency, atomicity), and scope, in that order. Each finding is a block before the trailer:
+
+```
+CC_TIERS_FINDING_BEGIN
+category: state
+severity: blocking
+evidence: command
+command: node --test test/booking.test.mjs
+expected: an old event does not close the reopened shift
+observed: 'reopen keeps open' fails: expected open, got closed
+where: src/booking.js:142
+CC_TIERS_FINDING_END
+```
+
+`category` is `correctness`, `regression`, `security`, `state`, or `scope`. `severity` is `blocking` or `note`. A finding describes the defect, never the fix: the writer chooses the fix. Hardening the spec does not ask for, style, and anything that belongs to another issue are always notes.
+
+**What counts.** `CC_TIERS_STATUS: fail` is a failure only with at least one valid blocking finding. `evidence` is one of three:
+
+- `command`: a command in the `CC_TIERS_VERIFY` format, plus `expected`, `observed`, and `where`. The hook runs it once when it is on the allow list. If it **passes**, the finding is discarded as a false positive. If it fails, the finding stands. Off the list, it stands as `trace`.
+- `trace`: a concrete input, `expected`, `observed`, and `where: file:line`. The hook does not check it.
+- `coverage`: a criterion or edge case of the spec that no test exercises, with `criterion:` (the spec line, copied) and `where:` (the tests the reviewer read). It stands only when the criterion appears in that task's spec block, so it cannot become hardening the request did not ask for. A task with `CC_TIERS_SPEC: none` takes no `coverage` finding.
+
+An incomplete block does not count. A `fail` with no valid blocking finding is not a failure: the message says `rejected without evidence; <n> finding(s) became notes` and the task is treated as approved. Notes go to the final report as a list, and the note sent to the writer on a real failure carries only the blocking findings. The reviewer does not edit files; it may run read commands and tests that already exist, and it does not add tests to the repo.
+
+`review_evidence: off` goes back to 0.6: any reviewer `fail` counts. Limit: the hook does not check `trace` evidence, so a made-up trace still counts.
+
+---
+
 ## 🔁 Escalation
 
 A failure is a failed test, a rejected review, or a subagent error. The task may fail **twice** at its tier (`max_attempts`, default 2). The next attempt moves up, and the failure notes go with it:
@@ -120,6 +187,8 @@ The hooks enforce what the prompts ask for:
 - **Before a delegation** (PreToolUse), a call to a cc-tiers agent is refused when it passes `model`, has no `CC_TIERS_TASK` header, or sends an escalated task back down a tier. Sending a task up early (`/cc-tiers:escalate`) moves the counter with the notes carried.
 - **Research** (`research: on`, the default): a call to the implementer or the architect is refused when its task has neither a researcher pass nor a `CC_TIERS_RESEARCH: none - <reason>` line.
 - **Specify** (`specify: on`, the default): a call to the implementer or the architect is refused when its prompt has no `CC_TIERS_SPEC_BEGIN` / `CC_TIERS_SPEC_END` block with content and no `CC_TIERS_SPEC: none - <reason>` line.
+- **Verify** (`verify: on`, the default): a writer's `pass` counts only after the hook runs the `CC_TIERS_VERIFY` commands that are on the allow list. A `pass` without those lines, or with a command that fails, counts as a failure. The Opus ceiling and the dispatcher are verified at Stop.
+- **Evidence** (`review_evidence: on`, the default): a reviewer or checker `fail` counts only with a valid blocking finding. The hook re-runs the finding's command and discards one that passes, and a `fail` with no finding becomes notes.
 - **Background agents** are counted too. The launch records the agent id, and SubagentStop counts the report when it finishes. The note reaches the orchestrator on its next delegation, or at the end of the turn.
 - **The Opus ceiling** has no Agent call, so the orchestrator marks its own attempt with a `CC_TIERS_TASK` / `CC_TIERS_TIER: opus` / `CC_TIERS_ROLE: orchestrator` header and closes it with `CC_TIERS_STATUS`. The hook counts that trailer like any other report.
 - Parallel agents share one counter file per session, behind a lock, written atomically.
@@ -210,7 +279,7 @@ The first write adds the file to `.git/info/exclude` when the project is a git c
 | `/cc-tiers:tiers [task]` | Plan, route, and run the work |
 | `/cc-tiers:route [task]` | Name the tier and stop. Runs the same heuristic as the hooks. No edits |
 | `/cc-tiers:escalate [slug]` | Move that task up one tier now, notes included |
-| `/cc-tiers:report [--all]` | Per-task table for this session: tiers, attempts, effort, review, status, and cost next to Opus rates |
+| `/cc-tiers:report [--all]` | Per-task table for this session: tiers, attempts, effort, review, verify, status, and cost next to Opus rates. The Verify column says `ok`, `flaky`, or `not validated` |
 
 You can also ask in plain language. The `tiers` skill loads for an implement, fix, rename, or review request. Mention an agent directly with `@agent-cc-tiers:worker`, `@agent-cc-tiers:implementer`, `@agent-cc-tiers:checker`, or `@agent-cc-tiers:reviewer`.
 
@@ -251,6 +320,13 @@ Open `/config` and set the cc-tiers rows. They apply on the next session (the Se
 | `show_cost` | `off` | `on` shows the estimated cost of each task and the session next to Opus rates |
 | `research` | `on` | Require a researcher brief, or a `none - <reason>` line, before code goes to the implementer or the architect. `off` removes the step |
 | `specify` | `on` | Require acceptance criteria, or a `CC_TIERS_SPEC: none - <reason>` line, before code goes to the implementer or the architect, and let the orchestrator ask what changes the result. `off` removes the step |
+| `verify` | `on` | A writer's `pass` must list the commands that prove it in `CC_TIERS_VERIFY` lines, and the hook runs the ones on the allow list. `off` takes a pass from the report alone |
+| `verify_allow` | see below | Comma-separated command prefixes the gate may run, compared on whole words. `docker exec` is not in the default. Blank uses the default |
+| `verify_timeout` | `300` | Seconds one gate command may run before it counts as a failure. 10–600 |
+| `verify_budget` | `600` | Seconds the gate may spend on one report. Commands past it are not validated, not failed. 30–600 |
+| `review_evidence` | `on` | A reviewer's `fail` counts only with a blocking finding that has evidence. `off` counts any `fail` |
+
+The default `verify_allow` is `npm test, npm run test, node --test, npx tsc, npx eslint, npx vitest, npx jest, npx playwright test, vendor/bin/phpunit, ./vendor/bin/phpunit, vendor/bin/phpstan, ./vendor/bin/phpstan, vendor/bin/phpcs, ./vendor/bin/phpcs, pytest, python -m pytest, go test, cargo test`.
 
 `risky` is the default: Opus reviews non-trivial work in a fresh context and skips a trivial Haiku pass. `cheap` sends Haiku output to the Sonnet checker and sends Opus review only for a review phrase or the ceiling. `always` reviews every pass (Haiku on Sonnet, the rest on Opus). `never` skips review. While a budget window is conserving, Opus review is reserved for critical work even under `risky` or `always`.
 
@@ -272,7 +348,7 @@ To replace a whole list, add `.claude/cc-tiers.json` to the project. A list you 
 }
 ```
 
-The escalation order is fixed. Routing phrases and keywords, the retry limit, the effort ladders, the review policy, the research gate, the specify gate, the classifier, learning, and the two budget thresholds are the knobs.
+The escalation order is fixed. Routing phrases and keywords, the retry limit, the effort ladders, the review policy, the research gate, the specify gate, the verify gate and evidence-based review, the classifier, learning, and the two budget thresholds are the knobs.
 
 ---
 
@@ -308,15 +384,16 @@ Tests the model wrote do not count toward resolved; the raw JSON keeps them as `
 ```bash
 npm run bench -- --tasks-file bench/tasks-login.json --configs opus,sonnet,cc-tiers --repeat 2 --out bench/results/login.json
 npm run bench -- --tasks-file bench/tasks-hard.json --tasks traversal,race --configs opus,sonnet,cc-tiers --repeat 3 --out bench/results/hard-pair.json
+npm run bench -- --tasks-file bench/tasks-hard.json --tasks race,cancel,instances,traversal,date-filter,csv-escape,offboarding,recurring-pack --configs opus,cc-tiers --repeat 2 --out bench/results/verify-evidence.json
 npm run bench:table -- bench/results/login.json
 ```
 
 > [!WARNING]
 > A run uses your real Claude Code login, so on Pro or Max it spends your usage window. `npm run bench:table -- <result files>` prints the tables from saved results.
 
-The login suite is one-shot only: its task edits the server and the config, so `--session` is refused. The runner loads only project and local settings, so your own CLAUDE.md, agents, and plugins stay out of the measurement. It disables `AskUserQuestion` for every configuration, Opus only and Sonnet only included: a headless run denies it anyway and nobody would answer. cc-tiers's prompts tell it to take the recommended option and record it under `Assumed:` (`agents/orchestrator.md`, Specify). For cc-tiers the runner also reads, from the session transcript, the escalations the hooks announced and whether each task was routed as this README says.
+The login suite is one-shot only: its task edits the server and the config, so `--session` is refused. The runner loads only project and local settings, so your own CLAUDE.md, agents, and plugins stay out of the measurement. It disables `AskUserQuestion` for every configuration, Opus only and Sonnet only included: a headless run denies it anyway and nobody would answer. cc-tiers's prompts tell it to take the recommended option and record it under `Assumed:` (`agents/orchestrator.md`, Specify). For cc-tiers the runner also reads, from the session transcript, the escalations the hooks announced and whether each task was routed as this README says. For cc-tiers, a quality layers table shows what the gate and the review did: passes blocked by the gate, flaky commands, tasks not validated, findings discarded, rejections without evidence, and review rounds per task. The command for the verify and evidence suite (the 8 non-trivial tasks of the hard suite, Opus only against cc-tiers) is the last one in the list above.
 
-**Results**, as measured, one-shot.
+**Results**, as measured, one-shot. The results below are from 0.6, before the gate and evidence-based review.
 
 Login (`bench/results/login.json`, k=2, cc-tiers at plugin commit `18a1222`):
 
@@ -383,6 +460,8 @@ Hard pair (`bench/results/hard-pair.json`, `traversal` and `race`, k=3, cc-tiers
 
 **What the data does not show:** cc-tiers beating plain Opus on tasks with the rules spelled out. On the hard pair, plain Opus resolved every run too.
 
+**Gate and evidence-based review (0.7), hard suite, k=2:** results pending. A tie with plain Opus on quality is a possible result and will be reported as one.
+
 ---
 
 ## 📋 Requirements
@@ -418,6 +497,7 @@ claude --plugin-dir .
 | `hooks/hooks.json` | SessionStart summary, the Agent checks, effort, Haiku classifier, and counter, SubagentStop, Stop, and UserPromptSubmit |
 | `hooks/cc_tiers.mjs` | Merge rules, the counter, spend, budget, and history |
 | `hooks/route.mjs` | The heuristic behind `/cc-tiers:route` |
+| `hooks/verify.mjs` | The verify gate: read `CC_TIERS_VERIFY`, the allow list, run the commands, and judge findings |
 | `hooks/report.mjs` | The table behind `/cc-tiers:report` |
 | `commands/report.md` | `/cc-tiers:report` |
 | `bench/` | The benchmark: the login and hard suites (tasks, fixtures, hidden checks, references), the runner, and measured results |

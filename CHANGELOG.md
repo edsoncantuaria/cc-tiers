@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.7.0 - 2026-10-20
+
+### Added
+
+- Verify gate (`hooks/verify.mjs`). A writer's report lists the commands that prove its work in `CC_TIERS_VERIFY: <command>` lines, or says `CC_TIERS_VERIFY: none - <reason>`. When the report is `pass`, the hook runs each command itself, as argv without a shell. A line with `` ; | & > < ` $ ( ) `` or a line break is refused. `KEY=value` at the start becomes an environment variable (`PATH`, `LD_*`, `DYLD_*` are refused) and `cd <dir> &&` runs in a relative directory inside the project. A command that fails runs once more: passing the second time is `flaky`, failing twice is a failure. A timeout is a failure. A command outside the allow list, a `none` line, a refused line, or a command left by the time budget is `not validated`, not a failure. A failure stops the commands after it.
+- The gate covers the worker, the implementer, the architect, the Opus ceiling, and the dispatcher. The ceiling and the dispatcher have no Agent call, so their pass waits until the Stop hook, which runs the commands outside the session lock and blocks once on a failure.
+- Evidence-based review. The reviewer and the checker report each defect as a `CC_TIERS_FINDING_BEGIN` / `CC_TIERS_FINDING_END` block with `category`, `severity`, and `evidence` (`command`, `trace`, or `coverage`). A `fail` counts only with a valid blocking finding. The hook re-runs a `command` finding once and discards it when the command passes, and a `coverage` finding stands only when its criterion appears in the task's spec block. A `fail` without such a finding becomes notes.
+- Options `verify` (`on` / `off`, default `on`), `verify_allow` (command prefixes, `docker exec` not included), `verify_timeout` (default 300 s, 10-600), `verify_budget` (default 600 s, 30-600), and `review_evidence` (`on` / `off`, default `on`).
+- `/cc-tiers:report` has a Verify column: `ok`, `flaky`, or `not validated`. The final report says `verified`, `flaky`, or `not validated` per task.
+- Benchmark: for cc-tiers a quality layers table counts passes blocked by the gate, flaky commands, tasks not validated, findings discarded, rejections without evidence, and review rounds per task. README documents the run for the hard suite (`bench/results/verify-evidence.json`); results are pending.
+
+### Changed
+
+- A writer `pass` without `CC_TIERS_VERIFY` now counts as a failure. `verify: off` restores 0.6.
+- A review `fail` without a blocking finding with evidence no longer counts as a failure. `review_evidence: off` restores 0.6.
+- The hook timeout of PostToolUse, PostToolUseFailure, SubagentStop, and Stop is 660 s, so the gate can run its commands. The other hooks keep their timeouts.
+- The reviewer and the checker no longer receive the writer's report, only the diff, the spec block, the research block, and the request.
+
 ## 0.6.0 - 2026-10-20
 
 ### Added
