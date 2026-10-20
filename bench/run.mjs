@@ -92,6 +92,11 @@ export function claudeArgs(config, plugin, prompt, resume = '') {
   return args
 }
 
+export function sessionRefusal(tasks, tasksFile, session) {
+  const oneShot = tasks.find((task) => task.oneShot)
+  if (session && oneShot) throw new Error(`${tasksFile}: --session cannot run task "${oneShot.id}": its tasks write the same file (src/config.js), so each needs a clean tree. Run it one-shot.`)
+}
+
 function runClaude(dir, config, prompt, timeoutMs, plugin, resume = '') {
   const args = claudeArgs(config, plugin, prompt, resume)
   return new Promise((resolve) => {
@@ -558,6 +563,7 @@ async function main() {
   const version = spawnSync('claude', ['--version'], { encoding: 'utf8' }).stdout.trim()
 
   const session = args.includes('--session')
+  sessionRefusal(tasks, path.relative(ROOT, tasksFile), session)
   const nameOf = (config) => (tag && config.startsWith('cc-tiers') ? `${config}@${tag}` : config)
   const jobs = []
   if (session) {

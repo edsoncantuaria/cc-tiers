@@ -2261,6 +2261,53 @@ test('the short dotenv check fails on the untouched fixture, the naive solution 
   }
 })
 
+test('the short check embeds the fixture files byte for byte, and a rewritten workspace .env does not rescue the naive solution', async () => {
+  const bench = path.join(ROOT, 'bench')
+  const source = readFileSync(path.join(bench, 'checks-trap', 'config-short.test.mjs'), 'utf8')
+  const embedded = (name) => JSON.parse(source.match(new RegExp(`^export const ${name} = (".*")$`, 'm'))[1])
+  assert.equal(embedded('ENV'), readFileSync(path.join(bench, 'fixture-trap', '.env'), 'utf8'))
+  assert.equal(embedded('ENV_LOCAL'), readFileSync(path.join(bench, 'fixture-trap', '.env.local'), 'utf8'))
+  const { cpSync } = await import('node:fs')
+  const env = { ...process.env }
+  delete env.NODE_TEST_CONTEXT
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-trap-'))
+  try {
+    cpSync(path.join(bench, 'fixture-trap'), dir, { recursive: true })
+    mkdirSync(path.join(dir, '.bench-check'))
+    cpSync(path.join(bench, 'checks-trap', 'config-short.test.mjs'), path.join(dir, '.bench-check', 'config-short.test.mjs'))
+    const pem = readFileSync(path.join(dir, '.env'), 'utf8').replace(/PRIVATE_KEY="[^"]*"/, 'PRIVATE_KEY="a\\nb"').replace(' # production endpoint', '')
+    writeFileSync(path.join(dir, '.env'), pem)
+    rmSync(path.join(dir, '.env.local'))
+    writeFileSync(path.join(dir, 'src', 'config.js'), [
+      "import { existsSync, readFileSync } from 'node:fs'",
+      "import path from 'node:path'",
+      "import dotenv from 'dotenv'",
+      'const read = (file) => (existsSync(file) ? dotenv.parse(readFileSync(file)) : {})',
+      'export function loadConfig({ cwd = process.cwd(), env = process.env } = {}) {',
+      "  const merged = { ...read(path.join(cwd, '.env')), ...read(path.join(cwd, '.env.local')) }",
+      '  for (const key of Object.keys(merged)) if (env[key] !== undefined) merged[key] = env[key]',
+      '  return merged',
+      '}',
+      '',
+    ].join('\n'))
+    const proc = spawnSync(process.execPath, ['--test', '.bench-check/config-short.test.mjs'], { cwd: dir, encoding: 'utf8', env })
+    assert.notEqual(proc.status, 0, 'a rewritten workspace .env made the naive solution pass')
+    assert.match(proc.stdout, /(?:#|ℹ) fail [1-9]/)
+    assert.doesNotMatch(proc.stdout, /ENOENT/)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('--session is refused for a oneShot task, and the trap tasks are oneShot', async () => {
+  const { sessionRefusal } = await import(pathToFileURL(path.join(ROOT, 'bench', 'run.mjs')).href)
+  const tasks = JSON.parse(readFileSync(path.join(ROOT, 'bench', 'tasks-trap.json'), 'utf8'))
+  assert.ok(tasks.every((task) => task.oneShot === true))
+  assert.throws(() => sessionRefusal(tasks, 'bench/tasks-trap.json', true), /tasks-trap\.json.*config.*src\/config\.js/s)
+  assert.doesNotThrow(() => sessionRefusal(tasks, 'bench/tasks-trap.json', false))
+  assert.doesNotThrow(() => sessionRefusal([{ id: 'a' }], 'bench/tasks.json', true))
+})
+
 test('the calculator check ignores eval in comments and strings but catches a real call', async () => {
   const bench = path.join(ROOT, 'bench')
   const { cpSync } = await import('node:fs')
