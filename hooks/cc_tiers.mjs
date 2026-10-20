@@ -891,6 +891,7 @@ export function emptyState(sessionId) {
     background: {},
     researched: {},
     pending: [],
+    awaiting: [],
     cursor: freshCursor(),
   }
 }
@@ -906,7 +907,7 @@ export function loadState(file, sessionId) {
     const data = JSON.parse(readFileSync(file, 'utf8'))
     if (!data || typeof data !== 'object' || !data.tasks || typeof data.tasks !== 'object') return emptyState(sessionId)
     const base = emptyState(sessionId)
-    for (const key of ['seen', 'spent', 'pending']) if (!Array.isArray(data[key])) data[key] = base[key]
+    for (const key of ['seen', 'spent', 'pending', 'awaiting']) if (!Array.isArray(data[key])) data[key] = base[key]
     for (const key of ['spend', 'cost', 'log', 'background', 'researched']) {
       if (!data[key] || typeof data[key] !== 'object' || Array.isArray(data[key])) data[key] = base[key]
     }
@@ -2208,6 +2209,8 @@ export function openContext(payload, env = process.env) {
 /**
  * Load the session state under its lock, catch up on the transcript, count any
  * ceiling trailers, run fn, and save. fn receives (state, { budget }).
+ * A ceiling pass waits in state.awaiting while verify is on: its gate runs commands,
+ * which only the Stop hook does, outside this lock.
  */
 export function withSession(ctx, payload, fn) {
   return withLock(ctx.file, () => {
@@ -2216,7 +2219,12 @@ export function withSession(ctx, payload, fn) {
     const budget = budgetDecision(collectLimits({ payload, cursor: state.cursor, env: ctx.env }), ctx.routing)
     ctx.routing.conserve = budget.conserve
     for (const report of scan.reports) {
-      const message = processReport(ctx, state, { kind: 'report', id: report.id, role: report.role || 'orchestrator', prompt: '', text: report.text })
+      const role = report.role || 'orchestrator'
+      if (ctx.routing.verify && (parseHeaders(report.text).STATUS || '').toLowerCase() === 'pass') {
+        parkReport(state, { id: report.id, role, text: report.text })
+        continue
+      }
+      const message = processReport(ctx, state, { kind: 'report', id: report.id, role, prompt: '', text: report.text })
       if (message) queueMessage(state, message)
     }
     const result = fn(state, { budget })
@@ -2241,6 +2249,18 @@ export function prepareReport(ctx, event, payload = {}) {
   // Nothing may run without a project dir; a declaration still tells missing from not validated.
   const status = parseVerify(event.text).length ? 'unverified' : 'missing'
   return { ...event, gate: { status, verified: [], flaky: [], unverified: status === 'missing' ? [] : [{ raw: '', reason: 'no project dir' }], failure: null } }
+}
+
+function parkReport(state, report) {
+  const awaiting = state.awaiting || []
+  if (awaiting.some((item) => item.id === report.id) || (state.seen || []).includes(report.id)) return
+  state.awaiting = [...awaiting, report].slice(-MAX_PENDING)
+}
+
+export function takeAwaiting(state) {
+  const awaiting = state.awaiting || []
+  state.awaiting = []
+  return awaiting
 }
 
 export function queueMessage(state, message) {

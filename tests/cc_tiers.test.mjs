@@ -2542,6 +2542,112 @@ test('prepareReport runs outside the lock', async () => {
   }
 })
 
+const CEILING = (status, extra = '') =>
+  `CC_TIERS_TASK: users-pagination\nCC_TIERS_TIER: opus\nCC_TIERS_ROLE: orchestrator\nCC_TIERS_STATUS: ${status}\nCC_TIERS_REVIEW: skip\nCC_TIERS_REASON: done${extra}`
+
+test('a ceiling pass waits for the Stop gate', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const transcript = path.join(dir, 'main.jsonl')
+    const row = assistantRow('claude-opus-4-5', { input_tokens: 5 }, [{ type: 'text', text: CEILING('pass', '\nCC_TIERS_VERIFY: npm test') }], { id: 'm1', uuid: 'u1' })
+    writeFileSync(transcript, `${row}\n`)
+    const ctx = { routing: defaultRouting(), file: path.join(dir, 'data', 'session-s.json'), sessionId: 's', env: {}, projectDir: '', ccCost: false }
+    let state = tiers.withSession(ctx, { transcript_path: transcript }, (s) => s)
+    assert.equal(state.log['users-pagination'], undefined)
+    assert.equal(state.pending.length, 0)
+    assert.deepEqual(state.awaiting, [{ id: 'row:u1', role: 'orchestrator', text: CEILING('pass', '\nCC_TIERS_VERIFY: npm test') }])
+    // A later scan of the same rows does not park the report twice.
+    tiers.withSession(ctx, { transcript_path: transcript }, (s) => {
+      s.cursor.offset = 0
+    })
+    state = tiers.withSession(ctx, { transcript_path: transcript }, (s) => s)
+    const parked = tiers.takeAwaiting(state)
+    assert.equal(parked.length, 1)
+    assert.deepEqual(state.awaiting, [])
+    // Once gated and counted, the same id is a duplicate.
+    const prepared = { kind: 'report', id: parked[0].id, role: parked[0].role, prompt: '', text: parked[0].text, gate: { status: 'pass', verified: ['npm test'], flaky: [], unverified: [], failure: null } }
+    assert.ok(tiers.processReport(ctx, state, prepared).includes('cc-tiers gate: users-pagination verified: npm test'))
+    assert.equal(tiers.processReport(ctx, state, prepared), '')
+    // A session-role pass without a gate still counts as before (only parking keeps it from arriving ungated).
+    const plain = tiers.applyEvent(tiers.emptyState('s'), { kind: 'report', id: 'row:u2', role: 'dispatcher', prompt: '', text: CEILING('pass') }, defaultRouting())
+    assert.equal(plain.meta.outcome, 'pass')
+    assert.equal(plain.message.includes('cc-tiers gate'), false)
+    const off = tiers.withSession({ ...ctx, file: null, routing: defaultRouting({ verify: 'off' }) }, { transcript_path: transcript }, (s) => s)
+    assert.equal((off.awaiting || []).length, 0)
+    assert.equal(off.log['users-pagination'].attempts, 1)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+function ceilingProject(dir) {
+  const project = path.join(dir, 'project')
+  mkdirSync(project)
+  writeFileSync(path.join(project, 'fail.mjs'), "console.log('cursor test red')\nprocess.exit(1)\n")
+  writeFileSync(
+    path.join(project, 'probe.mjs'),
+    "import { existsSync, writeFileSync } from 'node:fs'\nwriteFileSync(process.argv[3], String(existsSync(process.argv[2])))\n",
+  )
+  return project
+}
+
+test('Stop verifies the ceiling and blocks once on failure', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const project = ceilingProject(dir)
+    const env = hookEnv(dir, { CC_TIERS_CC_COST: '0', CLAUDE_PLUGIN_OPTION_VERIFY_ALLOW: 'node fail.mjs' })
+    const transcript = path.join(dir, 'main.jsonl')
+    const row = assistantRow('claude-opus-4-5', { input_tokens: 5 }, [{ type: 'text', text: CEILING('pass', '\nCC_TIERS_VERIFY: node fail.mjs') }], { id: 'm1', uuid: 'u1' })
+    writeFileSync(transcript, `${row}\n`)
+    const submit = runHook('stop.mjs', { session_id: 'sess-1', hook_event_name: 'UserPromptSubmit', prompt: 'go on', transcript_path: transcript, cwd: project }, env)
+    assert.equal(submit.status, 0, submit.stderr)
+    assert.equal(submit.stdout.includes('cc-tiers gate'), false)
+    const payload = { session_id: 'sess-1', hook_event_name: 'Stop', transcript_path: transcript, cwd: project, stop_hook_active: false }
+    const proc = runHook('stop.mjs', payload, env)
+    assert.equal(proc.status, 0, proc.stderr)
+    const out = JSON.parse(proc.stdout)
+    assert.equal(out.decision, 'block')
+    assert.ok(out.reason.includes('cc-tiers gate: users-pagination failed: node fail.mjs (exit 1)'), out.reason)
+    const state = JSON.parse(readFileSync(path.join(dir, 'data', 'session-sess-1.json'), 'utf8'))
+    assert.deepEqual(state.awaiting, [])
+    assert.equal(state.log['users-pagination'].attempts, 1)
+    assert.equal(state.tasks['users-pagination'].failures.length, 1)
+    assert.equal(runHook('stop.mjs', { ...payload, stop_hook_active: true }, env).stdout, '')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a passing ceiling gate clears the counter', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const project = ceilingProject(dir)
+    const env = hookEnv(dir, { CC_TIERS_CC_COST: '0', CLAUDE_PLUGIN_OPTION_VERIFY_ALLOW: 'node probe.mjs' })
+    const lock = path.join(dir, 'data', 'session-sess-1.json.lock')
+    const probe = path.join(dir, 'out')
+    const transcript = path.join(dir, 'main.jsonl')
+    writeFileSync(
+      transcript,
+      [
+        assistantRow('claude-opus-4-5', { input_tokens: 5 }, [{ type: 'text', text: CEILING('fail') }], { id: 'm1', uuid: 'u1' }),
+        assistantRow('claude-opus-4-5', { input_tokens: 5 }, [{ type: 'text', text: CEILING('pass', `\nCC_TIERS_VERIFY: node probe.mjs ${lock} ${probe}`) }], { id: 'm2', uuid: 'u2' }),
+      ].join('\n') + '\n',
+    )
+    const proc = runHook('stop.mjs', { session_id: 'sess-1', hook_event_name: 'Stop', transcript_path: transcript, cwd: project, stop_hook_active: true }, env)
+    assert.equal(proc.status, 0, proc.stderr)
+    assert.equal(readFileSync(probe, 'utf8'), 'false')
+    const message = JSON.parse(proc.stdout).systemMessage
+    assert.ok(message.includes(`cc-tiers gate: users-pagination verified: node probe.mjs ${lock} ${probe}`), message)
+    assert.ok(message.includes('cleared its attempt counter'))
+    const state = JSON.parse(readFileSync(path.join(dir, 'data', 'session-sess-1.json'), 'utf8'))
+    assert.equal(state.tasks['users-pagination'], undefined)
+    assert.equal(state.log['users-pagination'].attempts, 2)
+    assert.deepEqual(state.awaiting, [])
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('hooks.json gives the gate 660 s', () => {
   const events = JSON.parse(readFileSync(path.join(ROOT, 'hooks/hooks.json'), 'utf8')).hooks
   for (const name of ['PostToolUse', 'PostToolUseFailure', 'SubagentStop', 'Stop']) assert.equal(events[name][0].hooks[0].timeout, 660, name)

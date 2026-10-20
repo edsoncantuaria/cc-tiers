@@ -3,8 +3,10 @@
  * Stop and UserPromptSubmit hook. Catches up on the transcript (which counts an
  * Opus ceiling trailer) and delivers reports that are still waiting. On
  * UserPromptSubmit it also adds the light-path note for a one-task trivial request.
- * On Stop it asks the orchestrator to continue once, so a retry or an
- * escalation is not dropped at the end of the turn.
+ * On Stop it also runs the verification gate of ceiling and dispatcher passes
+ * parked by the scan (outside the session lock, the commands can take minutes)
+ * and asks the orchestrator to continue once, so a retry or an escalation is
+ * not dropped at the end of the turn.
  */
 
 import {
@@ -14,7 +16,10 @@ import {
   loadHistory,
   openContext,
   parsePayload,
+  prepareReport,
+  processReport,
   readStdin,
+  takeAwaiting,
   takePending,
   withSession,
 } from './cc_tiers.mjs'
@@ -26,17 +31,23 @@ function main() {
   const ctx = openContext(payload)
   const prompting = eventName === 'UserPromptSubmit'
   const history = prompting && ctx.routing.learn && ctx.projectDir ? loadHistory(historyPath(ctx.projectDir)) : null
-  const message = withSession(ctx, payload, (state) => {
-    const pending = takePending(state)
-    if (!prompting) return pending
-    const hint = lightHint(payload.prompt, ctx.routing, { history, conserve: ctx.routing.conserve === true, projectDir: ctx.projectDir })
-    return [pending, hint].filter(Boolean).join('\n\n')
-  })
-  if (!message) return
   if (prompting) {
-    process.stdout.write(`${JSON.stringify(hookOutput('UserPromptSubmit', message))}\n`)
+    const message = withSession(ctx, payload, (state) => {
+      const pending = takePending(state)
+      const hint = lightHint(payload.prompt, ctx.routing, { history, conserve: ctx.routing.conserve === true, projectDir: ctx.projectDir })
+      return [pending, hint].filter(Boolean).join('\n\n')
+    })
+    if (message) process.stdout.write(`${JSON.stringify(hookOutput('UserPromptSubmit', message))}\n`)
     return
   }
+  const { awaiting, pending } = withSession(ctx, payload, (state) => ({ awaiting: takeAwaiting(state), pending: takePending(state) }))
+  const prepared = awaiting.map((report) => prepareReport(ctx, { kind: 'report', id: report.id, role: report.role, prompt: '', text: report.text }, payload))
+  // The second scan may count a new trailer; its message goes out with the gated ones.
+  const gated = prepared.length
+    ? withSession(ctx, payload, (state) => [takePending(state), ...prepared.map((event) => processReport(ctx, state, event))])
+    : []
+  const message = [pending, ...gated].filter(Boolean).join('\n\n')
+  if (!message) return
   if (payload.stop_hook_active === true) {
     process.stdout.write(`${JSON.stringify({ systemMessage: message })}\n`)
     return
