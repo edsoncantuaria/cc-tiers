@@ -87,6 +87,48 @@ export function workspaceTree(dir) {
   return tree.status === 0 ? tree.stdout.trim() : ''
 }
 
+const SCAN_SKIP = new Set(['node_modules', '.git'])
+
+/** Every file under dir as a relative path -> content map, without node_modules and .git. */
+export function readTree(dir, base = dir, files = new Map()) {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (SCAN_SKIP.has(entry.name)) continue
+    const full = path.join(dir, entry.name)
+    if (entry.isDirectory()) readTree(full, base, files)
+    else if (entry.isFile()) files.set(path.relative(base, full).split(path.sep).join('/'), readFileSync(full).toString('latin1'))
+  }
+  return files
+}
+
+/** The paths a unified diff writes to (the `+++ b/<path>` lines). */
+export function patchFiles(patch) {
+  return [...String(patch).matchAll(/^\+\+\+ b\/(.+)$/gm)].map((match) => match[1])
+}
+
+/**
+ * The files a task may touch: those its reference solution touches (a patch named
+ * after the task, or every file under a solutions dir with no patch) plus scopeExtra.
+ * Test files and .bench-check/ are always in scope (see outOfScopeFiles).
+ */
+export function scopeOf(task, solutions) {
+  const scope = new Set(task.scopeExtra || [])
+  const patch = path.join(solutions, `${task.id}.patch`)
+  if (existsSync(patch)) for (const file of patchFiles(readFileSync(patch, 'utf8'))) scope.add(file)
+  else if (existsSync(solutions)) {
+    for (const file of readTree(solutions).keys()) if (!file.endsWith('.txt') && !file.endsWith('.patch')) scope.add(file)
+  }
+  return [...scope]
+}
+
+/** Files added, modified or deleted between two path -> content maps that are not in scope, sorted. */
+export function outOfScopeFiles(before, after, scope) {
+  const allowed = new Set(scope)
+  const changed = new Set()
+  for (const [file, content] of after) if (before.get(file) !== content) changed.add(file)
+  for (const file of before.keys()) if (!after.has(file)) changed.add(file)
+  return [...changed].filter((file) => !allowed.has(file) && !/^(test|\.bench-check)\//.test(file)).sort()
+}
+
 export function claudeArgs(config, plugin, prompt, resume = '') {
   // project and local only: the user's own CLAUDE.md, agents, plugins, and hooks would change what is measured.
   // No AskUserQuestion for any config: a headless run denies it, and nobody would answer.
@@ -353,7 +395,7 @@ export function stepUsage(json, previous) {
   return { ...json, modelUsage, total_cost_usd: (Number(json.total_cost_usd) || 0) - (Number(previous.total_cost_usd) || 0) }
 }
 
-export function summarize(config, task, rep, run, verdict, escalations = null, route = null, quality = null) {
+export function summarize(config, task, rep, run, verdict, escalations = null, route = null, quality = null, outOfScope = null) {
   const json = run.json || {}
   const models = {}
   const tokens = {}
@@ -396,6 +438,7 @@ export function summarize(config, task, rep, run, verdict, escalations = null, r
     routedAsDocumented: route?.ok ?? null,
     delegations: route?.steps ?? null,
     quality,
+    outOfScope,
     reviewRounds: route?.steps ? route.steps.filter((step) => step.agent === 'cc-tiers:reviewer' || step.agent === 'cc-tiers:checker').length : null,
     error: json.is_error ? String(json.result || '').slice(0, 300) : run.code === 0 ? '' : run.stderr.slice(-300),
     checkOutput: verdict.resolved ? '' : verdict.output,
@@ -437,6 +480,7 @@ function freshOf(row) {
  * (τ-bench): share of tasks resolved in every one of their k runs. Regressions:
  * runs whose hidden check passed but that broke a test that passed before.
  * Recreated: runs that failed a `reuse: ` test; null when no run had one.
+ * Outside: runs that changed a file outside the task's scope; null when no row has outOfScope.
  */
 export function metrics(rows) {
   const tasks = [...new Set(rows.map((row) => row.task))]
@@ -456,6 +500,7 @@ export function metrics(rows) {
     runs: rows.length,
     regressions: rows.some((row) => 'p2p' in row) ? rows.filter((row) => row.f2p && row.p2p === false).length : null,
     recreated: rows.some((row) => row.reuseChecked) ? rows.filter((row) => row.recreated).length : null,
+    outside: rows.some((row) => Array.isArray(row.outOfScope)) ? rows.filter((row) => row.outOfScope?.length).length : null,
     tokensPerResolved: resolvedCounted ? tokens / resolvedCounted : null,
   }
 }
@@ -468,8 +513,8 @@ export function table(results) {
   const configs = [...new Set(results.map((row) => row.config))]
   const opus = configs.includes('opus') ? metrics(results.filter((row) => row.config === 'opus')) : null
   const lines = [
-    `| Configuration | pass@1 | Δ pass@1 vs ${label('opus')} | pass^k | Resolved | Broke something | Recreated existing code | Tokens per resolved task |`,
-    '| --- | --: | --: | --: | --: | --: | --: | --: |',
+    `| Configuration | pass@1 | Δ pass@1 vs ${label('opus')} | pass^k | Resolved | Broke something | Recreated existing code | Touched outside scope | Tokens per resolved task |`,
+    '| --- | --: | --: | --: | --: | --: | --: | --: | --: |',
   ]
   for (const config of configs) {
     const m = metrics(results.filter((row) => row.config === config))
@@ -480,7 +525,7 @@ export function table(results) {
       points = change < 0 ? `−${-change} pp` : change > 0 ? `+${change} pp` : '0 pp'
     }
     const tokens = kilo(m.tokensPerResolved)
-    lines.push(`| ${label(config)} | ${percent(m.pass1)} | ${points} | ${percent(m.passK)} (k=${m.k}) | ${m.resolved}/${m.runs} | ${m.regressions ?? '—'} | ${m.recreated ?? '—'} | ${tokens} |`)
+    lines.push(`| ${label(config)} | ${percent(m.pass1)} | ${points} | ${percent(m.passK)} (k=${m.k}) | ${m.resolved}/${m.runs} | ${m.regressions ?? '—'} | ${m.recreated ?? '—'} | ${m.outside ?? '—'} | ${tokens} |`)
   }
   lines.push('')
   const tasks = [...new Set(results.map((row) => row.task))]
@@ -606,6 +651,7 @@ async function main() {
   const suffix = path.basename(tasksFile).match(/^tasks(-.+)?\.json$/)?.[1] || ''
   const fixture = path.resolve(value('--fixture', path.join(path.dirname(tasksFile), `fixture${suffix}`)))
   const checks = path.resolve(value('--checks', path.join(path.dirname(tasksFile), `checks${suffix}`)))
+  const solutions = path.resolve(value('--solutions', path.join(path.dirname(tasksFile), `solutions${suffix}`)))
   const allTasks = JSON.parse(readFileSync(tasksFile, 'utf8'))
   const wanted = value('--tasks', '')
   const tasks = wanted ? allTasks.filter((task) => wanted.split(',').includes(task.id)) : allTasks
@@ -645,8 +691,10 @@ async function main() {
       for (const task of tasks) {
         const before = passingTests(dir)
         const tree = workspaceTree(dir)
+        const files = readTree(dir)
         const run = await runClaude(dir, CONFIGS[config], task.prompt, timeoutMs, plugin, id)
         const changed = workspaceTree(dir) !== tree
+        const outside = outOfScopeFiles(files, readTree(dir), scopeOf(task, solutions))
         if (run.json?.session_id && run.json.session_id !== id) seen = 0
         id = run.json?.session_id || id
         const read = transcriptFor(config, id, seen, task.kind, changed)
@@ -655,7 +703,7 @@ async function main() {
         rmSync(path.join(dir, '.bench-check'), { recursive: true, force: true })
         const step = { ...run, json: stepUsage(run.json, previous) }
         if (run.json) previous = run.json
-        const row = { ...summarize(nameOf(config), task, rep, step, verdict, read.found, read.route, read.quality), mode: 'session' }
+        const row = { ...summarize(nameOf(config), task, rep, step, verdict, read.found, read.route, read.quality, outside), mode: 'session' }
         process.stderr.write(`${progress(row)} ${row.config} ${task.id} ${kilo(row.freshTokens)} tokens ${row.seconds}s${row.escalations ? ` escalations ${row.escalationPath.join(', ')}` : ''}${row.route ? ` route ${row.route}${row.routedAsDocumented === false ? ' (off)' : ''}` : ''}\n`)
         rows.push(row)
       }
@@ -669,12 +717,14 @@ async function main() {
     try {
       const before = passingTests(dir)
       const tree = workspaceTree(dir)
+      const files = readTree(dir)
       const run = await runClaude(dir, CONFIGS[config], task.prompt, timeoutMs, plugin)
       const changed = workspaceTree(dir) !== tree
+      const outside = outOfScopeFiles(files, readTree(dir), scopeOf(task, solutions))
       const verdict = grade(dir, task, run.json?.result, checks, before)
       const name = tag && config.startsWith('cc-tiers') ? `${config}@${tag}` : config
       const read = transcriptFor(config, run.json?.session_id, 0, task.kind, changed)
-      const row = summarize(name, task, rep, run, verdict, read.found, read.route, read.quality)
+      const row = summarize(name, task, rep, run, verdict, read.found, read.route, read.quality, outside)
       process.stderr.write(`${progress(row)} ${name} ${task.id} ${kilo(row.freshTokens)} tokens ${row.seconds}s\n`)
       return row
     } finally {

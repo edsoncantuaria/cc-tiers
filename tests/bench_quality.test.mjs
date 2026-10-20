@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const { qualityIn, summarize, table } = await import(pathToFileURL(path.join(ROOT, 'bench', 'run.mjs')).href)
+const { outOfScopeFiles, patchFiles, qualityIn, scopeOf, summarize, table } = await import(pathToFileURL(path.join(ROOT, 'bench', 'run.mjs')).href)
 
 const hook = (text) => JSON.stringify({ type: 'attachment', attachment: { type: 'hook_additional_context', content: [text], hookEvent: 'SubagentStop' } })
 
@@ -47,4 +49,47 @@ test('table shows the quality layers section', () => {
   assert.match(out, /\| cc-tiers \(Opus orchestrator\) \| 2 \| 1 \| 1 \| 3 \| 1 \| 2\.5 \|/)
   assert.doesNotMatch(out, /\| Opus only \| [\d—]+ \| [\d—]+ \| [\d—]+ \| [\d—]+ \| [\d—]+ \| [\d.—]+ \|\n/)
   assert.doesNotMatch(table(rows.filter((row) => row.config === 'opus')), /Quality layers|Pass blocked by gate/)
+})
+
+const PATCH = ['diff --git a/src/a.js b/src/a.js', '--- a/src/a.js', '+++ b/src/a.js', '@@ -1 +1 @@', '-x', '+y', 'diff --git a/test/a.test.mjs b/test/a.test.mjs', '--- /dev/null', '+++ b/test/a.test.mjs', ''].join('\n')
+
+test('patchFiles lists the files a patch touches', () => {
+  assert.deepEqual(patchFiles(PATCH), ['src/a.js', 'test/a.test.mjs'])
+  assert.deepEqual(patchFiles(''), [])
+})
+
+test('scopeOf joins the solution files and scopeExtra; lookups have none', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'scope-'))
+  try {
+    writeFileSync(path.join(dir, 'fix.patch'), PATCH)
+    assert.deepEqual(scopeOf({ id: 'fix', scopeExtra: ['src/b.js'] }, dir).sort(), ['src/a.js', 'src/b.js', 'test/a.test.mjs'])
+    assert.deepEqual(scopeOf({ id: 'lookup' }, dir), [])
+    mkdirSync(path.join(dir, 'src'))
+    writeFileSync(path.join(dir, 'src', 'server.js'), '')
+    assert.deepEqual(scopeOf({ id: 'login' }, dir), ['src/server.js'])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('outOfScopeFiles lists added, modified and deleted files outside the scope', () => {
+  const before = new Map([['src/a.js', '1'], ['src/b.js', '1'], ['src/c.js', '1'], ['test/t.mjs', '1']])
+  const after = new Map([['src/a.js', '2'], ['src/b.js', '1'], ['src/d.js', 'new'], ['test/t.mjs', '2'], ['test/new.mjs', 'x'], ['.bench-check/z.mjs', 'x'], ['package.json', 'x']])
+  assert.deepEqual(outOfScopeFiles(before, after, ['src/a.js']), ['package.json', 'src/c.js', 'src/d.js'])
+  assert.deepEqual(outOfScopeFiles(before, before, []), [])
+})
+
+test('table shows Touched outside scope, a dash without data', () => {
+  const base = { task: 'a', kind: 'normal', resolved: true }
+  const rows = [
+    { ...base, config: 'opus', outOfScope: [] },
+    { ...base, config: 'opus', outOfScope: ['README.md'] },
+    { ...base, config: 'cc-tiers', outOfScope: ['a', 'b'] },
+    { ...base, config: 'cc-tiers-light' },
+  ]
+  const out = table(rows)
+  assert.match(out, /Recreated existing code \| Touched outside scope \| Tokens per resolved task \|/)
+  assert.match(out, /\| Opus only \| .* \| — \| 1 \| /)
+  assert.match(out, /\| cc-tiers \(Opus orchestrator\) \| .* \| — \| 1 \| /)
+  assert.match(out, /\| cc-tiers light \(Sonnet dispatcher\) \| .* \| — \| — \| /)
 })
