@@ -192,3 +192,119 @@ export function gateMessage(task, gate) {
   else if (failure) lines.push(`${prefix} failed: ${failure.raw} (exit ${failure.code ?? 'none'})`)
   return lines.join('\n')
 }
+
+const FINDING_BEGIN = 'CC_TIERS_FINDING_BEGIN'
+const FINDING_END = 'CC_TIERS_FINDING_END'
+const FIELD_RE = /^([A-Za-z_]+)\s*:\s*(.*)$/
+const FIELD_KEYS = ['category', 'severity', 'evidence', 'command', 'expected', 'observed', 'where', 'criterion']
+const CATEGORIES = ['correctness', 'regression', 'security', 'state', 'scope']
+const SEVERITIES = ['blocking', 'note']
+const EVIDENCES = ['command', 'trace', 'coverage']
+const REQUIRED = {
+  command: ['command', 'expected', 'observed', 'where'],
+  trace: ['expected', 'observed', 'where'],
+  coverage: ['criterion', 'where'],
+}
+const MAX_NOTES = 8
+
+/** Lowercase and drop diacritics, so "Migração" and "migracao" compare equal. */
+export function fold(text) {
+  return String(text || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
+}
+
+function foldFlat(text) {
+  return fold(text).replace(/\s+/g, ' ').trim()
+}
+
+function buildFinding(lines, closed) {
+  const finding = {}
+  for (const line of lines) {
+    const match = FIELD_RE.exec(line.trim())
+    const key = match?.[1].toLowerCase()
+    if (key && FIELD_KEYS.includes(key)) finding[key] = match[2].trim()
+  }
+  const problem = findingProblem(finding, closed)
+  return problem ? { ...finding, valid: false, problem } : { ...finding, valid: true }
+}
+
+function findingProblem(finding, closed) {
+  if (!closed) return 'unclosed finding block'
+  if (!CATEGORIES.includes(finding.category)) return `unknown category: ${finding.category || ''}`
+  if (!SEVERITIES.includes(finding.severity)) return `unknown severity: ${finding.severity || ''}`
+  if (!EVIDENCES.includes(finding.evidence)) return `unknown evidence: ${finding.evidence || ''}`
+  const missing = REQUIRED[finding.evidence].filter((key) => !finding[key])
+  return missing.length ? `missing ${missing.join(', ')}` : ''
+}
+
+/** Every finding block of the report text; a block never closed is kept as an invalid finding. */
+export function parseFindings(text) {
+  const findings = []
+  let open = null
+  for (const line of String(text || '').split(/\r?\n/)) {
+    const mark = line.trim()
+    if (mark === FINDING_BEGIN) {
+      if (open) findings.push(buildFinding(open, false))
+      open = []
+    } else if (mark === FINDING_END && open) {
+      findings.push(buildFinding(open, true))
+      open = null
+    } else if (open) {
+      open.push(line)
+    }
+  }
+  if (open) findings.push(buildFinding(open, false))
+  return findings
+}
+
+/** Runs a blocking command finding once: true when it failed (still blocks), false when it passed, null when it could not run. */
+function commandFails(finding, { allow, projectDir, timeoutS }, budget, run) {
+  const line = parseLine(finding.command)
+  if (line.kind !== 'command' || !insideProject(projectDir, line.cwd) || !isAllowed(line.argv, allow) || budget.remaining <= 0) return null
+  const seconds = Math.min(timeoutS, budget.remaining)
+  const result = run(line, { projectDir, timeoutS: seconds })
+  budget.remaining -= (result.ms || 0) / 1000
+  if (result.timedOut && seconds < timeoutS) return null
+  return result.timedOut || result.code !== 0
+}
+
+/** Splits findings by what the hook can check; only blocking ones with evidence that holds stay blocking. */
+export function judgeFindings(findings, { specText, allow, projectDir, timeoutS, budgetS, run = runCommand }) {
+  const judged = { blocking: [], discarded: [], notes: [], invalid: [] }
+  const budget = { remaining: budgetS }
+  const spec = foldFlat(specText)
+  for (const finding of findings) {
+    if (!finding.valid) judged.invalid.push(finding)
+    else if (finding.severity === 'note') judged.notes.push(finding)
+    else if (finding.evidence === 'coverage') {
+      const listed = spec && spec.includes(foldFlat(finding.criterion))
+      if (listed) judged.blocking.push(finding)
+      else judged.invalid.push({ ...finding, valid: false, problem: spec ? 'criterion not in the spec block' : 'no spec block to cover' })
+    } else if (finding.evidence === 'command') {
+      const fails = commandFails(finding, { allow, projectDir, timeoutS }, budget, run)
+      if (fails === false) judged.discarded.push(finding)
+      else judged.blocking.push(finding)
+    } else judged.blocking.push(finding)
+  }
+  return judged
+}
+
+/** The two review lines the benchmark greps, plus the notes list. */
+export function reviewMessage(task, judged) {
+  const prefix = `cc-tiers review: ${task}`
+  const lines = []
+  if (judged.discarded.length) lines.push(`${prefix} discarded ${judged.discarded.length} finding(s): the evidence command passed`)
+  const rejected = judged.invalid.length + judged.discarded.length
+  if (!judged.blocking.length && rejected) lines.push(`${prefix} rejected without evidence; ${rejected} finding(s) became notes`)
+  if (judged.notes.length) {
+    lines.push('Notes:')
+    for (const note of judged.notes.slice(0, MAX_NOTES)) lines.push(`- ${note.category} @ ${note.where}`)
+  }
+  return lines.join('\n')
+}
+
+/** What the writer gets back: blocking findings only. */
+export function findingsNote(judged) {
+  return judged.blocking
+    .map((f) => (f.evidence === 'coverage' ? `${f.category} @ ${f.where}: ${f.criterion}` : `${f.category} @ ${f.where}: ${f.expected} / ${f.observed}`))
+    .join('\n')
+}

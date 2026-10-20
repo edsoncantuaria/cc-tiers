@@ -202,3 +202,114 @@ test('runCommand runs a real node command', async () => {
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+const FIELDS = { category: 'state', severity: 'blocking', evidence: 'trace', expected: 'stays open', observed: 'closed', where: 'src/a.js:1' }
+
+function block(fields) {
+  const body = Object.entries(fields).map(([key, value]) => `${key}: ${value}`)
+  return ['CC_TIERS_FINDING_BEGIN', ...body, 'CC_TIERS_FINDING_END'].join('\n')
+}
+
+function judge(fields, run, extra = {}) {
+  const findings = verify.parseFindings(block(fields))
+  return verify.judgeFindings(findings, { specText: '', allow: ALLOW, projectDir: PROJECT, timeoutS: 300, budgetS: 600, run, ...extra })
+}
+
+test('parses a full finding of each evidence kind', () => {
+  const text = [
+    'Review done.',
+    block({ ...FIELDS, evidence: 'command', command: 'node --test t/a.test.mjs' }),
+    block(FIELDS).replace('category: state', 'CATEGORY:   security  '),
+    block({ category: 'correctness', severity: 'blocking', evidence: 'coverage', criterion: 'Slot Libre', where: 'test/a.test.mjs' }),
+    'CC_TIERS_STATUS: fail',
+  ].join('\n')
+  const found = verify.parseFindings(text)
+  assert.equal(found.length, 3)
+  assert.ok(found.every((f) => f.valid), JSON.stringify(found))
+  assert.equal(found[0].command, 'node --test t/a.test.mjs')
+  assert.equal(found[1].category, 'security')
+  assert.equal(found[2].criterion, 'Slot Libre')
+})
+
+test('incomplete or unknown values are invalid', () => {
+  const cases = [
+    { ...FIELDS, category: 'style' },
+    { ...FIELDS, severity: 'major' },
+    { ...FIELDS, evidence: 'hunch' },
+    { ...FIELDS, observed: '' },
+    { ...FIELDS, where: '' },
+    { ...FIELDS, evidence: 'command' },
+    { ...FIELDS, evidence: 'coverage', where: 'x' },
+  ]
+  for (const fields of cases) {
+    const [found] = verify.parseFindings(block(fields))
+    assert.equal(found.valid, false, JSON.stringify(fields))
+    assert.ok(found.problem)
+  }
+  const unclosed = verify.parseFindings(`CC_TIERS_FINDING_BEGIN\ncategory: state\nseverity: blocking`)
+  assert.equal(unclosed.length, 1)
+  assert.equal(unclosed[0].valid, false)
+  assert.equal(verify.parseFindings('no blocks here').length, 0)
+})
+
+test('command evidence that passes is discarded', () => {
+  const { run, calls } = scripted({ code: 0 })
+  const out = judge({ ...FIELDS, evidence: 'command', command: 'node --test t/a.test.mjs' }, run)
+  assert.equal(calls.length, 1)
+  assert.equal(out.discarded.length, 1)
+  assert.equal(out.blocking.length, 0)
+})
+
+test('command evidence that fails blocks, once', () => {
+  const { run, calls } = scripted({ code: 1 })
+  const out = judge({ ...FIELDS, evidence: 'command', command: 'node --test t/a.test.mjs' }, run)
+  assert.equal(calls.length, 1)
+  assert.equal(out.blocking.length, 1)
+  assert.equal(out.discarded.length, 0)
+})
+
+test('out-of-list command evidence counts as trace', () => {
+  const { run, calls } = scripted()
+  for (const command of ['rm -rf x', 'npm test; id', 'cd .. && npm test']) {
+    const out = judge({ ...FIELDS, evidence: 'command', command }, run)
+    assert.equal(out.blocking.length, 1, command)
+  }
+  assert.equal(calls.length, 0)
+  const out = judge({ ...FIELDS, evidence: 'command', command: 'node --test x' }, run, { budgetS: 0 })
+  assert.equal(out.blocking.length, 1)
+  assert.equal(calls.length, 0)
+})
+
+test('coverage needs the criterion in the spec block', () => {
+  const fields = { category: 'correctness', severity: 'blocking', evidence: 'coverage', criterion: 'Slot  livre\nnão duplica', where: 'test/a' }
+  const spec = '- O SLOT LIVRE nao duplica\n- outro'
+  assert.equal(judge(fields, undefined, { specText: spec }).blocking.length, 1)
+  assert.equal(judge(fields, undefined, { specText: '- outra coisa' }).invalid.length, 1)
+  const empty = judge(fields, undefined, { specText: '' })
+  assert.equal(empty.blocking.length, 0)
+  assert.equal(empty.invalid.length, 1)
+})
+
+test('notes never block', () => {
+  const { run, calls } = scripted()
+  const out = judge({ ...FIELDS, severity: 'note', evidence: 'command', command: 'node --test x' }, run)
+  assert.equal(out.notes.length, 1)
+  assert.equal(out.blocking.length + out.discarded.length, 0)
+  assert.equal(calls.length, 0)
+})
+
+test('review message and writer note', () => {
+  const { run } = scripted({ code: 0 })
+  const text = [
+    block({ ...FIELDS, evidence: 'command', command: 'node --test x' }),
+    block({ ...FIELDS, severity: 'note', where: 'src/n.js:2' }),
+    block({ ...FIELDS, observed: '' }),
+  ].join('\n')
+  const out = verify.judgeFindings(verify.parseFindings(text), { specText: '', allow: ALLOW, projectDir: PROJECT, timeoutS: 300, budgetS: 600, run })
+  const message = verify.reviewMessage('T1', out)
+  assert.match(message, /cc-tiers review: T1 discarded 1 finding\(s\): the evidence command passed/)
+  assert.match(message, /cc-tiers review: T1 rejected without evidence; 2 finding\(s\) became notes/)
+  assert.match(message, /Notes:\n.*state @ src\/n\.js:2/)
+  const real = judge(FIELDS)
+  assert.equal(verify.findingsNote(real), 'state @ src/a.js:1: stays open / closed')
+})
