@@ -8,20 +8,24 @@
 - Research gate in the PreToolUse hook. A call to `cc-tiers:implementer` or `cc-tiers:architect` is refused unless the researcher reported pass for that task and the prompt says `CC_TIERS_RESEARCH: done`, or the prompt says `CC_TIERS_RESEARCH: none - <reason>`. The brief rides in the prompt between `CC_TIERS_RESEARCH_BEGIN` and `CC_TIERS_RESEARCH_END`, `CC_TIERS_COVERS` lets one research serve several tasks, and a research is not an attempt. The worker is exempt; the Opus ceiling and the dispatcher's own task are researched by prompt only.
 - `research` option (`on` / `off`, default `on`).
 - Quality metrics in the benchmark: FAIL_TO_PASS and PASS_TO_PASS (SWE-bench), pass@1 (HumanEval), pass^k (tau-bench), regressions, and fresh tokens per resolved task. `changesTests` is recorded per task, and session mode stores usage per step.
-- Calculator suite: `bench/tasks-calc.json`, `bench/fixture-calc/`, `bench/checks-calc/`, and `bench/solutions-calc/calc.js`, one task meant to be repeated (`npm run bench -- --tasks-file bench/tasks-calc.json --repeat 3`).
 - Benchmark table column `Δ pass@1 vs Opus only` (percentage points), and a **Where it made a difference** section that lists only the tasks where a configuration resolved a different share of runs than Opus only.
-- Dotenv trap suite: `bench/tasks-trap.json`, `bench/fixture-trap/` (with dotenv 8.6.0 vendored), `bench/checks-trap/`, and `bench/solutions-trap/config.js`. Code written from memory of a newer dotenv fails silently there, so research and validation can show their worth. The README adds a cheap comparison that runs only the trap and the hard `traversal` and `race` tasks.
 - Specify and ask: before code goes to `cc-tiers:implementer` or `cc-tiers:architect`, the orchestrator (and the dispatcher) writes acceptance criteria between `CC_TIERS_SPEC_BEGIN` and `CC_TIERS_SPEC_END`, asks at most 3 multiple-choice questions only when two readings lead to different code, and records what it assumed when nobody can answer. The same block goes to the reviewer or checker. See README, Specify and ask.
 - Specify gate in the PreToolUse hook and the `specify` option (`on` / `off`, default `on`): a call to the implementer or the architect is refused without a block with content or a `CC_TIERS_SPEC: none - <reason>` line.
-- Short variant of the dotenv trap: the `config-short` task and `bench/checks-trap/config-short.test.mjs`. Its prompt does not list the rules, and its hidden check asserts only what the prompt and the fixture's own `.env` and `.env.local` show, so it measures specifying, not executing a ready spec. The detailed `config` task stays as the ready-spec comparison. The trap suite runs one-shot only, because both tasks write `src/config.js`.
 - Login suite: `bench/tasks-login.json`, `bench/fixture-login/` (dotenv 8.6.0 vendored), `bench/checks-login/`, and `bench/solutions-login/`. One natural `POST /login` request with no hints, on a project that already has a token signer and a multi-line `PRIVATE_KEY` that dotenv 8.6.0 cuts silently; the check passes only if the user would not have to ask again (nothing broken, no hallucinated dotenv behaviour, no recreated signer, login works).
+- Benchmark column `Recreated existing code`: a hidden-check test whose name starts with `reuse: ` checks that existing code was reused, and the column counts the runs that failed one (`—` when no run was checked). Regressions are now shown as `Broke something`.
+- Measured results: `bench/results/login.json` (login, k=2) and `bench/results/hard-pair.json` (`traversal` and `race`, k=3), each against Opus only, Sonnet only, and cc-tiers.
 
 ### Changed
 
 - The benchmark runner passes `--disallowedTools AskUserQuestion` for every configuration, because a headless run denies it anyway; disabling it means no configuration spends turns on a question nobody can answer.
 - Defaults favor quality, so a session behaves differently after updating: `review_policy` is `risky` (was `cheap`), `show_cost` is `off` (was `on`), and the Sonnet effort ladder is `high`, `xhigh` (was `medium`, `high`, `xhigh`); a risky Sonnet task starts at `xhigh`. The implementer's own effort is `high`.
 - The README tells the quality-first story for Pro and Max: Opus plans and reviews, Sonnet researches and builds, review runs in a fresh context, and cost is optional. Light mode is for when the usage window is tight.
-- The benchmark tables no longer show dollars. The 0.5 dollar table is withdrawn: its session-mode column summed session-cumulative cost, and the 0.5 pass rates used the old criterion (hidden check plus the model's own tests, no before-form PASS_TO_PASS), so they are not like-for-like with 0.6. The quality results are marked not measured yet.
+- The benchmark's first table puts quality first and tokens last: `pass@1`, `Δ pass@1 vs Opus only`, `pass^k`, `Resolved`, `Broke something`, `Recreated existing code`, `Tokens per resolved task`. The `Δ tokens vs Opus only` column is gone. `bench/run.mjs` defaults to `bench/tasks-login.json`.
+- The benchmark tables no longer show dollars. The 0.5 dollar table is withdrawn: its session-mode column summed session-cumulative cost, and the 0.5 pass rates used the old criterion (hidden check plus the model's own tests, no before-form PASS_TO_PASS), so they are not like-for-like with 0.6.
+
+### Removed
+
+- The easy (`bench/tasks.json`), calculator, and dotenv-trap benchmark suites, and the 0.4 and 0.5 cost results. The benchmark now measures quality only.
 
 ## 0.5.1 - 2026-10-19
 

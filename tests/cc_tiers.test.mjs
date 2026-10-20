@@ -1426,110 +1426,137 @@ test('a dispatcher doing a task itself is counted from its trailer and escalates
   }
 })
 
-test('the benchmark fixture is green, and every hidden check fails before the task is done', async () => {
+test('the first table puts quality first and tokens last, with no cost column', async () => {
   const bench = path.join(ROOT, 'bench')
-  const tasks = JSON.parse(readFileSync(path.join(bench, 'tasks.json'), 'utf8'))
-  assert.equal(tasks[0].id, 'lookup', 'the lookup runs first in session mode, while the tree is clean')
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-fixture-'))
-  try {
-    const { cpSync } = await import('node:fs')
-    cpSync(path.join(bench, 'fixture'), dir, { recursive: true })
-    const env = { ...process.env }
-    delete env.NODE_TEST_CONTEXT
-    const tests = readdirSync(path.join(dir, 'test')).map((name) => path.join('test', name))
-    assert.equal(spawnSync(process.execPath, ['--test', ...tests], { cwd: dir, encoding: 'utf8', env }).status, 0)
-    spawnSync('git', ['init', '-q'], { cwd: dir })
-    mkdirSync(path.join(dir, '.bench-check'))
-    for (const task of tasks) {
-      assert.ok(task.prompt && task.kind, task.id)
-      const check = path.join(bench, 'checks', `${task.id}.test.mjs`)
-      assert.ok(existsSync(check), task.id)
-      cpSync(check, path.join(dir, '.bench-check', `${task.id}.test.mjs`))
-      const proc = spawnSync(process.execPath, ['--test', `.bench-check/${task.id}.test.mjs`], { cwd: dir, encoding: 'utf8', env })
-      assert.notEqual(proc.status, 0, `${task.id} check passes on the untouched fixture`)
-    }
-  } finally {
-    await rm(dir, { recursive: true, force: true })
+  for (const gone of ['tasks.json', 'tasks-calc.json', 'tasks-trap.json', 'fixture', 'fixture-calc', 'fixture-trap']) {
+    assert.equal(existsSync(path.join(bench, gone)), false, gone)
   }
   const { table, label } = await import(pathToFileURL(path.join(bench, 'run.mjs')).href)
   assert.equal(label('cc-tiers-light@0.5'), 'cc-tiers light (Sonnet dispatcher) 0.5')
   const rows = [
-    { config: 'opus', task: 'typo', kind: 'trivial', resolved: true, f2p: true, p2p: true, freshTokens: 12000 },
-    { config: 'opus', task: 'typo', kind: 'trivial', resolved: false, f2p: true, p2p: false, freshTokens: 8000 },
+    { config: 'opus', task: 'typo', kind: 'trivial', resolved: true, f2p: true, p2p: true, freshTokens: 12000, reuseChecked: true, recreated: false },
+    { config: 'opus', task: 'typo', kind: 'trivial', resolved: false, f2p: true, p2p: false, freshTokens: 8000, reuseChecked: true, recreated: true },
   ]
   const text = table(rows)
-  assert.ok(text.includes('| Configuration | pass@1 | pass^k | Resolved | Regressions | Tokens per resolved task | Δ tokens vs Opus only | Δ pass@1 vs Opus only |'))
-  assert.ok(text.includes('| Opus only | 50% | 0% (k=2) | 1/2 | 1 | 20.0k | — | — |'))
+  assert.ok(text.startsWith('| Configuration | pass@1 | Δ pass@1 vs Opus only | pass^k | Resolved | Broke something | Recreated existing code | Tokens per resolved task |\n'), text)
+  assert.ok(text.includes('| Opus only | 50% | — | 0% (k=2) | 1/2 | 1 | 1 | 20.0k |'))
   assert.ok(text.includes('| `typo` (trivial) | 🟡 1/2 |'))
   assert.equal(text.includes('$'), false)
+  assert.equal(text.includes('Δ tokens'), false)
 })
 
 test('pass-to-pass uses the before-form of each test file', async () => {
   const bench = path.join(ROOT, 'bench')
   const { grade, passingTests } = await import(pathToFileURL(path.join(bench, 'run.mjs')).href)
   const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-grade-'))
+  const checks = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-checks-'))
   try {
-    const { cpSync } = await import('node:fs')
-    cpSync(path.join(bench, 'fixture'), dir, { recursive: true })
+    const file = (name) => path.join(dir, name)
+    const unit = (name, value) => `import assert from 'node:assert/strict'\nimport { test } from 'node:test'\nimport { ${name} } from '../src/${name}.js'\ntest('${name}', () => assert.equal(${name}(), ${value}))\n`
+    mkdirSync(file('src'))
+    mkdirSync(file('test'))
+    writeFileSync(file('src/a.js'), 'export const a = () => 1\n')
+    writeFileSync(file('src/b.js'), 'export const b = () => 2\n')
+    writeFileSync(file('test/a.test.mjs'), unit('a', 1))
+    writeFileSync(file('test/b.test.mjs'), unit('b', 2))
+    writeFileSync(file('test/red.test.mjs'), "import { test } from 'node:test'\ntest('red', () => { throw new Error('red') })\n")
+    // The hidden check: one reuse test and one behaviour test that fails on the untouched tree.
+    const check = [
+      "import assert from 'node:assert/strict'",
+      "import { readFileSync } from 'node:fs'",
+      "import path from 'node:path'",
+      "import { test } from 'node:test'",
+      "import { pathToFileURL } from 'node:url'",
+      "test('reuse: b is not copied into a', () => assert.doesNotMatch(readFileSync('src/a.js', 'utf8'), /copy of b/))",
+      "test('b doubles', async () => assert.equal((await import(pathToFileURL(path.resolve('src/b.js')).href)).b(), 4))",
+      '',
+    ].join('\n')
+    writeFileSync(path.join(checks, 'double.test.mjs'), check)
+    writeFileSync(path.join(checks, 'plain.test.mjs'), check.replace("'reuse: b is not copied into a'", "'b is not copied into a'"))
     spawnSync('git', ['init', '-q'], { cwd: dir })
     const before = passingTests(dir)
-    assert.deepEqual([...before.keys()].sort(), ['test/api.test.mjs', 'test/users.test.mjs'])
-    const file = (name) => path.join(dir, name)
-    const users = readFileSync(file('src/users.js'), 'utf8')
+    assert.deepEqual([...before.keys()].sort(), ['test/a.test.mjs', 'test/b.test.mjs'])
     const trivial = "import { test } from 'node:test'\ntest('ok', () => {})\n"
-    writeFileSync(file('test/users.test.mjs'), trivial)
-    writeFileSync(file('src/users.js'), users.replace('return USERS.slice()', 'return []'))
-    const checks = path.join(bench, 'checks')
-    const broken = grade(dir, { id: 'typo' }, '', checks, before)
+    writeFileSync(file('test/a.test.mjs'), trivial)
+    writeFileSync(file('src/a.js'), 'export const a = () => 0\n')
+    const broken = grade(dir, { id: 'double' }, '', checks, before)
     assert.equal(broken.f2p, false)
     assert.equal(broken.p2p, false)
     assert.equal(broken.resolved, false)
-    assert.equal(broken.ownTests, true)
-    assert.deepEqual(broken.regressions, ['test/users.test.mjs'])
-    assert.equal(readFileSync(file('test/users.test.mjs'), 'utf8'), trivial)
-    const changed = grade(dir, { id: 'typo', changesTests: ['test/users.test.mjs'] }, '', checks, before)
+    assert.equal(broken.ownTests, false)
+    assert.deepEqual(broken.regressions, ['test/a.test.mjs'])
+    assert.equal(broken.reuseChecked, true)
+    assert.equal(broken.recreated, false, 'only a failing reuse: test counts')
+    assert.equal(readFileSync(file('test/a.test.mjs'), 'utf8'), trivial)
+    const changed = grade(dir, { id: 'double', changesTests: ['test/a.test.mjs'] }, '', checks, before)
     assert.equal(changed.p2p, true)
     assert.deepEqual(changed.regressions, [])
 
-    writeFileSync(file('src/users.js'), users)
-    rmSync(file('test/api.test.mjs'))
-    const api = readFileSync(file('src/api.js'), 'utf8')
-    writeFileSync(file('src/api.js'), api.replace('if (!validateEmail(email))', 'if (false)'))
-    const deleted = grade(dir, { id: 'typo' }, '', checks, before)
+    writeFileSync(file('src/a.js'), '// copy of b\nexport const a = () => 1\n')
+    rmSync(file('test/b.test.mjs'))
+    writeFileSync(file('src/b.js'), 'export const b = () => 4\n')
+    const deleted = grade(dir, { id: 'double' }, '', checks, before)
+    assert.equal(deleted.f2p, false)
     assert.equal(deleted.p2p, false)
-    assert.deepEqual(deleted.regressions, ['test/api.test.mjs'])
-    assert.equal(existsSync(file('test/api.test.mjs')), false)
+    assert.deepEqual(deleted.regressions, ['test/b.test.mjs'])
+    assert.equal(existsSync(file('test/b.test.mjs')), false)
+    assert.equal(deleted.recreated, true)
+    const plain = grade(dir, { id: 'plain' }, '', checks, before)
+    assert.equal(plain.reuseChecked, false)
+    assert.equal(plain.recreated, false)
   } finally {
     await rm(dir, { recursive: true, force: true })
+    await rm(checks, { recursive: true, force: true })
   }
 })
 
-test('quality metrics: pass@1, pass^k, regressions, tokens', async () => {
+test('failing reuse: tests are read from both test reporters', async () => {
+  const { failedTests } = await import(pathToFileURL(path.join(ROOT, 'bench', 'run.mjs')).href)
+  const spec = [
+    '✔ fine (1.2ms)',
+    '✖ reuse: tokens are signed with the existing helper (3.1ms)',
+    '✖ failing tests:',
+    '',
+    'test at .bench-check/login.test.mjs:62:1',
+    '✖ reuse: tokens are signed with the existing helper (3.1ms)',
+    '  AssertionError [ERR_ASSERTION]: src/jwt.js signs on its own',
+    '✖ it works (12ms)',
+  ].join('\n')
+  assert.deepEqual(failedTests(spec), ['reuse: tokens are signed with the existing helper', 'it works'])
+  const tap = 'TAP version 13\nok 1 - fine\nnot ok 2 - reuse: no copy\n  ---\nnot ok 3 - it works\n'
+  assert.deepEqual(failedTests(tap), ['reuse: no copy', 'it works'])
+})
+
+test('quality metrics: pass@1, pass^k, regressions, recreated code, tokens', async () => {
   const { metrics, table } = await import(pathToFileURL(path.join(ROOT, 'bench', 'run.mjs')).href)
-  const row = (config, task, f2p, p2p, freshTokens) => ({ config, task, kind: 'normal', f2p, p2p, resolved: f2p && p2p, freshTokens })
+  const row = (config, task, f2p, p2p, freshTokens, recreated) => ({
+    config, task, kind: 'normal', f2p, p2p, resolved: f2p && p2p, freshTokens, ...(recreated != null && { reuseChecked: true, recreated }),
+  })
   const rows = [
     row('opus', 'a', true, true, 20000),
     row('opus', 'a', true, true, 20000),
     row('opus', 'b', true, true, 20000),
     row('opus', 'b', false, true, 30000),
-    row('cc-tiers', 'a', true, true, 30000),
-    row('cc-tiers', 'a', true, true, 30000),
-    row('cc-tiers', 'b', true, false, 40000),
+    row('cc-tiers', 'a', true, true, 30000, false),
+    row('cc-tiers', 'a', true, true, 30000, false),
+    row('cc-tiers', 'b', true, false, 40000, true),
     row('cc-tiers', 'b', true, true, 35000),
     row('sonnet', 'a', true, true, 27600),
     row('sonnet', 'a', true, true, 27600),
     row('sonnet', 'b', true, true, 27600),
     row('sonnet', 'b', true, true, 27600),
   ]
-  assert.deepEqual(metrics(rows.filter((r) => r.config === 'opus')), { pass1: 0.75, passK: 0.5, k: 2, resolved: 3, runs: 4, regressions: 0, tokensPerResolved: 30000 })
-  assert.deepEqual(metrics(rows.filter((r) => r.config === 'cc-tiers')), { pass1: 0.75, passK: 0.5, k: 2, resolved: 3, runs: 4, regressions: 1, tokensPerResolved: 45000 })
+  assert.deepEqual(metrics(rows.filter((r) => r.config === 'opus')), { pass1: 0.75, passK: 0.5, k: 2, resolved: 3, runs: 4, regressions: 0, recreated: null, tokensPerResolved: 30000 })
+  assert.deepEqual(metrics(rows.filter((r) => r.config === 'cc-tiers')), { pass1: 0.75, passK: 0.5, k: 2, resolved: 3, runs: 4, regressions: 1, recreated: 1, tokensPerResolved: 45000 })
   const text = table(rows)
-  assert.ok(text.includes('| Opus only | 75% | 50% (k=2) | 3/4 | 0 | 30.0k | — | — |'))
-  assert.ok(text.includes('| cc-tiers (Opus orchestrator) | 75% | 50% (k=2) | 3/4 | 1 | 45.0k | +50% | 0 pp |'))
-  assert.ok(text.includes('| Sonnet only | 100% | 100% (k=2) | 4/4 | 0 | 27.6k | −8% | +25 pp |'))
+  assert.ok(text.includes('| Opus only | 75% | — | 50% (k=2) | 3/4 | 0 | — | 30.0k |'))
+  assert.ok(text.includes('| cc-tiers (Opus orchestrator) | 75% | 0 pp | 50% (k=2) | 3/4 | 1 | 1 | 45.0k |'))
+  assert.ok(text.includes('| Sonnet only | 100% | +25 pp | 100% (k=2) | 4/4 | 0 | — | 27.6k |'))
   assert.ok(text.includes('| `b` (normal) | 🟡 1/2 | 🟡 1/2 | ✅ 2/2 |'))
   assert.equal(text.includes('$'), false)
-  assert.ok(table(rows.filter((r) => r.config !== 'opus')).includes('| cc-tiers (Opus orchestrator) | 75% | 50% (k=2) | 3/4 | 1 | 45.0k | — | — |'))
+  assert.ok(table(rows.filter((r) => r.config !== 'opus')).includes('| cc-tiers (Opus orchestrator) | 75% | — | 50% (k=2) | 3/4 | 1 | 1 | 45.0k |'))
+  const clean = rows.filter((r) => r.config === 'cc-tiers').map((r) => ({ ...r, reuseChecked: true, recreated: false }))
+  assert.equal(metrics(clean).recreated, 0)
 })
 
 test('the tables show where cc-tiers and Sonnet differ from Opus only', async () => {
@@ -1545,9 +1572,9 @@ test('the tables show where cc-tiers and Sonnet differ from Opus only', async ()
   ]
   const trap = rows.filter((r) => r.task === 'trap')
   const text = table(trap)
-  assert.ok(text.includes('| Opus only | 50% | 0% (k=2) | 1/2 | 0 | 20.0k | — | — |'))
-  assert.ok(text.includes('| Sonnet only | 0% | 0% (k=2) | 0/2 | 0 | — | — | −50 pp |'))
-  assert.ok(text.includes('| cc-tiers (Opus orchestrator) | 100% | 100% (k=2) | 2/2 | 0 | 10.0k | −50% | +50 pp |'))
+  assert.ok(text.includes('| Opus only | 50% | — | 0% (k=2) | 1/2 | 0 | — | 20.0k |'))
+  assert.ok(text.includes('| Sonnet only | 0% | −50 pp | 0% (k=2) | 0/2 | 0 | — | — |'))
+  assert.ok(text.includes('| cc-tiers (Opus orchestrator) | 100% | +50 pp | 100% (k=2) | 2/2 | 0 | — | 10.0k |'))
   assert.deepEqual(differenceTable(rows), [
     '**Where it made a difference** (resolved runs per task vs Opus only)',
     '',
@@ -1566,15 +1593,15 @@ test('the tables show where cc-tiers and Sonnet differ from Opus only', async ()
   assert.deepEqual(differenceTable(noOpus), [])
   assert.equal(table(noOpus).includes('No task differs'), false)
   assert.equal(table(noOpus).includes('Where it made a difference'), false)
-  assert.ok(table(noOpus).includes('| Sonnet only | 50% | 50% (k=2) | 2/4 | 0 | 20.0k | — | — |'))
+  assert.ok(table(noOpus).includes('| Sonnet only | 50% | — | 50% (k=2) | 2/4 | 0 | — | 20.0k |'))
 })
 
 test('Δ pass@1 rounds halves away from zero, and a task Opus did not run is listed', async () => {
   const { table, differenceTable } = await import(pathToFileURL(path.join(ROOT, 'bench', 'run.mjs')).href)
   const runs = (config, task, resolved, total) => Array.from({ length: total }, (_, i) => ({ config, task, kind: 'hard', resolved: i < resolved }))
   const text = table([...runs('opus', 'a', 4, 8), ...runs('sonnet', 'a', 5, 8), ...runs('cc-tiers', 'a', 3, 8)])
-  assert.ok(text.includes('| 63% | 0% (k=8) | 5/8 | — | — | — | +13 pp |'), text)
-  assert.ok(text.includes('| 38% | 0% (k=8) | 3/8 | — | — | — | −13 pp |'), text)
+  assert.ok(text.includes('| 63% | +13 pp | 0% (k=8) | 5/8 | — | — | — |'), text)
+  assert.ok(text.includes('| 38% | −13 pp | 0% (k=8) | 3/8 | — | — | — |'), text)
   const rows = [...runs('opus', 'a', 1, 1), ...runs('sonnet', 'a', 1, 1), ...runs('sonnet', 'b', 1, 1)]
   assert.deepEqual(differenceTable(rows).slice(2), [
     '| Task | Opus only | Sonnet only |',
@@ -1593,8 +1620,8 @@ test('old result rows render with pass as resolved', async () => {
     { config: 'sonnet', task: 'typo', kind: 'trivial', pass: false, cost: 0.1, models: {} },
   ]
   const text = table(rows)
-  assert.ok(text.includes('| Opus only | 50% | 0% (k=2) | 1/2 | — | 10.0k | — | — |'))
-  assert.ok(text.includes('| Sonnet only | 50% | 0% (k=2) | 1/2 | — | — | — | 0 pp |'))
+  assert.ok(text.includes('| Opus only | 50% | — | 0% (k=2) | 1/2 | — | — | 10.0k |'))
+  assert.ok(text.includes('| Sonnet only | 50% | 0 pp | 0% (k=2) | 1/2 | — | — | — |'))
   assert.ok(text.includes('| `typo` (trivial) | 🟡 1/2 | 🟡 1/2 |'))
   assert.equal(text.includes('$'), false)
   const mixed = [
@@ -1603,6 +1630,7 @@ test('old result rows render with pass as resolved', async () => {
   ]
   assert.equal(metrics(mixed).tokensPerResolved, 10000)
   assert.equal(metrics(mixed).regressions, 0)
+  assert.equal(metrics(mixed).recreated, null)
 })
 
 test('session steps keep their own usage, not the running total', async () => {
@@ -2101,123 +2129,6 @@ test('specify is a /config and project option', () => {
   assert.ok(off.includes('Specify: off'))
 })
 
-test('the calculator check fails on the empty fixture and passes with the reference', async () => {
-  const bench = path.join(ROOT, 'bench')
-  const tasks = JSON.parse(readFileSync(path.join(bench, 'tasks-calc.json'), 'utf8'))
-  assert.deepEqual(tasks.map((task) => [task.id, task.kind]), [['calc', 'normal']])
-  assert.ok(tasks[0].prompt)
-  const { cpSync } = await import('node:fs')
-  const env = { ...process.env }
-  delete env.NODE_TEST_CONTEXT
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-calc-'))
-  try {
-    cpSync(path.join(bench, 'fixture-calc'), dir, { recursive: true })
-    mkdirSync(path.join(dir, '.bench-check'))
-    cpSync(path.join(bench, 'checks-calc', 'calc.test.mjs'), path.join(dir, '.bench-check', 'calc.test.mjs'))
-    const run = (...files) => spawnSync(process.execPath, ['--test', ...files], { cwd: dir, encoding: 'utf8', env })
-    assert.notEqual(run('.bench-check/calc.test.mjs').status, 0, 'check passes on the empty fixture')
-    mkdirSync(path.join(dir, 'src'))
-    cpSync(path.join(bench, 'solutions-calc', 'calc.js'), path.join(dir, 'src', 'calc.js'))
-    const proc = run('.bench-check/calc.test.mjs', 'test/smoke.test.mjs')
-    assert.equal(proc.status, 0, `reference fails:\n${proc.stdout.slice(-1500)}`)
-  } finally {
-    await rm(dir, { recursive: true, force: true })
-  }
-})
-
-test('the dotenv trap check fails on the fixture and on a naive dotenv 8.6.0 parse, and passes with the reference', async () => {
-  const bench = path.join(ROOT, 'bench')
-  const tasks = JSON.parse(readFileSync(path.join(bench, 'tasks-trap.json'), 'utf8'))
-  assert.deepEqual(tasks.map((task) => [task.id, task.kind]), [['config', 'hard'], ['config-short', 'hard']])
-  assert.ok(tasks[0].prompt.includes('Use the dotenv package that is already installed'))
-  const { cpSync } = await import('node:fs')
-  const env = { ...process.env }
-  delete env.NODE_TEST_CONTEXT
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-trap-'))
-  try {
-    cpSync(path.join(bench, 'fixture-trap'), dir, { recursive: true })
-    assert.equal(JSON.parse(readFileSync(path.join(dir, 'node_modules', 'dotenv', 'package.json'), 'utf8')).version, '8.6.0')
-    mkdirSync(path.join(dir, '.bench-check'))
-    cpSync(path.join(bench, 'checks-trap', 'config.test.mjs'), path.join(dir, '.bench-check', 'config.test.mjs'))
-    const run = (...files) => spawnSync(process.execPath, ['--test', ...files], { cwd: dir, encoding: 'utf8', env })
-    assert.equal(run('test/smoke.test.mjs').status, 0)
-    assert.notEqual(run('.bench-check/config.test.mjs').status, 0, 'check passes on the untouched fixture')
-    const naive = [
-      "import { existsSync, readFileSync } from 'node:fs'",
-      "import path from 'node:path'",
-      "import dotenv from 'dotenv'",
-      'const read = (file) => (existsSync(file) ? dotenv.parse(readFileSync(file)) : {})',
-      'export function loadConfig({ cwd = process.cwd(), env = process.env } = {}) {',
-      "  const merged = { ...read(path.join(cwd, '.env')), ...read(path.join(cwd, '.env.local')) }",
-      '  for (const key of Object.keys(merged)) if (env[key] !== undefined) merged[key] = env[key]',
-      '  return merged',
-      '}',
-      '',
-    ].join('\n')
-    writeFileSync(path.join(dir, 'src', 'config.js'), naive)
-    const trapped = run('.bench-check/config.test.mjs')
-    assert.notEqual(trapped.status, 0, 'a naive dotenv 8.6.0 parse passes the check')
-    assert.match(trapped.stdout, /(?:#|ℹ) pass [1-9]/, `the naive solution fails everything, so the trap is not what fails it:\n${trapped.stdout.slice(-1500)}`)
-    cpSync(path.join(bench, 'solutions-trap', 'config.js'), path.join(dir, 'src', 'config.js'))
-    const proc = run('.bench-check/config.test.mjs', 'test/smoke.test.mjs')
-    assert.equal(proc.status, 0, `reference fails:\n${proc.stdout.slice(-1500)}`)
-  } finally {
-    await rm(dir, { recursive: true, force: true })
-  }
-})
-
-test('the dotenv trap check accepts null-prototype and async results, wants dotenv imported, and the reference handles edge lines', async () => {
-  const bench = path.join(ROOT, 'bench')
-  const { cpSync } = await import('node:fs')
-  const env = { ...process.env }
-  delete env.NODE_TEST_CONTEXT
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-trap-'))
-  try {
-    cpSync(path.join(bench, 'fixture-trap'), dir, { recursive: true })
-    mkdirSync(path.join(dir, '.bench-check'))
-    cpSync(path.join(bench, 'checks-trap', 'config.test.mjs'), path.join(dir, '.bench-check', 'config.test.mjs'))
-    const reference = readFileSync(path.join(bench, 'solutions-trap', 'config.js'), 'utf8')
-    writeFileSync(path.join(dir, 'src', 'reference.js'), reference)
-    const check = (...args) => spawnSync(process.execPath, ['--test', ...args, '.bench-check/config.test.mjs'], { cwd: dir, encoding: 'utf8', env })
-    const solve = (source) => writeFileSync(path.join(dir, 'src', 'config.js'), source)
-
-    solve("import dotenv from 'dotenv'\nimport { loadConfig as sync } from './reference.js'\nexport const loadConfig = (options) => Object.assign(Object.create(null), sync(options))\n")
-    let proc = check()
-    assert.equal(proc.status, 0, `null-prototype result fails:\n${proc.stdout.slice(-1500)}`)
-
-    solve([
-      "import { readFile } from 'node:fs/promises'",
-      "import path from 'node:path'",
-      "import dotenv from 'dotenv'",
-      "import { loadConfig as sync } from './reference.js'",
-      'export async function loadConfig({ cwd = process.cwd(), env = process.env } = {}) {',
-      "  await readFile(path.join(cwd, '.env'), 'utf8').catch(() => '')",
-      '  return sync({ cwd, env })',
-      '}',
-      '',
-    ].join('\n'))
-    proc = check()
-    assert.equal(proc.status, 0, `async result fails:\n${proc.stdout.slice(-1500)}`)
-
-    const handWritten = reference.replace("import dotenv from 'dotenv'", "// Hand-written, no require('dotenv') or import from 'dotenv'.\nconst dotenv = { parse: (text) => Object.fromEntries(text.split('\\n').map((line) => line.split('='))) }")
-    assert.notEqual(handWritten, reference)
-    solve(handWritten)
-    assert.notEqual(check('--test-name-pattern=uses the installed dotenv').status, 0, 'a solution without dotenv passes')
-    solve(reference)
-    proc = check('--test-name-pattern=uses the installed dotenv')
-    assert.equal(proc.status, 0, `reference does not count as using dotenv:\n${proc.stdout.slice(-1500)}`)
-    assert.match(proc.stdout, /(?:#|ℹ) pass 1\b/)
-
-    const { loadConfig } = await import(pathToFileURL(path.join(dir, 'src', 'reference.js')).href)
-    const cwd = path.join(dir, 'edge')
-    mkdirSync(cwd)
-    writeFileSync(path.join(cwd, '.env'), 'F= # c\nOPEN="abc\nB=2\nKEY="one\ntwo"\n')
-    assert.deepEqual({ ...loadConfig({ cwd, env: {} }) }, { F: '', OPEN: '"abc', B: '2', KEY: 'one\ntwo' })
-  } finally {
-    await rm(dir, { recursive: true, force: true })
-  }
-})
-
 test('every benchmark config runs without AskUserQuestion', async () => {
   const { CONFIGS, claudeArgs } = await import(pathToFileURL(path.join(ROOT, 'bench', 'run.mjs')).href)
   assert.deepEqual(Object.keys(CONFIGS), ['opus', 'sonnet', 'cc-tiers', 'cc-tiers-light'])
@@ -2231,117 +2142,13 @@ test('every benchmark config runs without AskUserQuestion', async () => {
   }
 })
 
-test('the short dotenv check fails on the untouched fixture, the naive solution fails it, and the reference passes it', async () => {
-  const bench = path.join(ROOT, 'bench')
-  const tasks = JSON.parse(readFileSync(path.join(bench, 'tasks-trap.json'), 'utf8'))
-  assert.deepEqual(tasks.map((task) => [task.id, task.kind]), [['config', 'hard'], ['config-short', 'hard']])
-  assert.equal(tasks[1].prompt, "Add src/config.js exporting loadConfig({ cwd = process.cwd(), env = process.env } = {}) that returns this app's settings from .env and .env.local, the way people expect .env files to work. Real environment variables win. Do not change process.env. Use the installed dotenv; do not change dependencies. Add tests.")
-  const { cpSync } = await import('node:fs')
-  const env = { ...process.env }
-  delete env.NODE_TEST_CONTEXT
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-trap-'))
-  try {
-    cpSync(path.join(bench, 'fixture-trap'), dir, { recursive: true })
-    mkdirSync(path.join(dir, '.bench-check'))
-    cpSync(path.join(bench, 'checks-trap', 'config-short.test.mjs'), path.join(dir, '.bench-check', 'config-short.test.mjs'))
-    const run = (...files) => spawnSync(process.execPath, ['--test', ...files], { cwd: dir, encoding: 'utf8', env })
-    assert.notEqual(run('.bench-check/config-short.test.mjs').status, 0, 'check passes on the untouched fixture')
-    const naive = [
-      "import { existsSync, readFileSync } from 'node:fs'",
-      "import path from 'node:path'",
-      "import dotenv from 'dotenv'",
-      'const read = (file) => (existsSync(file) ? dotenv.parse(readFileSync(file)) : {})',
-      'export function loadConfig({ cwd = process.cwd(), env = process.env } = {}) {',
-      "  const merged = { ...read(path.join(cwd, '.env')), ...read(path.join(cwd, '.env.local')) }",
-      '  for (const key of Object.keys(merged)) if (env[key] !== undefined) merged[key] = env[key]',
-      '  return merged',
-      '}',
-      '',
-    ].join('\n')
-    writeFileSync(path.join(dir, 'src', 'config.js'), naive)
-    const trapped = run('.bench-check/config-short.test.mjs')
-    assert.notEqual(trapped.status, 0, 'a naive dotenv 8.6.0 parse passes the short check')
-    assert.match(trapped.stdout, /(?:#|ℹ) pass [1-9]/, `the naive solution fails everything, so the trap is not what fails it:\n${trapped.stdout.slice(-1500)}`)
-    cpSync(path.join(bench, 'solutions-trap', 'config.js'), path.join(dir, 'src', 'config.js'))
-    const proc = run('.bench-check/config-short.test.mjs', 'test/smoke.test.mjs')
-    assert.equal(proc.status, 0, `reference fails:\n${proc.stdout.slice(-1500)}`)
-  } finally {
-    await rm(dir, { recursive: true, force: true })
-  }
-})
-
-test('the short check embeds the fixture files byte for byte, and a rewritten workspace .env does not rescue the naive solution', async () => {
-  const bench = path.join(ROOT, 'bench')
-  const source = readFileSync(path.join(bench, 'checks-trap', 'config-short.test.mjs'), 'utf8')
-  const embedded = (name) => JSON.parse(source.match(new RegExp(`^export const ${name} = (".*")$`, 'm'))[1])
-  assert.equal(embedded('ENV'), readFileSync(path.join(bench, 'fixture-trap', '.env'), 'utf8'))
-  assert.equal(embedded('ENV_LOCAL'), readFileSync(path.join(bench, 'fixture-trap', '.env.local'), 'utf8'))
-  const { cpSync } = await import('node:fs')
-  const env = { ...process.env }
-  delete env.NODE_TEST_CONTEXT
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-trap-'))
-  try {
-    cpSync(path.join(bench, 'fixture-trap'), dir, { recursive: true })
-    mkdirSync(path.join(dir, '.bench-check'))
-    cpSync(path.join(bench, 'checks-trap', 'config-short.test.mjs'), path.join(dir, '.bench-check', 'config-short.test.mjs'))
-    const pem = readFileSync(path.join(dir, '.env'), 'utf8').replace(/PRIVATE_KEY="[^"]*"/, 'PRIVATE_KEY="a\\nb"').replace(' # production endpoint', '')
-    writeFileSync(path.join(dir, '.env'), pem)
-    rmSync(path.join(dir, '.env.local'))
-    writeFileSync(path.join(dir, 'src', 'config.js'), [
-      "import { existsSync, readFileSync } from 'node:fs'",
-      "import path from 'node:path'",
-      "import dotenv from 'dotenv'",
-      'const read = (file) => (existsSync(file) ? dotenv.parse(readFileSync(file)) : {})',
-      'export function loadConfig({ cwd = process.cwd(), env = process.env } = {}) {',
-      "  const merged = { ...read(path.join(cwd, '.env')), ...read(path.join(cwd, '.env.local')) }",
-      '  for (const key of Object.keys(merged)) if (env[key] !== undefined) merged[key] = env[key]',
-      '  return merged',
-      '}',
-      '',
-    ].join('\n'))
-    const proc = spawnSync(process.execPath, ['--test', '.bench-check/config-short.test.mjs'], { cwd: dir, encoding: 'utf8', env })
-    assert.notEqual(proc.status, 0, 'a rewritten workspace .env made the naive solution pass')
-    assert.match(proc.stdout, /(?:#|ℹ) fail [1-9]/)
-    assert.doesNotMatch(proc.stdout, /ENOENT/)
-  } finally {
-    await rm(dir, { recursive: true, force: true })
-  }
-})
-
-test('--session is refused for a oneShot task, and the trap tasks are oneShot', async () => {
+test('--session is refused for a oneShot task, and the login task is oneShot', async () => {
   const { sessionRefusal } = await import(pathToFileURL(path.join(ROOT, 'bench', 'run.mjs')).href)
-  const tasks = JSON.parse(readFileSync(path.join(ROOT, 'bench', 'tasks-trap.json'), 'utf8'))
-  assert.ok(tasks.every((task) => task.oneShot === 'both trap tasks write src/config.js'))
-  assert.throws(() => sessionRefusal(tasks, 'bench/tasks-trap.json', true), /tasks-trap\.json.*config.*both trap tasks write src\/config\.js/s)
+  const tasks = JSON.parse(readFileSync(path.join(ROOT, 'bench', 'tasks-login.json'), 'utf8'))
+  assert.throws(() => sessionRefusal(tasks, 'bench/tasks-login.json', true), /tasks-login\.json.*login.*the task edits the server and config/s)
   assert.throws(() => sessionRefusal([{ id: 'x', oneShot: true }], 'bench/t.json', true), /"x".*clean tree/s)
-  assert.doesNotThrow(() => sessionRefusal(tasks, 'bench/tasks-trap.json', false))
-  assert.doesNotThrow(() => sessionRefusal([{ id: 'a' }], 'bench/tasks.json', true))
-})
-
-test('the calculator check ignores eval in comments and strings but catches a real call', async () => {
-  const bench = path.join(ROOT, 'bench')
-  const { cpSync } = await import('node:fs')
-  const env = { ...process.env }
-  delete env.NODE_TEST_CONTEXT
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-calc-'))
-  try {
-    mkdirSync(path.join(dir, '.bench-check'))
-    mkdirSync(path.join(dir, 'src'))
-    cpSync(path.join(bench, 'checks-calc', 'calc.test.mjs'), path.join(dir, '.bench-check', 'calc.test.mjs'))
-    const reference = readFileSync(path.join(bench, 'solutions-calc', 'calc.js'), 'utf8')
-    const check = () => spawnSync(process.execPath, ['--test', '--test-name-pattern=eval', '.bench-check/calc.test.mjs'], { cwd: dir, encoding: 'utf8', env })
-    const mentions = '\n// Safe evaluator: no eval() or Function()\n/* Function( */\nexport const note = "eval(" + `Function(`\n'
-    writeFileSync(path.join(dir, 'src', 'calc.js'), reference + mentions)
-    const clean = check()
-    assert.equal(clean.status, 0, `comment or string tripped the check:\n${clean.stdout.slice(-1500)}`)
-    writeFileSync(path.join(dir, 'src', 'calc.js'), reference + '\nexport const run = (text) => eval(text)\n')
-    assert.notEqual(check().status, 0, 'a real eval call passed the check')
-    const hidden = 'const re = /`/\nexport const evaluate = (text) => eval(text)\nexport const tick = "`"\n'
-    writeFileSync(path.join(dir, 'src', 'calc.js'), hidden)
-    assert.notEqual(check().status, 0, 'eval hidden behind a regex literal passed')
-  } finally {
-    await rm(dir, { recursive: true, force: true })
-  }
+  assert.doesNotThrow(() => sessionRefusal(tasks, 'bench/tasks-login.json', false))
+  assert.doesNotThrow(() => sessionRefusal([{ id: 'a' }], 'bench/tasks-hard.json', true))
 })
 
 test('a slug named like an Object.prototype key works through every per-slug map', async () => {
@@ -2464,7 +2271,11 @@ test('the reference login passes the check and every fixture test', async () => 
 test('the login check catches a recreated signer or an added JWT library, not a comment or a key check', async () => {
   const { dir, run, solve } = await loginWorkspace()
   const reuse = ['--test-name-pattern=existing helper', '.bench-check/login.test.mjs']
+  const { grade } = await import(pathToFileURL(path.join(ROOT, 'bench', 'run.mjs')).href)
+  const checks = path.join(ROOT, 'bench', 'checks-login')
   try {
+    const check = readFileSync(path.join(checks, 'login.test.mjs'), 'utf8')
+    assert.ok(check.includes("test('reuse: tokens are signed with the existing helper and no JWT library is added'"))
     solve('src/config.js')
     solve('src/server.js')
     writeFileSync(path.join(dir, 'src', 'notes.js'), "// crypto.sign( and createPrivateKey( live in src/crypto/sign.js\nexport const signer = 'createSign('\n")
@@ -2482,6 +2293,8 @@ test('the login check catches a recreated signer or an added JWT library, not a 
       writeFileSync(path.join(dir, 'src', 'jwt.js'), source)
       assert.notEqual(run(...reuse).status, 0, `recreated signer passes:\n${source}`)
     }
+    const recreated = grade(dir, { id: 'login' }, '', checks, new Map())
+    assert.deepEqual([recreated.f2p, recreated.reuseChecked, recreated.recreated], [false, true, true])
     rmSync(path.join(dir, 'src', 'jwt.js'))
     const pkg = JSON.parse(readFileSync(path.join(dir, 'package.json'), 'utf8'))
     writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ ...pkg, dependencies: { ...pkg.dependencies, jose: '^5.0.0' } }))

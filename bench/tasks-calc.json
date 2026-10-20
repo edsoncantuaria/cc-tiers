@@ -1,3 +1,0 @@
-[
-  { "id": "calc", "kind": "normal", "prompt": "Create src/calc.js exporting evaluate(expression) that returns a number. Support + - * /, parentheses, unary minus, decimals and whitespace, with the usual precedence and left-to-right associativity. Division by zero throws a RangeError; any malformed input throws a SyntaxError. Do not use eval or Function. Add tests." }
-]

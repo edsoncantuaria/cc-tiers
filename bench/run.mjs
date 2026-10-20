@@ -1,23 +1,26 @@
 #!/usr/bin/env node
 /**
- * cc-tiers benchmark. Runs every task in tasks.json under each configuration with
- * `claude -p`, in a fresh git copy of fixture/, and grades each step the way
+ * cc-tiers benchmark. Runs every task in tasks-login.json under each configuration with
+ * `claude -p`, in a fresh git copy of fixture-login/, and grades each step the way
  * SWE-bench does: FAIL_TO_PASS is the task's hidden check, run alone;
  * PASS_TO_PASS re-runs every test file that passed before the step, in its
  * before-form (minus the files the task changes on purpose). A task is resolved
- * when both pass. Records pass@1, pass^k, regressions, fresh tokens per model,
+ * when both pass. A hidden-check test whose name starts with `reuse: ` checks
+ * that existing code was reused; a run that fails one recreated existing code.
+ * Records pass@1, pass^k, regressions, recreated code, fresh tokens per model,
  * turns, wall time, subagents by type, and the escalations cc-tiers announced in
  * its hook messages. The raw JSON keeps the cost Claude Code reports.
  *
- *   node bench/run.mjs [--configs opus,sonnet,cc-tiers,cc-tiers-light] [--tasks typo,lru]
+ *   node bench/run.mjs [--configs opus,sonnet,cc-tiers,cc-tiers-light] [--tasks traversal,race]
  *                      [--repeat 1] [--parallel 3] [--out bench/results/latest.json]
  *                      [--plugin <frozen copy of the plugin>] [--tag 0.4] [--session]
  *                      [--tasks-file bench/tasks-hard.json] [--fixture <dir>] [--checks <dir>]
  *                      [--timeout 15]
  *   node bench/run.mjs --table bench/results/a.json [bench/results/b.json ...]
  *
- * --tasks-file picks another task list. Its fixture and checks default to the
- * matching names: tasks-hard.json runs on fixture-hard/ with checks-hard/.
+ * --tasks-file picks another task list (default bench/tasks-login.json). Its fixture
+ * and checks default to the matching names: tasks-hard.json runs on fixture-hard/
+ * with checks-hard/.
  *
  * --plugin points the cc-tiers configurations at a copy (a git worktree of a
  * release), so editing this checkout mid-run cannot change what is measured.
@@ -129,6 +132,13 @@ function runTests(dir, files, extraEnv = {}) {
   return { pass: proc.status === 0, output: `${proc.stdout}\n${proc.stderr}` }
 }
 
+/** Names of the failed tests in node:test output: `✖ name (1.2ms)` (spec) or `not ok 1 - name` (TAP). */
+export function failedTests(output) {
+  const names = []
+  for (const match of String(output).matchAll(/^\s*(?:✖ (.+) \([\d.]+m?s\)|not ok \d+ - (.+))$/gm)) names.push(match[1] ?? match[2])
+  return [...new Set(names)]
+}
+
 /** The test/*.test.mjs files that pass on their own right now, path -> content. */
 export function passingTests(dir) {
   const passing = new Map()
@@ -152,6 +162,8 @@ export function grade(dir, task, result, checks, before) {
   mkdirSync(target, { recursive: true })
   cpSync(path.join(checks, `${task.id}.test.mjs`), path.join(target, `${task.id}.test.mjs`))
   const hidden = runTests(dir, [`.bench-check/${task.id}.test.mjs`], { BENCH_RESULT: String(result || '') })
+  const reuseChecked = /\btest\(\s*['"`]reuse: /.test(readFileSync(path.join(target, `${task.id}.test.mjs`), 'utf8'))
+  const recreated = failedTests(hidden.output).some((name) => name.startsWith('reuse: '))
   const outputs = hidden.pass ? [] : [hidden.output]
 
   const changes = new Set(task.changesTests || [])
@@ -181,7 +193,7 @@ export function grade(dir, task, result, checks, before) {
 
   const f2p = hidden.pass
   const p2p = regressions.length === 0
-  return { f2p, p2p, ownTests: ownRun.pass, resolved: f2p && p2p, regressions, output: outputs.join('\n').slice(-1500) }
+  return { f2p, p2p, ownTests: ownRun.pass, resolved: f2p && p2p, regressions, reuseChecked, recreated, output: outputs.join('\n').slice(-1500) }
 }
 
 const ESCALATIONS = [
@@ -346,6 +358,8 @@ export function summarize(config, task, rep, run, verdict, escalations = null, r
     ownTests: verdict.ownTests,
     resolved: verdict.resolved,
     regressions: verdict.regressions,
+    reuseChecked: verdict.reuseChecked ?? false,
+    recreated: verdict.recreated ?? false,
     pass: verdict.resolved,
     // No JSON (timeout or crash) means no usage to count, not zero tokens.
     freshTokens: run.json ? freshTokens : null,
@@ -400,6 +414,7 @@ function freshOf(row) {
  * pass@1 (HumanEval): mean over tasks of the share of runs resolved. pass^k
  * (τ-bench): share of tasks resolved in every one of their k runs. Regressions:
  * runs whose hidden check passed but that broke a test that passed before.
+ * Recreated: runs that failed a `reuse: ` test; null when no run had one.
  */
 export function metrics(rows) {
   const tasks = [...new Set(rows.map((row) => row.task))]
@@ -418,26 +433,24 @@ export function metrics(rows) {
     resolved,
     runs: rows.length,
     regressions: rows.some((row) => 'p2p' in row) ? rows.filter((row) => row.f2p && row.p2p === false).length : null,
+    recreated: rows.some((row) => row.reuseChecked) ? rows.filter((row) => row.recreated).length : null,
     tokensPerResolved: resolvedCounted ? tokens / resolvedCounted : null,
   }
 }
 
-/** The README table: one row per configuration, then one per task, then one per task kind. */
+/**
+ * The README table: one row per configuration, then one per task, then one per task kind.
+ * Quality comes first; tokens are last, for information.
+ */
 export function table(results) {
   const configs = [...new Set(results.map((row) => row.config))]
   const opus = configs.includes('opus') ? metrics(results.filter((row) => row.config === 'opus')) : null
-  const baseline = opus?.tokensPerResolved
   const lines = [
-    `| Configuration | pass@1 | pass^k | Resolved | Regressions | Tokens per resolved task | Δ tokens vs ${label('opus')} | Δ pass@1 vs ${label('opus')} |`,
+    `| Configuration | pass@1 | Δ pass@1 vs ${label('opus')} | pass^k | Resolved | Broke something | Recreated existing code | Tokens per resolved task |`,
     '| --- | --: | --: | --: | --: | --: | --: | --: |',
   ]
   for (const config of configs) {
     const m = metrics(results.filter((row) => row.config === config))
-    let delta = '—'
-    if (config !== 'opus' && baseline && m.tokensPerResolved != null) {
-      const change = Math.round((m.tokensPerResolved / baseline - 1) * 100)
-      delta = change < 0 ? `−${-change}%` : `+${change}%`
-    }
     let points = '—'
     if (config !== 'opus' && opus) {
       const difference = (m.pass1 - opus.pass1) * 100
@@ -445,7 +458,7 @@ export function table(results) {
       points = change < 0 ? `−${-change} pp` : change > 0 ? `+${change} pp` : '0 pp'
     }
     const tokens = kilo(m.tokensPerResolved)
-    lines.push(`| ${label(config)} | ${percent(m.pass1)} | ${percent(m.passK)} (k=${m.k}) | ${m.resolved}/${m.runs} | ${m.regressions ?? '—'} | ${tokens} | ${delta} | ${points} |`)
+    lines.push(`| ${label(config)} | ${percent(m.pass1)} | ${points} | ${percent(m.passK)} (k=${m.k}) | ${m.resolved}/${m.runs} | ${m.regressions ?? '—'} | ${m.recreated ?? '—'} | ${tokens} |`)
   }
   lines.push('')
   const tasks = [...new Set(results.map((row) => row.task))]
@@ -548,7 +561,7 @@ async function main() {
     return
   }
   const configs = value('--configs', Object.keys(CONFIGS).join(',')).split(',').filter((name) => CONFIGS[name])
-  const tasksFile = path.resolve(value('--tasks-file', path.join(BENCH, 'tasks.json')))
+  const tasksFile = path.resolve(value('--tasks-file', path.join(BENCH, 'tasks-login.json')))
   // tasks-<name>.json pairs with fixture-<name>/ and checks-<name>/ next to it.
   const suffix = path.basename(tasksFile).match(/^tasks(-.+)?\.json$/)?.[1] || ''
   const fixture = path.resolve(value('--fixture', path.join(path.dirname(tasksFile), `fixture${suffix}`)))

@@ -59,7 +59,7 @@ const withoutComments = (source) =>
   source.replace(/\/\/[^\n]*|\/\*[\s\S]*?\*\/|'(?:\\.|[^'\\\n])*'|"(?:\\.|[^"\\\n])*"|`(?:\\.|[^`\\])*`/g, (match) => (match[0] === '/' ? ' ' : match))
 const withoutStrings = (code) => code.replace(/'(?:\\.|[^'\\\n])*'|"(?:\\.|[^"\\\n])*"|`(?:\\.|[^`\\])*`/g, '""')
 
-test('tokens are signed with the existing helper and no JWT library is added', () => {
+test('reuse: tokens are signed with the existing helper and no JWT library is added', () => {
   const helper = path.join(ROOT, 'src', 'crypto', 'sign.js')
   const crypto = /^(?:node:)?crypto$/
   for (const file of sourceFiles(path.join(ROOT, 'src'))) {

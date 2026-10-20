@@ -279,67 +279,109 @@ The escalation order is fixed. Routing phrases and keywords, the retry limit, th
 ## 📊 Benchmark
 
 > [!IMPORTANT]
-> **The benchmark measures quality first.** A run spends tokens, and cc-tiers spends more of them than one model alone, because plan, research, build, and review are separate contexts. Those extra tokens are meant to buy tasks that pass and keep passing; the table shows whether they do. A configuration is judged on the quality columns before it is judged on tokens.
+> **The benchmark measures quality only: whether the work comes out right the first time.** It does not measure cost. Tokens are shown in the last column, for information.
 
-`bench/` grades each run by hidden checks and reports metrics that come from published work:
+A run is right the first time when the user would not have to ask again. They would when it does not work, it broke something that worked, it recreated code the project already had, or it is inconsistent across runs. `bench/` grades each run with hidden checks and reports:
 
 | Metric | Meaning | Where it comes from |
 | --- | --- | --- |
-| `pass@1` | Share of runs that resolve the task, averaged over tasks | pass@k, HumanEval (Chen et al., 2021) |
-| `pass^k` | Share of tasks solved in all `k` repetitions. It drops when a configuration is lucky, not reliable. The table shows it as `(k=N)` | pass^k, τ-bench (Yao et al., 2024) |
-| FAIL_TO_PASS | The hidden check that fails on the untouched fixture must pass after the change | SWE-bench (Jimenez et al., 2024) |
-| PASS_TO_PASS | Test files that passed before the step must still pass: each is re-run in its before-form, one file at a time | SWE-bench (Jimenez et al., 2024) |
+| `pass@1` | Share of runs that resolve the task, averaged over tasks. `Δ pass@1 vs Opus only` is the difference from Opus only, in percentage points | pass@k, HumanEval (Chen et al., 2021) |
+| FAIL_TO_PASS | The hidden check fails on the untouched fixture and must pass after the change | SWE-bench (Jimenez et al., 2024) |
+| PASS_TO_PASS | Test files that passed before the change must still pass, each re-run in its before-form | SWE-bench (Jimenez et al., 2024) |
+| `pass^k` | Share of tasks resolved in all `k` runs. It drops when a configuration is lucky, not reliable. Shown as `(k=N)` | pass^k, τ-bench (Yao et al., 2024) |
 | Resolved | FAIL_TO_PASS passed and no PASS_TO_PASS file regressed | SWE-bench |
-| Tokens per resolved task | Fresh tokens (input + cache write + output) of the whole run divided by resolved tasks | cc-tiers |
+| Broke something | Runs whose hidden check passed but that broke a test that passed before | PASS_TO_PASS |
+| Recreated existing code | Runs that failed a hidden-check test whose name starts with `reuse: `. `—` when no run was checked for it | cc-tiers |
+| Tokens per resolved task | Fresh tokens (input + cache write + output) divided by resolved tasks. For information only | cc-tiers |
 
-Tests the model wrote do not count toward resolved; they are kept in the raw JSON as `ownTests`. A task in a tasks file may also list `changesTests`: the original test files that task legitimately changes. They are left out of PASS_TO_PASS. Nothing is recorded per run.
+Tests the model wrote do not count toward resolved; the raw JSON keeps them as `ownTests`. A task may list `changesTests`, the original test files it changes on purpose; they are left out of PASS_TO_PASS. Below the per-task table, **Where it made a difference** lists the tasks where a configuration resolved a different share of runs than Opus only.
 
-**Five suites.**
+**Two suites.**
 
-- `bench/tasks.json`: seven small tasks (3 trivial, 2 normal, 1 mixed, 1 hard) on `bench/fixture/`.
-- `bench/tasks-hard.json`: twelve tasks on `bench/fixture-hard/`, a 1,600-line Node service with shared state, time zones, and async booking. It has 4 trivial, 3 normal, 3 hard (a race that only shows under concurrent requests, a path-traversal fix whose naive version passes the visible tests, a multi-tenant refactor that must keep the public API), and 2 large requests that each mix a trivial, a normal, and a hard change. Each hidden check in `bench/checks-hard/` fails on the untouched fixture and passes with the reference fix in `bench/solutions-hard/`.
-- `bench/tasks-calc.json`: one normal task on `bench/fixture-calc/`, an expression evaluator (`src/calc.js`) with precedence, unary minus, and error cases. The hidden check is in `bench/checks-calc/` and the reference in `bench/solutions-calc/calc.js`. It is the showcase: one task, repeated.
-- `bench/tasks-trap.json`: two hard tasks on `bench/fixture-trap/`, a `loadConfig` that reads `.env` and `.env.local` with the installed dotenv. The installed version is 8.6.0, older than what models remember: it has no multi-line values and keeps ` # comment` in an unquoted value, and code written for a newer dotenv runs without an error and returns the wrong values. Research (reading the installed version and its docs) and validation (testing the rules the task states or the project shows) are what catch it. The two tasks differ in the prompt. `config` is the **detailed** variant: it lists every rule, so it measures executing a ready spec. `config-short` is the **short** variant: it says only "the way people expect .env files to work", so a run has to work the rules out from the installed dotenv and the fixture's own `.env` and `.env.local`, which is what cc-tiers's specify step is for. The short comparison is the one that matters. Its hidden check asserts only what the short prompt and those files show: the multi-line `PRIVATE_KEY` whole, the inline comment dropped, a `#` inside quotes kept, `\n` expanded in `GREETING`, `.env.local` over `.env`, `env` over both, `process.env` unchanged, dotenv 8.6.0 still installed and imported. The checks are in `bench/checks-trap/` and the reference in `bench/solutions-trap/config.js`; `npm test` also checks that a naive dotenv 8.6.0 solution fails both. Both tasks write `src/config.js`, so the trap suite runs one-shot only (each task on a clean tree); do not use `--session` with it.
-- `bench/tasks-login.json`: one hard task on `bench/fixture-login/`, a small API that already has a token signer, users with password hashes, and tests. The prompt is a natural request, `POST /login`, with no hints, and it measures whether the user would have to ask again: the run broke something, hallucinated the library's behaviour (the installed dotenv 8.6.0 cuts the multi-line `PRIVATE_KEY` in `.env` at its first line), recreated an existing helper, or does not work. Run it one-shot with `npm run bench -- --tasks-file bench/tasks-login.json --configs opus,sonnet,cc-tiers --repeat 2 --out bench/results/login.json`; the hidden check is in `bench/checks-login/` and the reference in `bench/solutions-login/`.
+- `bench/tasks-login.json`, the main suite and the default: one natural request, `POST /login`, with no hints, on `bench/fixture-login/`, a small API. The project's own state hides what the request does not say: a silent version trap (the installed dotenv 8.6.0 cuts the multi-line `PRIVATE_KEY` in `.env` at its first line), an existing token signing helper, and existing behaviour that can break. The hidden check is in `bench/checks-login/` and the reference in `bench/solutions-login/`.
+- `bench/tasks-hard.json`: twelve realistic bug reports and requests on `bench/fixture-hard/`, a 1,600-line Node service with shared state, time zones, and async booking. The hidden checks are in `bench/checks-hard/` and the references in `bench/solutions-hard/`.
 
 `npm test` verifies both sides of every check: it fails on the fixture and passes with the reference.
 
 **Run it.**
 
 ```bash
-npm run bench -- --tasks-file bench/tasks-calc.json --repeat 3
-node bench/run.mjs --tasks-file bench/tasks-hard.json --session --repeat 3 --timeout 30
+npm run bench -- --tasks-file bench/tasks-login.json --configs opus,sonnet,cc-tiers --repeat 2 --out bench/results/login.json
+npm run bench -- --tasks-file bench/tasks-hard.json --tasks traversal,race --configs opus,sonnet,cc-tiers --repeat 3 --out bench/results/hard-pair.json
+npm run bench:table -- bench/results/login.json
 ```
 
 > [!WARNING]
-> A run uses your real Claude Code login, so on Pro or Max it spends your usage window. A `--repeat 3` run of four configurations is many sessions. Start with the calculator suite. `npm run bench:table -- <result files>` prints the table from saved results.
+> A run uses your real Claude Code login, so on Pro or Max it spends your usage window. `npm run bench:table -- <result files>` prints the tables from saved results.
 
-**Cheap comparison.** The detailed trap and the two hard tasks state the rules, so a careful plain run may pass too; the suite measures whether that care happens. The short trap does not: it measures whether a configuration works out the rules on its own. The first command runs both trap variants (`--tasks config-short` runs only the short one). This runs only those tasks, against Opus only, Sonnet only, and cc-tiers, and merges the results into one table:
+The login suite is one-shot only: its task edits the server and the config, so `--session` is refused. The runner loads only project and local settings, so your own CLAUDE.md, agents, and plugins stay out of the measurement. It disables `AskUserQuestion` for every configuration, Opus only and Sonnet only included: a headless run denies it anyway and nobody would answer. cc-tiers's prompts tell it to take the recommended option and record it under `Assumed:` (`agents/orchestrator.md`, Specify). For cc-tiers the runner also reads, from the session transcript, the escalations the hooks announced and whether each task was routed as this README says.
 
-```bash
-npm run bench -- --tasks-file bench/tasks-trap.json --configs opus,sonnet,cc-tiers --repeat 3 --out bench/results/trap.json
-npm run bench -- --tasks-file bench/tasks-hard.json --tasks traversal,race --configs opus,sonnet,cc-tiers --repeat 3 --out bench/results/hard-pair.json
-npm run bench:table -- bench/results/trap.json bench/results/hard-pair.json
-```
+**Results**, as measured, one-shot.
 
-The runner loads only project and local settings, so your own CLAUDE.md, agents, and plugins stay out of the measurement. It also disables `AskUserQuestion` for every configuration, Opus only and Sonnet only included: a headless run denies it anyway and nobody would answer, so no configuration waits on or spends turns on a question. cc-tiers's prompts tell it to take the recommended option, record it under `Assumed:`, and say so in its report (`agents/orchestrator.md`, and `agents/dispatcher.md` in light mode, Specify). In session mode it stores usage per step, because Claude Code reports usage cumulative over a session on `--resume`. For cc-tiers it also reads, from the session transcript, the escalations the hooks announced and whether each task was routed as this README says.
+Login (`bench/results/login.json`, k=2, cc-tiers at plugin commit `18a1222`):
 
-**Results.** The columns are `Configuration`, `pass@1`, `pass^k`, `Resolved`, `Regressions`, `Tokens per resolved task`, `Δ tokens vs Opus only`, and `Δ pass@1 vs Opus only`. The last one is the configuration's pass@1 minus Opus only's, in percentage points (`+33 pp`, `−17 pp`), so the gain or loss from the orchestrator is read in one cell. Below the per-task table, **Where it made a difference** lists only the tasks where some configuration resolved a different share of runs than Opus only, as `resolved/k`; when none did, it says `No task differs from Opus only.`
-
-| Configuration | pass@1 | pass^k | Resolved | Regressions | Tokens per resolved task | Δ tokens vs Opus only | Δ pass@1 vs Opus only |
+| Configuration | pass@1 | Δ pass@1 vs Opus only | pass^k | Resolved | Broke something | Recreated existing code | Tokens per resolved task |
 | --- | --: | --: | --: | --: | --: | --: | --: |
-| Opus only | not measured yet | not measured yet | not measured yet | not measured yet | not measured yet | — | — |
-| Sonnet only | not measured yet | not measured yet | not measured yet | not measured yet | not measured yet | not measured yet | not measured yet |
-| cc-tiers (Opus orchestrator) | not measured yet | not measured yet | not measured yet | not measured yet | not measured yet | not measured yet | not measured yet |
-| cc-tiers light (Sonnet dispatcher) | not measured yet | not measured yet | not measured yet | not measured yet | not measured yet | not measured yet | not measured yet |
+| Opus only | 50% | — | 0% (k=2) | 1/2 | 0 | — | 50.2k |
+| Sonnet only | 50% | 0 pp | 0% (k=2) | 1/2 | 0 | — | 40.1k |
+| cc-tiers (Opus orchestrator) 18a1222 | 100% | +50 pp | 100% (k=2) | 2/2 | 0 | — | 202.4k |
 
-**What the 0.5 data can and cannot say.**
+| Task | Opus only | Sonnet only | cc-tiers (Opus orchestrator) 18a1222 |
+| --- | --: | --: | --: |
+| `login` (hard) | 🟡 1/2 | 🟡 1/2 | ✅ 2/2 |
 
-- The 0.5 result files (`bench/results/*-0.5.json`) were graded with the old pass criterion: the hidden check plus the model's own tests, with no before-form PASS_TO_PASS. Their pass rates are not like-for-like with 0.6.
-- The 0.5 session-mode dollar column summed session-cumulative cost, so it overstated the cost per task. That table is withdrawn from this README.
-- In session mode, a test file the model added in an earlier step can count as a regression in a later step.
-- Sonnet calibration on the hard suite (`bench/results/calibration-sonnet-hard.json`), graded with the old criterion: Sonnet alone failed the path traversal, because it still served a file through a symlink. It ran the race task three times; the two runs kept for re-grading fail the final check, because both fixes queue every request behind one lock. The first run passed an earlier version of the check and was not kept. It solved the refactor in all three runs; the two graded against the final check passed it.
-- The large tasks and the final race check have only been tried against the reference fixes and the saved Sonnet fixes, never against a live model.
+**Where it made a difference** (resolved runs per task vs Opus only)
+
+| Task | Opus only | Sonnet only | cc-tiers (Opus orchestrator) 18a1222 |
+| --- | --: | --: | --: |
+| `login` | 1/2 | 1/2 | 2/2 |
+
+| Configuration | hard: pass@1 | Escalations | Routed as documented |
+| --- | --: | --: | --: |
+| Opus only | 50% | — | — |
+| Sonnet only | 50% | — | — |
+| cc-tiers (Opus orchestrator) 18a1222 | 100% | 1 | 2/2 |
+
+| Configuration | hard |
+| --- | --- |
+| cc-tiers (Opus orchestrator) 18a1222 | 2/2 (sonnet (+ Opus review)) |
+
+- Plain Opus and plain Sonnet each failed one of their two runs the same way: `/login` answered 500, because dotenv 8.6.0 had cut the key. cc-tiers resolved both runs; in both, the researcher found the truncation in `node_modules/dotenv` before any code was written.
+- `Recreated existing code` shows `—` because these runs predate the column; none of the six runs failed the reuse test.
+- The sample is small. cc-tiers took about 4× the tokens per resolved task of plain Opus (202.4k vs 50.2k) and about 12× its wall time (646 s vs 54 s per run), partly because the review asked for hardening the request did not ask for.
+
+Hard pair (`bench/results/hard-pair.json`, `traversal` and `race`, k=3, cc-tiers at plugin commit `ef57726`):
+
+| Configuration | pass@1 | Δ pass@1 vs Opus only | pass^k | Resolved | Broke something | Recreated existing code | Tokens per resolved task |
+| --- | --: | --: | --: | --: | --: | --: | --: |
+| Opus only | 100% | — | 100% (k=3) | 6/6 | 0 | — | 32.7k |
+| Sonnet only | 50% | −50 pp | 50% (k=3) | 3/6 | 0 | — | 38.5k |
+| cc-tiers (Opus orchestrator) | 100% | 0 pp | 100% (k=3) | 6/6 | 0 | — | 166.5k |
+
+| Task | Opus only | Sonnet only | cc-tiers (Opus orchestrator) |
+| --- | --: | --: | --: |
+| `race` (hard) | ✅ 3/3 | ✅ 3/3 | ✅ 3/3 |
+| `traversal` (hard) | ✅ 3/3 | ❌ 0/3 | ✅ 3/3 |
+
+**Where it made a difference** (resolved runs per task vs Opus only)
+
+| Task | Opus only | Sonnet only | cc-tiers (Opus orchestrator) |
+| --- | --: | --: | --: |
+| `traversal` | 3/3 | 0/3 | 3/3 |
+
+| Configuration | hard: pass@1 | Escalations | Routed as documented |
+| --- | --: | --: | --: |
+| Opus only | 100% | — | — |
+| Sonnet only | 50% | — | — |
+| cc-tiers (Opus orchestrator) | 100% | 1 | 6/6 |
+
+| Configuration | hard |
+| --- | --- |
+| cc-tiers (Opus orchestrator) | 6/6 (sonnet (+ Opus review)) |
+
+- Plain Opus and cc-tiers resolved every run; plain Sonnet failed `traversal` in all three. In cc-tiers the code is written by Sonnet, and the Opus reviewer rejected its first `traversal` fix in every run.
+
+**What the data does not show:** cc-tiers beating plain Opus on tasks with the rules spelled out. On the hard pair, plain Opus resolved every run too.
 
 ---
 
@@ -378,7 +420,7 @@ claude --plugin-dir .
 | `hooks/route.mjs` | The heuristic behind `/cc-tiers:route` |
 | `hooks/report.mjs` | The table behind `/cc-tiers:report` |
 | `commands/report.md` | `/cc-tiers:report` |
-| `bench/` | The benchmark: four fixtures (including the calculator and dotenv trap suites), tasks, hidden checks, runner, and results |
+| `bench/` | The benchmark: the login and hard suites (tasks, fixtures, hidden checks, references), the runner, and measured results |
 | `.github/workflows/ci.yml` | Tests on Linux, macOS, and Windows, and `claude plugin validate` |
 | `CHANGELOG.md` | Release notes |
 
