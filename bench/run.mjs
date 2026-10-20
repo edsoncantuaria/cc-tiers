@@ -84,10 +84,16 @@ export function workspaceTree(dir) {
   return tree.status === 0 ? tree.stdout.trim() : ''
 }
 
-function runClaude(dir, config, prompt, timeoutMs, plugin, resume = '') {
+export function claudeArgs(config, plugin, prompt, resume = '') {
   // project and local only: the user's own CLAUDE.md, agents, plugins, and hooks would change what is measured.
-  const args = ['-p', prompt, '--output-format', 'json', '--permission-mode', 'bypassPermissions', '--setting-sources', 'project,local', ...config.args(plugin)]
+  // No AskUserQuestion for any config: a headless run denies it, and nobody would answer.
+  const args = ['-p', prompt, '--output-format', 'json', '--permission-mode', 'bypassPermissions', '--setting-sources', 'project,local', '--disallowedTools', 'AskUserQuestion', ...config.args(plugin)]
   if (resume) args.push('--resume', resume)
+  return args
+}
+
+function runClaude(dir, config, prompt, timeoutMs, plugin, resume = '') {
+  const args = claudeArgs(config, plugin, prompt, resume)
   return new Promise((resolve) => {
     const started = Date.now()
     const child = spawn('claude', args, { cwd: dir, env: cleanEnv(), stdio: ['ignore', 'pipe', 'pipe'] })

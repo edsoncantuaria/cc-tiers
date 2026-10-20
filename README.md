@@ -85,6 +85,26 @@ The PreToolUse hook enforces this. It refuses a call to the implementer or the a
 
 ---
 
+## 📝 Specify and ask
+
+Research says what is true; the criteria say what done means. Before a task that writes code goes to `cc-tiers:implementer` or `cc-tiers:architect`, the orchestrator (or the dispatcher) writes the acceptance criteria itself, from the request and the research, so you do not have to. The flow is research, specify, ask (only if needed), implement, review.
+
+The criteria ride in the delegation prompt between two lines that hold only `CC_TIERS_SPEC_BEGIN` and `CC_TIERS_SPEC_END`, in under about 15 lines:
+
+- `Criteria:` observable results.
+- `Edge cases:` inputs or states that could break it.
+- `Assumed:` (only when needed) what was chosen where the request was silent.
+
+Every line says where it came from: `(request)`, `(repo: file:line)`, `(docs: <link or path>)`, `(decided: <why>)`, or `(user)` for an answer. The same block goes to the implementer and to the reviewer or checker of that task. The implementer builds and tests each line, and the reviewer rejects a criterion or edge case that is not met or not tested. A retry or an escalation reuses the block.
+
+**When it asks.** Only when two reasonable readings lead to different code and neither the project nor the docs of the version in use decide. Everything else it decides and marks `(decided: ...)`. It asks once, before implementing, all questions together, at most 3, with `AskUserQuestion` as multiple choice and the recommended option first, with its reason. Your answer goes into the block as `(user)`.
+
+**When nobody can answer.** If `AskUserQuestion` is unavailable or denied, it takes the recommended option, lists it under `Assumed:`, says so in the final report, and does not wait.
+
+A task that needs no criteria (a mechanical edit, a lookup) says why with `CC_TIERS_SPEC: none - <reason>`. The light path and the worker skip this step. The PreToolUse hook refuses a call to the implementer or the architect that has neither a block with content nor a `none` line, and it ignores a `CC_TIERS_*` line inside the block. `specify: off` removes the step and the check.
+
+---
+
 ## 🔁 Escalation
 
 A failure is a failed test, a rejected review, or a subagent error. The task may fail **twice** at its tier (`max_attempts`, default 2). The next attempt moves up, and the failure notes go with it:
@@ -99,6 +119,7 @@ The hooks enforce what the prompts ask for:
 
 - **Before a delegation** (PreToolUse), a call to a cc-tiers agent is refused when it passes `model`, has no `CC_TIERS_TASK` header, or sends an escalated task back down a tier. Sending a task up early (`/cc-tiers:escalate`) moves the counter with the notes carried.
 - **Research** (`research: on`, the default): a call to the implementer or the architect is refused when its task has neither a researcher pass nor a `CC_TIERS_RESEARCH: none - <reason>` line.
+- **Specify** (`specify: on`, the default): a call to the implementer or the architect is refused when its prompt has no `CC_TIERS_SPEC_BEGIN` / `CC_TIERS_SPEC_END` block with content and no `CC_TIERS_SPEC: none - <reason>` line.
 - **Background agents** are counted too. The launch records the agent id, and SubagentStop counts the report when it finishes. The note reaches the orchestrator on its next delegation, or at the end of the turn.
 - **The Opus ceiling** has no Agent call, so the orchestrator marks its own attempt with a `CC_TIERS_TASK` / `CC_TIERS_TIER: opus` / `CC_TIERS_ROLE: orchestrator` header and closes it with `CC_TIERS_STATUS`. The hook counts that trailer like any other report.
 - Parallel agents share one counter file per session, behind a lock, written atomically.
@@ -229,6 +250,7 @@ Open `/config` and set the cc-tiers rows. They apply on the next session (the Se
 | `light_path` | `inline` | One trivial task: `inline` does it in the session, `delegate` sends it to the worker, `off` plans it |
 | `show_cost` | `off` | `on` shows the estimated cost of each task and the session next to Opus rates |
 | `research` | `on` | Require a researcher brief, or a `none - <reason>` line, before code goes to the implementer or the architect. `off` removes the step |
+| `specify` | `on` | Require acceptance criteria, or a `CC_TIERS_SPEC: none - <reason>` line, before code goes to the implementer or the architect, and let the orchestrator ask what changes the result. `off` removes the step |
 
 `risky` is the default: Opus reviews non-trivial work in a fresh context and skips a trivial Haiku pass. `cheap` sends Haiku output to the Sonnet checker and sends Opus review only for a review phrase or the ceiling. `always` reviews every pass (Haiku on Sonnet, the rest on Opus). `never` skips review. While a budget window is conserving, Opus review is reserved for critical work even under `risky` or `always`.
 
@@ -250,7 +272,7 @@ To replace a whole list, add `.claude/cc-tiers.json` to the project. A list you 
 }
 ```
 
-The escalation order is fixed. Routing phrases and keywords, the retry limit, the effort ladders, the review policy, the research gate, the classifier, learning, and the two budget thresholds are the knobs.
+The escalation order is fixed. Routing phrases and keywords, the retry limit, the effort ladders, the review policy, the research gate, the specify gate, the classifier, learning, and the two budget thresholds are the knobs.
 
 ---
 
@@ -277,7 +299,7 @@ Tests the model wrote do not count toward resolved; they are kept in the raw JSO
 - `bench/tasks.json`: seven small tasks (3 trivial, 2 normal, 1 mixed, 1 hard) on `bench/fixture/`.
 - `bench/tasks-hard.json`: twelve tasks on `bench/fixture-hard/`, a 1,600-line Node service with shared state, time zones, and async booking. It has 4 trivial, 3 normal, 3 hard (a race that only shows under concurrent requests, a path-traversal fix whose naive version passes the visible tests, a multi-tenant refactor that must keep the public API), and 2 large requests that each mix a trivial, a normal, and a hard change. Each hidden check in `bench/checks-hard/` fails on the untouched fixture and passes with the reference fix in `bench/solutions-hard/`.
 - `bench/tasks-calc.json`: one normal task on `bench/fixture-calc/`, an expression evaluator (`src/calc.js`) with precedence, unary minus, and error cases. The hidden check is in `bench/checks-calc/` and the reference in `bench/solutions-calc/calc.js`. It is the showcase: one task, repeated.
-- `bench/tasks-trap.json`: one hard task on `bench/fixture-trap/`, a `loadConfig` that reads `.env` and `.env.local` with the installed dotenv. The installed version is 8.6.0, older than what models remember: it has no multi-line values and keeps ` # comment` in an unquoted value, and code written for a newer dotenv runs without an error and returns the wrong values. Research (reading the installed version and its docs) and validation (testing the rules the task states) are what catch it. The hidden check is in `bench/checks-trap/` and the reference in `bench/solutions-trap/config.js`; `npm test` also checks that a naive dotenv 8.6.0 solution fails it.
+- `bench/tasks-trap.json`: two hard tasks on `bench/fixture-trap/`, a `loadConfig` that reads `.env` and `.env.local` with the installed dotenv. The installed version is 8.6.0, older than what models remember: it has no multi-line values and keeps ` # comment` in an unquoted value, and code written for a newer dotenv runs without an error and returns the wrong values. Research (reading the installed version and its docs) and validation (testing the rules the task states) are what catch it. The two tasks differ in the prompt. `config` is the **detailed** variant: it lists every rule, so it measures executing a ready spec. `config-short` is the **short** variant: it says only "the way people expect .env files to work", so a run has to work the rules out from the installed dotenv and the fixture's own `.env` and `.env.local`, which is what cc-tiers's specify step is for. The short comparison is the one that matters. Its hidden check asserts only what the short prompt and those files show: the multi-line `PRIVATE_KEY` whole, the inline comment dropped, a `#` inside quotes kept, `\n` expanded in `GREETING`, `.env.local` over `.env`, `env` over both, `process.env` unchanged, dotenv 8.6.0 still installed and imported. The checks are in `bench/checks-trap/` and the reference in `bench/solutions-trap/config.js`; `npm test` also checks that a naive dotenv 8.6.0 solution fails both. Both tasks write `src/config.js`, so the trap suite runs one-shot only (each task on a clean tree); do not use `--session` with it.
 
 `npm test` verifies both sides of every check: it fails on the fixture and passes with the reference.
 
@@ -299,7 +321,7 @@ npm run bench -- --tasks-file bench/tasks-hard.json --tasks traversal,race --con
 npm run bench:table -- bench/results/trap.json bench/results/hard-pair.json
 ```
 
-The runner loads only project and local settings, so your own CLAUDE.md, agents, and plugins stay out of the measurement. In session mode it stores usage per step, because Claude Code reports usage cumulative over a session on `--resume`. For cc-tiers it also reads, from the session transcript, the escalations the hooks announced and whether each task was routed as this README says.
+The runner loads only project and local settings, so your own CLAUDE.md, agents, and plugins stay out of the measurement. It also disables `AskUserQuestion` for every configuration, Opus only and Sonnet only included: a headless run denies it anyway and nobody would answer, so no configuration waits on or spends turns on a question. cc-tiers then follows its no-human rule: it takes the recommended option and records it under `Assumed:`. In session mode it stores usage per step, because Claude Code reports usage cumulative over a session on `--resume`. For cc-tiers it also reads, from the session transcript, the escalations the hooks announced and whether each task was routed as this README says.
 
 **Results.** The columns are `Configuration`, `pass@1`, `pass^k`, `Resolved`, `Regressions`, `Tokens per resolved task`, `Δ tokens vs Opus only`, and `Δ pass@1 vs Opus only`. The last one is the configuration's pass@1 minus Opus only's, in percentage points (`+33 pp`, `−17 pp`), so the gain or loss from the orchestrator is read in one cell. Below the per-task table, **Where it made a difference** lists only the tasks where some configuration resolved a different share of runs than Opus only, as `resolved/k`; when none did, it says `No task differs from Opus only.`
 

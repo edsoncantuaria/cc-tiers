@@ -85,6 +85,26 @@ O hook PreToolUse garante isso. Ele recusa a chamada ao implementer ou ao archit
 
 ---
 
+## 📝 Especificar e perguntar
+
+A pesquisa diz o que é verdade; os critérios dizem o que é pronto. Antes de uma tarefa que escreve código ir para o `cc-tiers:implementer` ou o `cc-tiers:architect`, o orquestrador (ou o dispatcher) escreve ele mesmo os critérios de aceite, a partir do pedido e da pesquisa, para você não precisar. O fluxo é pesquisar, especificar, perguntar (só se preciso), implementar, revisar.
+
+Os critérios vão no prompt da delegação, entre duas linhas que só têm `CC_TIERS_SPEC_BEGIN` e `CC_TIERS_SPEC_END`, em até umas 15 linhas:
+
+- `Criteria:` resultados observáveis.
+- `Edge cases:` entradas ou estados que podem quebrar.
+- `Assumed:` (só quando preciso) o que foi escolhido onde o pedido ficou em silêncio.
+
+Cada linha diz de onde veio: `(request)`, `(repo: arquivo:linha)`, `(docs: <link ou caminho>)`, `(decided: <motivo>)`, ou `(user)` para uma resposta. O mesmo bloco vai para o implementer e para o reviewer ou checker daquela tarefa. O implementer constrói e testa cada linha, e o reviewer rejeita um critério ou caso de borda não atendido ou sem teste. Uma nova tentativa ou uma escalação reaproveita o bloco.
+
+**Quando pergunta.** Só quando duas leituras razoáveis levam a código diferente e nem o projeto nem a documentação da versão em uso decidem. O resto ele decide e marca `(decided: ...)`. Pergunta uma vez, antes de implementar, todas as perguntas juntas, no máximo 3, com `AskUserQuestion` de múltipla escolha e a opção recomendada primeiro, com o motivo. Sua resposta entra no bloco como `(user)`.
+
+**Quando ninguém pode responder.** Se o `AskUserQuestion` não estiver disponível ou for negado, ele segue com a opção recomendada, registra em `Assumed:`, diz isso no relatório final e não espera.
+
+Uma tarefa que não precisa de critérios (edição mecânica, consulta) diz o motivo com `CC_TIERS_SPEC: none - <motivo>`. O caminho leve e o worker pulam este passo. O hook PreToolUse recusa a chamada ao implementer ou ao architect que não tem nem um bloco com conteúdo nem a linha `none`, e ignora uma linha `CC_TIERS_*` dentro do bloco. `specify: off` tira o passo e a checagem.
+
+---
+
 ## 🔁 Escalonamento
 
 Falha é teste que quebrou, revisão rejeitada ou erro do subagente. A tarefa pode falhar **duas vezes** no nível (`max_attempts`, padrão 2). A tentativa seguinte sobe, e as notas vão junto:
@@ -99,6 +119,7 @@ Os hooks garantem o que os prompts pedem:
 
 - **Antes de uma delegação** (PreToolUse), a chamada a um agente do cc-tiers é recusada quando passa `model`, não tem o header `CC_TIERS_TASK` ou manda uma tarefa já escalada de volta para um nível abaixo. Subir uma tarefa antes do limite (`/cc-tiers:escalate`) move o contador junto, com as notas.
 - **Pesquisa** (`research: on`, o padrão): a chamada ao implementer ou ao architect é recusada quando a tarefa não tem nem um pass do researcher nem a linha `CC_TIERS_RESEARCH: none - <motivo>`.
+- **Especificação** (`specify: on`, o padrão): a chamada ao implementer ou ao architect é recusada quando o prompt não tem um bloco `CC_TIERS_SPEC_BEGIN` / `CC_TIERS_SPEC_END` com conteúdo nem a linha `CC_TIERS_SPEC: none - <motivo>`.
 - **Agentes em background** também contam. O lançamento grava o id do agente, e o SubagentStop conta o relatório quando ele termina. O aviso chega ao orquestrador na próxima delegação ou no fim do turno.
 - **O teto Opus** não tem chamada Agent, então o orquestrador marca a própria tentativa com o header `CC_TIERS_TASK` / `CC_TIERS_TIER: opus` / `CC_TIERS_ROLE: orchestrator` e fecha com `CC_TIERS_STATUS`. O hook conta esse trailer como qualquer outro relatório.
 - Agentes em paralelo dividem um arquivo de contador por sessão, com lock e gravação atômica.
@@ -229,6 +250,7 @@ Abra `/config` e ajuste as linhas do cc-tiers. Valem na sessão seguinte (o hook
 | `light_path` | `inline` | Uma tarefa miúda: `inline` faz na sessão, `delegate` manda para o worker, `off` planeja |
 | `show_cost` | `off` | `on` mostra o custo estimado de cada tarefa e da sessão ao lado do preço do Opus |
 | `research` | `on` | Exige um briefing do pesquisador, ou uma linha `none - <motivo>`, antes de o código ir para o implementer ou o architect. `off` tira o passo |
+| `specify` | `on` | Exige critérios de aceite, ou uma linha `CC_TIERS_SPEC: none - <motivo>`, antes de o código ir para o implementer ou o architect, e deixa o orquestrador perguntar o que muda o resultado. `off` tira o passo |
 
 `risky` é o padrão: o Opus revisa trabalho não trivial num contexto novo e pula um passe trivial do Haiku. `cheap` manda a saída do Haiku para o checker Sonnet e só manda revisão Opus para uma frase de revisão ou para o teto. `always` revisa todo passe (Haiku no Sonnet, o resto no Opus). `never` pula a revisão. Enquanto uma janela de orçamento está economizando, a revisão Opus fica para o trabalho crítico mesmo em `risky` ou `always`.
 
@@ -250,7 +272,7 @@ Para trocar uma lista inteira, crie `.claude/cc-tiers.json` no projeto. A lista 
 }
 ```
 
-A ordem de escalonamento é fixa. As frases e palavras-chave de roteamento, o limite de tentativas, as escadas de effort, a política de revisão, o gate de pesquisa, o classificador, o aprendizado e os dois limiares de orçamento são os controles.
+A ordem de escalonamento é fixa. As frases e palavras-chave de roteamento, o limite de tentativas, as escadas de effort, a política de revisão, o gate de pesquisa, o gate de especificação, o classificador, o aprendizado e os dois limiares de orçamento são os controles.
 
 ---
 
@@ -277,7 +299,7 @@ Testes que o modelo escreveu não contam para resolvida; ficam no JSON bruto com
 - `bench/tasks.json`: sete tarefas pequenas (3 triviais, 2 normais, 1 mista, 1 difícil) em `bench/fixture/`.
 - `bench/tasks-hard.json`: doze tarefas em `bench/fixture-hard/`, um serviço Node de 1.600 linhas com estado compartilhado, fusos horários e reservas assíncronas. São 4 triviais, 3 normais, 3 difíceis (uma condição de corrida que só aparece com requisições concorrentes, uma correção de path traversal cuja versão ingênua passa nos testes visíveis, uma refatoração multi-tenant que precisa manter a API pública) e 2 pedidos grandes, cada um misturando uma mudança trivial, uma normal e uma difícil. Cada check oculto em `bench/checks-hard/` falha na fixture intocada e passa com a correção de referência em `bench/solutions-hard/`.
 - `bench/tasks-calc.json`: uma tarefa normal em `bench/fixture-calc/`, um avaliador de expressões (`src/calc.js`) com precedência, menos unário e casos de erro. O check oculto fica em `bench/checks-calc/` e a referência em `bench/solutions-calc/calc.js`. É a vitrine: uma tarefa, repetida.
-- `bench/tasks-trap.json`: uma tarefa difícil em `bench/fixture-trap/`, um `loadConfig` que lê `.env` e `.env.local` com o dotenv instalado. A versão instalada é a 8.6.0, mais antiga do que os modelos lembram: não tem valores em várias linhas e mantém ` # comentário` num valor sem aspas, e o código escrito para um dotenv mais novo roda sem erro e devolve valores errados. Pesquisa (ler a versão instalada e a documentação dela) e validação (testar as regras que a tarefa enuncia) são o que pegam isso. O check oculto fica em `bench/checks-trap/` e a referência em `bench/solutions-trap/config.js`; o `npm test` também confere que uma solução ingênua com o dotenv 8.6.0 falha nele.
+- `bench/tasks-trap.json`: duas tarefas difíceis em `bench/fixture-trap/`, um `loadConfig` que lê `.env` e `.env.local` com o dotenv instalado. A versão instalada é a 8.6.0, mais antiga do que os modelos lembram: não tem valores em várias linhas e mantém ` # comentário` num valor sem aspas, e o código escrito para um dotenv mais novo roda sem erro e devolve valores errados. Pesquisa (ler a versão instalada e a documentação dela) e validação (testar as regras que a tarefa enuncia) são o que pegam isso. As duas tarefas diferem no prompt. `config` é a variante **detalhada**: lista todas as regras, então mede executar uma spec pronta. `config-short` é a variante **curta**: diz só "the way people expect .env files to work", então a rodada precisa descobrir as regras a partir do dotenv instalado e dos próprios `.env` e `.env.local` da fixture, que é para o que serve o passo de especificar do cc-tiers. A comparação que interessa é a curta. O check oculto dela cobra só o que o prompt curto e esses arquivos mostram: a `PRIVATE_KEY` de várias linhas inteira, o comentário depois do valor fora, um `#` dentro de aspas mantido, `\n` expandido no `GREETING`, `.env.local` sobre `.env`, `env` sobre os dois, `process.env` intacto, dotenv 8.6.0 ainda instalado e importado. Os checks ficam em `bench/checks-trap/` e a referência em `bench/solutions-trap/config.js`; o `npm test` também confere que uma solução ingênua com o dotenv 8.6.0 falha nos dois. As duas tarefas escrevem `src/config.js`, então a suíte da armadilha roda só em one-shot (cada tarefa numa árvore limpa); não use `--session` com ela.
 
 O `npm test` confere os dois lados de cada check: falha na fixture e passa com a referência.
 
@@ -299,7 +321,7 @@ npm run bench -- --tasks-file bench/tasks-hard.json --tasks traversal,race --con
 npm run bench:table -- bench/results/trap.json bench/results/hard-pair.json
 ```
 
-O runner carrega só as configurações de projeto e locais, então seu CLAUDE.md, agentes e plugins ficam fora da medição. No modo sessão ele guarda o uso por passo, porque o Claude Code reporta o uso acumulado da sessão no `--resume`. No cc-tiers ele também lê, do transcript da sessão, as escalações que os hooks anunciaram e se cada tarefa foi roteada como este README diz.
+O runner carrega só as configurações de projeto e locais, então seu CLAUDE.md, agentes e plugins ficam fora da medição. Ele também desliga o `AskUserQuestion` em toda configuração, só Opus e só Sonnet incluídos: uma rodada headless nega a pergunta de qualquer jeito e ninguém responderia, então nenhuma configuração espera nem gasta turnos com uma pergunta. O cc-tiers então segue a regra de quando não há humano: toma a opção recomendada e registra em `Assumed:`. No modo sessão ele guarda o uso por passo, porque o Claude Code reporta o uso acumulado da sessão no `--resume`. No cc-tiers ele também lê, do transcript da sessão, as escalações que os hooks anunciaram e se cada tarefa foi roteada como este README diz.
 
 **Resultados.** As colunas são `Configuração`, `pass@1`, `pass^k`, `Resolvidas`, `Regressões`, `Tokens por tarefa resolvida`, `Δ tokens vs só Opus` e `Δ pass@1 vs só Opus`. A última é o pass@1 da configuração menos o do só Opus, em pontos percentuais (`+33 pp`, `−17 pp`), então o ganho ou a perda do orquestrador se lê numa célula. Abaixo da tabela por tarefa, **Where it made a difference** lista só as tarefas em que alguma configuração resolveu uma parcela de rodadas diferente da do só Opus, como `resolvidas/k`; quando nenhuma resolveu, diz `No task differs from Opus only.`
 

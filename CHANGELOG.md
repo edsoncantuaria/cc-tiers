@@ -11,6 +11,10 @@
 - Calculator suite: `bench/tasks-calc.json`, `bench/fixture-calc/`, `bench/checks-calc/`, and `bench/solutions-calc/calc.js`, one task meant to be repeated (`npm run bench -- --tasks-file bench/tasks-calc.json --repeat 3`).
 - Benchmark table column `Δ pass@1 vs Opus only` (percentage points), and a **Where it made a difference** section that lists only the tasks where a configuration resolved a different share of runs than Opus only.
 - Dotenv trap suite: `bench/tasks-trap.json`, `bench/fixture-trap/` (with dotenv 8.6.0 vendored), `bench/checks-trap/`, and `bench/solutions-trap/config.js`. Code written from memory of a newer dotenv fails silently there, so research and validation can show their worth. The README adds a cheap comparison that runs only the trap and the hard `traversal` and `race` tasks.
+- Specify and ask: before code goes to `cc-tiers:implementer` or `cc-tiers:architect`, the orchestrator (and the dispatcher) writes acceptance criteria between `CC_TIERS_SPEC_BEGIN` and `CC_TIERS_SPEC_END`, asks at most 3 multiple-choice questions only when two readings lead to different code, and records what it assumed when nobody can answer. The same block goes to the reviewer or checker. See README, Specify and ask.
+- Specify gate in the PreToolUse hook and the `specify` option (`on` / `off`, default `on`): a call to the implementer or the architect is refused without a block with content or a `CC_TIERS_SPEC: none - <reason>` line.
+- Short variant of the dotenv trap: the `config-short` task and `bench/checks-trap/config-short.test.mjs`. Its prompt does not list the rules, and its hidden check asserts only what the prompt and the fixture's own `.env` and `.env.local` show, so it measures specifying alone. The detailed `config` task stays as the ready-spec comparison. The trap suite runs one-shot only, because both tasks write `src/config.js`.
+- The benchmark runner passes `--disallowedTools AskUserQuestion` for every configuration, so none waits on a question in a headless run.
 
 ### Changed
 
