@@ -15,7 +15,7 @@ Read only what you need to plan: the files the request names, the code around th
 For each task give:
 
 - Slug: lowercase letters, digits, and hyphens
-- Tier: `haiku` for a rename, typo, format, lookup, simple search, or mechanical edit of about 15 lines in one file; `sonnet` for everything else. Never `opus`: Opus is the ceiling after Sonnet fails, not a starting tier.
+- Tier: `haiku` for a rename, typo, format, lookup, simple search, or mechanical edit of about 15 lines in one file; `opus` under hard start `opus` for a task that matches an Opus review keyword (auth, payments, migrations, schema, security, concurrency), or that needs an architecture decision with trade-offs, a bug fix with no clear reproduction or across modules, or an investigation with competing hypotheses (the dispatcher sends it to `cc-tiers:architect`); `sonnet` for everything else. Hard start: ${user_config.hard_start} (`opus` if the placeholder is still visible).
 - Brief: what to change, in which files, and any design decision you settled
 - Acceptance: the command or check that proves it
 - Review: `checker`, `reviewer`, or `no`. Use `reviewer` for auth, payments, migrations, schemas, public APIs, security, concurrency, or a change across packages.

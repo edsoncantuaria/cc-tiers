@@ -57,3 +57,13 @@ test('prompts ask for reuse, scope and conventions', () => {
     for (const needle of ['recreates code', 'outside the task']) assert.ok(text.includes(needle), `${file} mentions ${needle}`)
   }
 })
+
+test('prompts send a hard task to Opus from the start', () => {
+  for (const file of ['agents/orchestrator.md', 'agents/dispatcher.md', 'agents/planner.md', 'skills/tiers/SKILL.md', 'commands/route.md']) {
+    const text = read(file)
+    assert.ok(text.includes('${user_config.hard_start}'), `${file} reads the hard_start option`)
+    assert.ok(/hard start `opus`/i.test(text), `${file} says what hard start opus does`)
+  }
+  assert.equal(read('agents/planner.md').includes('Never `opus`'), false)
+  assert.ok(read('agents/architect.md').includes('hard task'))
+})
