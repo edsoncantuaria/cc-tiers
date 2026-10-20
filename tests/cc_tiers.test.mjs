@@ -2561,9 +2561,15 @@ test('a ceiling pass waits for the Stop gate', async () => {
       s.cursor.offset = 0
     })
     state = tiers.withSession(ctx, { transcript_path: transcript }, (s) => s)
-    const parked = tiers.takeAwaiting(state)
+    // Reading the parked list leaves it parked, so a Stop killed mid-gate loses nothing.
+    const parked = tiers.peekAwaiting(state)
     assert.equal(parked.length, 1)
-    assert.deepEqual(state.awaiting, [])
+    assert.equal(state.awaiting.length, 1)
+    // Only the ids the Stop counted leave; one parked meanwhile stays.
+    state.awaiting.push({ id: 'row:later', role: 'orchestrator', text: CEILING('pass') })
+    tiers.dropAwaiting(state, [parked[0].id])
+    assert.deepEqual(state.awaiting.map((item) => item.id), ['row:later'])
+    tiers.dropAwaiting(state, ['row:later'])
     // Once gated and counted, the same id is a duplicate.
     const prepared = { kind: 'report', id: parked[0].id, role: parked[0].role, prompt: '', text: parked[0].text, gate: { status: 'pass', verified: ['npm test'], flaky: [], unverified: [], failure: null } }
     assert.ok(tiers.processReport(ctx, state, prepared).includes('cc-tiers gate: users-pagination verified: npm test'))
@@ -2575,6 +2581,24 @@ test('a ceiling pass waits for the Stop gate', async () => {
     const off = tiers.withSession({ ...ctx, file: null, routing: defaultRouting({ verify: 'off' }) }, { transcript_path: transcript }, (s) => s)
     assert.equal((off.awaiting || []).length, 0)
     assert.equal(off.log['users-pagination'].attempts, 1)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('parked reports of one Stop share one verify budget', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const project = ceilingProject(dir)
+    const ctx = { routing: defaultRouting({ verify_allow: 'node fail.mjs', verify_budget: 30 }), projectDir: project }
+    const parked = ['a', 'b'].map((id) => ({ id: `row:${id}`, role: 'orchestrator', text: CEILING('pass', '\nCC_TIERS_VERIFY: node fail.mjs') }))
+    // The first report takes the whole budget by the clock; the second gets nothing left.
+    const clock = [0, 0, 31000]
+    const [first, second] = tiers.prepareParked(ctx, parked, {}, { now: () => clock.shift() ?? 31000 })
+    assert.equal(first.id, 'row:a')
+    assert.equal(first.gate.status, 'fail')
+    assert.equal(second.gate.status, 'unverified')
+    assert.deepEqual(second.gate.unverified, [{ raw: 'node fail.mjs', reason: 'budget exhausted: node fail.mjs' }])
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

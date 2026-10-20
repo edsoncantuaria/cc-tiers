@@ -15,11 +15,12 @@ import {
   lightHint,
   loadHistory,
   openContext,
+  dropAwaiting,
   parsePayload,
-  prepareReport,
+  peekAwaiting,
+  prepareParked,
   processReport,
   readStdin,
-  takeAwaiting,
   takePending,
   withSession,
 } from './cc_tiers.mjs'
@@ -40,11 +41,15 @@ function main() {
     if (message) process.stdout.write(`${JSON.stringify(hookOutput('UserPromptSubmit', message))}\n`)
     return
   }
-  const { awaiting, pending } = withSession(ctx, payload, (state) => ({ awaiting: takeAwaiting(state), pending: takePending(state) }))
-  const prepared = awaiting.map((report) => prepareReport(ctx, { kind: 'report', id: report.id, role: report.role, prompt: '', text: report.text }, payload))
-  // The second scan may count a new trailer; its message goes out with the gated ones.
+  const { awaiting, pending } = withSession(ctx, payload, (state) => ({ awaiting: peekAwaiting(state), pending: takePending(state) }))
+  const prepared = prepareParked(ctx, awaiting, payload)
+  // The second scan may count a new trailer; its message goes out with the gated ones. Only the counted ids leave the parked list.
   const gated = prepared.length
-    ? withSession(ctx, payload, (state) => [takePending(state), ...prepared.map((event) => processReport(ctx, state, event))])
+    ? withSession(ctx, payload, (state) => {
+        const messages = prepared.map((event) => processReport(ctx, state, event))
+        dropAwaiting(state, prepared.map((event) => event.id))
+        return [takePending(state), ...messages]
+      })
     : []
   const message = [pending, ...gated].filter(Boolean).join('\n\n')
   if (!message) return

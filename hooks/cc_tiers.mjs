@@ -2259,17 +2259,17 @@ export function withSession(ctx, payload, fn) {
  * Run the verification gate of a writer pass and attach it to a copy of the event.
  * Commands can take minutes, so this runs before withSession, never under its lock.
  */
-export function prepareReport(ctx, event, payload = {}) {
+export function prepareReport(ctx, event, payload = {}, { budgetS = ctx.routing.verifyBudget } = {}) {
   const routing = ctx.routing
   if (event?.kind !== 'report') return event
   const headers = { ...parseHeaders(event.prompt || ''), ...parseHeaders(event.text || '') }
   const status = (headers.STATUS || '').toLowerCase()
   const projectDir = ctx.projectDir || String(payload.cwd || '')
-  if (REVIEW_ROLES.has(event.role)) return routing.reviewEvidence ? prepareReview(routing, event, status, projectDir) : event
+  if (REVIEW_ROLES.has(event.role)) return routing.reviewEvidence ? prepareReview(routing, event, status, projectDir, budgetS) : event
   if (!routing.verify) return event
   if (!WRITER_ROLES.has(event.role) && !SESSION_ROLES.has(event.role)) return event
   if (!slug(headers.TASK || '') || status !== 'pass') return event
-  const options = { projectDir, allow: routing.verifyAllow, timeoutS: routing.verifyTimeout, budgetS: routing.verifyBudget }
+  const options = { projectDir, allow: routing.verifyAllow, timeoutS: routing.verifyTimeout, budgetS }
   if (projectDir) return { ...event, gate: runGate(event.text, options) }
   // Nothing may run without a project dir; a declaration still tells missing from not validated.
   const gate = parseVerify(event.text).length ? 'unverified' : 'missing'
@@ -2277,12 +2277,12 @@ export function prepareReport(ctx, event, payload = {}) {
 }
 
 /** A reviewer fail is judged finding by finding (commands run here, outside the lock); a pass only keeps its notes. */
-function prepareReview(routing, event, status, projectDir) {
+function prepareReview(routing, event, status, projectDir, budgetS) {
   if (status !== 'fail' && status !== 'pass') return event
   let findings = parseFindings(event.text)
   if (status === 'pass') findings = findings.filter((f) => f.valid && f.severity === 'note')
   if (!findings.length && status === 'pass') return event
-  const options = { allow: routing.verifyAllow, projectDir, timeoutS: routing.verifyTimeout, budgetS: routing.verifyBudget }
+  const options = { allow: routing.verifyAllow, projectDir, timeoutS: routing.verifyTimeout, budgetS }
   // Nothing may run without a project dir: a command finding then stays blocking, unchecked.
   const judged = judgeFindings(findings, { ...options, specText: specText(event.prompt), run: projectDir ? undefined : () => ({ code: 1 }) })
   return { ...event, judged }
@@ -2294,10 +2294,22 @@ function parkReport(state, report) {
   state.awaiting = [...awaiting, report].slice(-MAX_PENDING)
 }
 
-export function takeAwaiting(state) {
-  const awaiting = state.awaiting || []
-  state.awaiting = []
-  return awaiting
+/** A copy of the parked list; it stays parked until dropAwaiting, so a Stop killed mid-gate leaves it for the next one. */
+export function peekAwaiting(state) {
+  return [...(state.awaiting || [])]
+}
+
+export function dropAwaiting(state, ids) {
+  state.awaiting = (state.awaiting || []).filter((item) => !ids.includes(item.id))
+}
+
+/** Gates the parked passes of one Stop on one shared verify_budget, so together they fit the hook timeout. */
+export function prepareParked(ctx, parked, payload = {}, { now = Date.now } = {}) {
+  const started = now()
+  return parked.map((report) => {
+    const budgetS = Math.max(0, ctx.routing.verifyBudget - (now() - started) / 1000)
+    return prepareReport(ctx, { kind: 'report', id: report.id, role: report.role, prompt: '', text: report.text }, payload, { budgetS })
+  })
 }
 
 export function queueMessage(state, message) {

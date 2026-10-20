@@ -4,6 +4,7 @@
  */
 
 import { spawnSync } from 'node:child_process'
+import { existsSync, realpathSync } from 'node:fs'
 import path from 'node:path'
 
 const VERIFY_RE = /^CC_TIERS_VERIFY:\s*(.*?)\s*$/
@@ -11,9 +12,17 @@ const NONE_RE = /^none\s*-\s*(\S.*)$/
 const CD_RE = /^cd\s+(\S+)\s+&&\s+(.*)$/
 /** Any of these could chain, redirect or substitute under a shell, so the line is refused outright. */
 const META_RE = /[;|&><`$()\n\r]/
+/** cmd.exe also expands %VAR%, !VAR! and escapes with ^. */
+const WIN_META_RE = /[;|&><`$()\n\r%!^]/
 const ENV_RE = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s
-/** Env keys that change which program runs, which would bypass the allow list. */
-const BLOCKED_ENV_RE = /^(PATH|LD_\w*|DYLD_\w*)$/i
+/** Env keys that change which program runs or load code before the tests, which would bypass the allow list. */
+const BLOCKED_ENV_RE =
+  /^(PATH|PATHEXT|LD_\w*|DYLD_\w*|NODE_OPTIONS|NODE_PATH|npm_config_\w*|PYTHONPATH|PYTHONSTARTUP|PYTHONHOME|BASH_ENV|ENV|PERL5OPT|PERL5LIB|RUBYOPT|JAVA_TOOL_OPTIONS|_JAVA_OPTIONS|PHPRC|PHP_INI_SCAN_DIR)$/i
+/** A URL that carries the code itself, as node --import=data:... does. */
+const INLINE_RE = /data:|javascript:/i
+/** Flags that load or evaluate code named on the line, not a repo test; long ones are also refused abbreviated, as npm expands them. */
+const CODE_FLAGS = ['--import', '--require', '--loader', '--experimental-loader', '--eval', '--print', '--script-shell', '--node-options', '--userconfig', '--globalconfig']
+const CODE_SHORT_FLAGS = ['-r', '-e', '-p', '-pe']
 const TAIL_LINES = 40
 const MAX_BUFFER = 32 * 1024 * 1024
 
@@ -41,7 +50,18 @@ function tokenize(text) {
   return tokens
 }
 
-function parseLine(raw) {
+export function metaRe(platform = process.platform) {
+  return platform === 'win32' ? WIN_META_RE : META_RE
+}
+
+function isCodeFlag(token) {
+  const name = token.split('=')[0].toLowerCase()
+  if (CODE_SHORT_FLAGS.includes(name)) return true
+  return name.startsWith('--') && name.length > 2 && CODE_FLAGS.some((flag) => flag.startsWith(name))
+}
+
+function parseLine(raw, platform = process.platform) {
+  const meta = metaRe(platform)
   const none = NONE_RE.exec(raw)
   if (none) return { raw, kind: 'none', reason: none[1] }
   const invalid = (reason) => ({ raw, kind: 'invalid', reason: `${reason}: ${raw}` })
@@ -51,14 +71,15 @@ function parseLine(raw) {
   const cd = CD_RE.exec(raw)
   if (cd) {
     const dir = tokenize(cd[1])
-    if (!dir || dir.length !== 1 || META_RE.test(cd[1])) return invalid('refused cd dir')
+    if (!dir || dir.length !== 1 || meta.test(cd[1])) return invalid('refused cd dir')
     if (path.isAbsolute(dir[0]) || path.win32.isAbsolute(dir[0])) return invalid('cd dir must be relative')
     cwd = dir[0]
     rest = cd[2]
   }
-  if (META_RE.test(rest)) return invalid('refused shell metacharacter')
+  if (meta.test(rest)) return invalid('refused shell metacharacter')
   const tokens = tokenize(rest)
   if (!tokens) return invalid('unclosed quote')
+  if (tokens.some((token) => INLINE_RE.test(token))) return invalid('refused inline code URL')
   const env = {}
   while (tokens.length && ENV_RE.test(tokens[0])) {
     const [, key, value] = ENV_RE.exec(tokens.shift())
@@ -66,15 +87,17 @@ function parseLine(raw) {
     env[key] = value
   }
   if (!tokens.length) return invalid('empty command')
+  const flag = tokens.slice(1).find(isCodeFlag)
+  if (flag) return invalid(`refused flag ${flag.split('=')[0]}`)
   return { raw, kind: 'command', argv: tokens, env, cwd }
 }
 
 /** Every CC_TIERS_VERIFY line of the report text, in order. */
-export function parseVerify(text) {
+export function parseVerify(text, { platform = process.platform } = {}) {
   const lines = []
   for (const line of String(text || '').split(/\r?\n/)) {
     const match = VERIFY_RE.exec(line.trim())
-    if (match) lines.push(parseLine(match[1]))
+    if (match) lines.push(parseLine(match[1], platform))
   }
   return lines
 }
@@ -91,9 +114,12 @@ export function isAllowed(argv, allow) {
   return allow.some((entry) => entry.length <= argv.length && entry.every((token, i) => token === argv[i]))
 }
 
+/** Real paths when the dir exists, so a symlink cannot lead out; a missing dir is judged by its path. */
 function insideProject(projectDir, cwd) {
-  const root = path.resolve(projectDir)
-  const rel = path.relative(root, path.resolve(root, cwd || '.'))
+  const resolved = path.resolve(projectDir)
+  const wanted = path.resolve(resolved, cwd || '.')
+  const real = existsSync(resolved) && existsSync(wanted)
+  const rel = real ? path.relative(realpathSync(resolved), realpathSync(wanted)) : path.relative(resolved, wanted)
   return rel === '' || (rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel))
 }
 
@@ -111,6 +137,8 @@ export function runCommand(cmd, { projectDir, timeoutS }) {
     cwd: path.resolve(projectDir, cmd.cwd || '.'),
     env: { ...process.env, ...(cmd.env || {}) },
     timeout: timeoutS * 1000,
+    // SIGTERM can be trapped, and spawnSync would then wait forever.
+    killSignal: 'SIGKILL',
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     maxBuffer: MAX_BUFFER,
@@ -157,13 +185,10 @@ export function runGate(text, { projectDir, allow, timeoutS, budgetS, run = runC
     }
     let result = attempt(line)
     let retried = false
-    if (!result.timedOut && result.code !== 0) {
-      if (remaining <= 0) {
-        exhausted(line.raw)
-        continue
-      }
-      result = attempt(line)
-      retried = true
+    if (!result.timedOut && result.code !== 0 && remaining > 0) {
+      const retry = attempt(line)
+      // A retry cut short by the budget proves nothing, so the first failure stands; so does one with no budget left.
+      if (!(retry.timedOut && retry.seconds < timeoutS)) [result, retried] = [retry, true]
     }
     if (result.timedOut && result.seconds < timeoutS) {
       exhausted(line.raw)
@@ -212,8 +237,12 @@ export function fold(text) {
   return String(text || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
 }
 
-function foldFlat(text) {
-  return fold(text).replace(/\s+/g, ' ').trim()
+const BULLET_RE = /^\s*(?:[-*•]|\d+\.)\s+/
+const ORIGIN_RE = /\s*\((?:request|user|(?:repo|docs|decided):.*)\)\s*$/i
+
+/** A spec line or a criterion without its bullet and origin tag, folded and on one spacing. */
+function criterionKey(text) {
+  return fold(String(text || '').replace(BULLET_RE, '').replace(ORIGIN_RE, '')).replace(/\s+/g, ' ').trim()
 }
 
 function buildFinding(lines, closed) {
@@ -271,14 +300,13 @@ function commandFails(finding, { allow, projectDir, timeoutS }, budget, run) {
 export function judgeFindings(findings, { specText, allow, projectDir, timeoutS, budgetS, run = runCommand }) {
   const judged = { blocking: [], discarded: [], notes: [], invalid: [] }
   const budget = { remaining: budgetS }
-  const spec = foldFlat(specText)
+  const spec = new Set(String(specText || '').split(/\r?\n/).map(criterionKey).filter(Boolean))
   for (const finding of findings) {
     if (!finding.valid) judged.invalid.push(finding)
     else if (finding.severity === 'note') judged.notes.push(finding)
     else if (finding.evidence === 'coverage') {
-      const listed = spec && spec.includes(foldFlat(finding.criterion))
-      if (listed) judged.blocking.push(finding)
-      else judged.invalid.push({ ...finding, valid: false, problem: spec ? 'criterion not in the spec block' : 'no spec block to cover' })
+      if (spec.has(criterionKey(finding.criterion))) judged.blocking.push(finding)
+      else judged.invalid.push({ ...finding, valid: false, problem: spec.size ? 'criterion not in the spec block' : 'no spec block to cover' })
     } else if (finding.evidence === 'command') {
       const fails = commandFails(finding, { allow, projectDir, timeoutS }, budget, run)
       if (fails === false) judged.discarded.push(finding)

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { existsSync, mkdirSync, symlinkSync } from 'node:fs'
 import { mkdtemp, mkdir, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -166,10 +167,21 @@ test('budget exhausted → unverified', () => {
     { raw: 'npx tsc', reason: 'budget exhausted: npx tsc' },
     { raw: 'node --test', reason: 'budget exhausted: node --test' },
   ])
-  const retry = scripted({ code: 1, ms: 60000 })
+})
+
+test('a failure with no budget left for the retry is a failure', () => {
+  const retry = scripted({ code: 1, tail: 'FAIL', ms: 60000 })
   const noRetry = gate('CC_TIERS_VERIFY: npm test', retry.run, { budgetS: 60 })
-  assert.equal(noRetry.status, 'unverified', 'no budget left for the second try is not a failure')
+  assert.equal(noRetry.status, 'fail', 'it ran and failed; no flaky retry was possible')
+  assert.equal(noRetry.failure.code, 1)
+  assert.equal(noRetry.failure.tail, 'FAIL')
   assert.equal(retry.calls.length, 1)
+  const cut = scripted({ code: 1, tail: 'FAIL', ms: 20000 }, { code: null, timedOut: true, ms: 10000 })
+  const cutShort = gate('CC_TIERS_VERIFY: npm test', cut.run, { budgetS: 30 })
+  assert.equal(cut.calls[1].opts.timeoutS, 10)
+  assert.equal(cutShort.status, 'fail', 'a retry cut short by the budget leaves the first failure')
+  assert.equal(cutShort.failure.code, 1)
+  assert.deepEqual(cutShort.unverified, [])
 })
 
 test('only the report text counts', () => {
@@ -201,6 +213,111 @@ test('runCommand runs a real node command', async () => {
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
+})
+
+const INLINE = [
+  'node --test --import=data:text/javascript,import%7BwriteFileSync%20as%20w%7Dfrom%22node:fs%22%3Bw%28%22PWNED1%22,%22x%22%29',
+  'NODE_OPTIONS=--import=data:text/javascript,import%7BwriteFileSync%20as%20w%7Dfrom%22node:fs%22%3Bw%28%22PWNED2%22,%22x%22%29 node --test',
+]
+
+test('refuses inline code through flags, data URLs and env', () => {
+  const bad = [
+    ...INLINE,
+    'node --test --import data:text/javascript,x',
+    'node --test --import ./x.mjs',
+    'node --test x "JavaScript:alert"',
+    'node --test --require=./x.cjs',
+    'node --test -r ./x.cjs',
+    'node --test --loader ./x.mjs',
+    'node --test --experimental-loader=./x.mjs',
+    'node -e 1',
+    'node --eval=1',
+    'node -p 1',
+    'node -pe 1',
+    'node --print 1',
+    'npm test --script-shell=/tmp/sh',
+    'npm test --script-sh=/tmp/sh',
+    'npm test --node-options=--require=x',
+    'npm test --userconfig /tmp/rc',
+    'npm test --globalconfig=/tmp/rc',
+    'npm test -- --import=./x.mjs',
+    'pytest -p evil',
+    'node_options=--require=x node --test',
+    'NODE_PATH=/tmp node --test',
+    'npm_config_script_shell=/tmp/sh npm test',
+    'NPM_CONFIG_NODE_OPTIONS=x npm test',
+    'PYTHONPATH=/tmp pytest',
+    'PYTHONSTARTUP=/tmp/x pytest',
+    'PYTHONHOME=/tmp pytest',
+    'BASH_ENV=/tmp/x npm test',
+    'ENV=/tmp/x npm test',
+    'PERL5OPT=-Mx npm test',
+    'PERL5LIB=/tmp npm test',
+    'RUBYOPT=-rx npm test',
+    'JAVA_TOOL_OPTIONS=-x npm test',
+    '_JAVA_OPTIONS=-x npm test',
+    'PHPRC=/tmp vendor/bin/phpunit',
+    'PHP_INI_SCAN_DIR=/tmp vendor/bin/phpunit',
+    'PATHEXT=.X npm test',
+  ]
+  for (const raw of bad) {
+    const [line] = verify.parseVerify(`CC_TIERS_VERIFY: ${raw}`)
+    assert.equal(line.kind, 'invalid', raw)
+  }
+  for (const raw of ['npm test -- --grep slot', 'node --test --test-name-pattern=slot', 'APP_ENV=testing vendor/bin/phpunit', 'pytest -k slot', 'npm test -- --reporter=dot']) {
+    assert.equal(verify.parseVerify(`CC_TIERS_VERIFY: ${raw}`)[0].kind, 'command', raw)
+  }
+})
+
+test('inline code on an allowed prefix never runs', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-verify-'))
+  try {
+    const allow = verify.parseAllow('node --test, npm test')
+    for (const raw of INLINE) {
+      const result = verify.runGate(`CC_TIERS_VERIFY: ${raw}`, { projectDir: dir, allow, timeoutS: 20, budgetS: 30 })
+      assert.equal(result.status, 'unverified', raw)
+      assert.equal(result.failure, null, raw)
+    }
+    assert.equal(existsSync(path.join(dir, 'PWNED1')), false)
+    assert.equal(existsSync(path.join(dir, 'PWNED2')), false)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('on win32 also refuses cmd.exe expansion characters', () => {
+  for (const raw of ['npm test %PATH%', 'npm test !x!', 'npm test a^b', 'cd a%b && npm test']) {
+    assert.equal(verify.parseVerify(`CC_TIERS_VERIFY: ${raw}`, { platform: 'win32' })[0].kind, 'invalid', raw)
+    assert.equal(verify.parseVerify(`CC_TIERS_VERIFY: ${raw}`, { platform: 'linux' })[0].kind, 'command', raw)
+  }
+})
+
+test('a cd through a symlink out of the project is refused', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-verify-'))
+  try {
+    const project = path.join(dir, 'project')
+    mkdirSync(path.join(project, 'api'), { recursive: true })
+    mkdirSync(path.join(dir, 'outside'))
+    symlinkSync(path.join(dir, 'outside'), path.join(project, 'link'))
+    const { run, calls } = scripted()
+    const out = verify.runGate('CC_TIERS_VERIFY: cd link && npm test', { projectDir: project, allow: ALLOW, timeoutS: 300, budgetS: 600, run })
+    assert.equal(out.status, 'unverified')
+    assert.equal(calls.length, 0)
+    const inside = verify.runGate('CC_TIERS_VERIFY: cd api && npm test', { projectDir: project, allow: ALLOW, timeoutS: 300, budgetS: 600, run })
+    assert.equal(inside.status, 'pass')
+    const missing = verify.runGate('CC_TIERS_VERIFY: cd gone && npm test', { projectDir: project, allow: ALLOW, timeoutS: 300, budgetS: 600, run })
+    assert.equal(missing.status, 'pass', 'a dir that does not exist is judged by its path')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('runCommand kills a child that ignores SIGTERM', () => {
+  // The child exits by itself after 8 s, so without SIGKILL this returns late instead of hanging the suite.
+  const result = verify.runCommand({ argv: [process.execPath, '-e', "process.on('SIGTERM', () => {}); setTimeout(() => {}, 8000)"] }, { projectDir: os.tmpdir(), timeoutS: 1 })
+  assert.equal(result.timedOut, true)
+  assert.equal(result.code, null)
+  assert.ok(result.ms < 5000, `returned after ${result.ms} ms`)
 })
 
 const FIELDS = { category: 'state', severity: 'blocking', evidence: 'trace', expected: 'stays open', observed: 'closed', where: 'src/a.js:1' }
@@ -281,13 +398,38 @@ test('out-of-list command evidence counts as trace', () => {
 })
 
 test('coverage needs the criterion in the spec block', () => {
-  const fields = { category: 'correctness', severity: 'blocking', evidence: 'coverage', criterion: 'Slot  livre\nnão duplica', where: 'test/a' }
+  const fields = { category: 'correctness', severity: 'blocking', evidence: 'coverage', criterion: 'O slot  livre não duplica', where: 'test/a' }
   const spec = '- O SLOT LIVRE nao duplica\n- outro'
   assert.equal(judge(fields, undefined, { specText: spec }).blocking.length, 1)
   assert.equal(judge(fields, undefined, { specText: '- outra coisa' }).invalid.length, 1)
   const empty = judge(fields, undefined, { specText: '' })
   assert.equal(empty.blocking.length, 0)
   assert.equal(empty.invalid.length, 1)
+})
+
+test('coverage matches a whole spec line, not a fragment', () => {
+  const coverage = (criterion) => ({ category: 'correctness', severity: 'blocking', evidence: 'coverage', criterion, where: 'test/a' })
+  const spec = [
+    'Criteria:',
+    '- O turno reaberto fica aberto (request)',
+    '* Slot ocupado recusa a reserva (repo: src/slot.js:12)',
+    '• Datas em UTC (docs: https://x/y)',
+    '1. Limite de 3 reservas (decided: igual ao legado (v1))',
+    '- Cancelar devolve o crédito (user)',
+  ].join('\n')
+  for (const criterion of ['a', 'turno', 'O turno reaberto', 'fica aberto (request)']) {
+    assert.equal(judge(coverage(criterion), undefined, { specText: spec }).blocking.length, 0, criterion)
+  }
+  for (const criterion of [
+    'O turno reaberto fica aberto',
+    '- o TURNO reaberto  fica aberto (request)',
+    'Slot ocupado recusa a reserva',
+    'Datas em UTC',
+    'Limite de 3 reservas',
+    '2. Cancelar devolve o credito',
+  ]) {
+    assert.equal(judge(coverage(criterion), undefined, { specText: spec }).blocking.length, 1, criterion)
+  }
 })
 
 test('notes never block', () => {
