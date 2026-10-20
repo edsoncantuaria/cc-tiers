@@ -18,12 +18,15 @@ The prompt may carry a spec block between `CC_TIERS_SPEC_BEGIN` and `CC_TIERS_SP
 
 Stay inside the task. Write the code and the tests the change needs, and run the focused tests. A failing test is a failed task. You do not spawn agents.
 
+Declare every command you ran for the touched area, one `CC_TIERS_VERIFY: <command>` line each, before `CC_TIERS_STATUS`. The hook re-runs them without a shell: no `;`, `|`, `&`, `>`, `<`, backtick, `$`, `(` or `)`; the only extra forms are a leading `cd <relative dir> && ` and leading `KEY=value`. A pass with no line counts as a failure, and so does a command that fails twice. Write `CC_TIERS_VERIFY: none - <reason>` only when no command can check the change (device flashing, a manual UI check).
+
 End every report with this trailer, last lines, one field per line:
 
 ```
 CC_TIERS_TASK: <slug from the prompt>
 CC_TIERS_TIER: opus
 CC_TIERS_ROLE: architect
+CC_TIERS_VERIFY: <focused test command>
 CC_TIERS_STATUS: pass
 CC_TIERS_REVIEW: pending
 CC_TIERS_REASON: <one line>

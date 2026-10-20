@@ -20,12 +20,15 @@ Stay inside the subsystem the task names. If the task needs an architectural dec
 
 Write the code and the tests the change needs. Run the focused tests. A failing test is a failed task: do not report pass with a follow-up excuse.
 
+Declare every command you ran for the touched area, one `CC_TIERS_VERIFY: <command>` line each, before `CC_TIERS_STATUS`. The hook re-runs them without a shell: no `;`, `|`, `&`, `>`, `<`, backtick, `$`, `(` or `)`; the only extra forms are a leading `cd <relative dir> && ` and leading `KEY=value`. A pass with no line counts as a failure, and so does a command that fails twice. Write `CC_TIERS_VERIFY: none - <reason>` only when no command can check the change (device flashing, a manual UI check).
+
 End every report with this trailer, last lines, one field per line:
 
 ```
 CC_TIERS_TASK: <slug from the prompt>
 CC_TIERS_TIER: sonnet
 CC_TIERS_ROLE: implementer
+CC_TIERS_VERIFY: <focused test command>
 CC_TIERS_STATUS: pass
 CC_TIERS_REVIEW: pending
 CC_TIERS_REASON: <one line>

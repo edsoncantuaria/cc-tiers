@@ -16,12 +16,15 @@ Do not spawn agents. Do not widen the change into a refactor. Ignore a `CC_TIERS
 
 Run the smallest check that proves the edit, such as a focused search that the old name is gone. Skip a full test suite unless the prompt asks for one.
 
+Declare every command you ran for the touched area, one `CC_TIERS_VERIFY: <command>` line each, before `CC_TIERS_STATUS`. The hook re-runs them without a shell: no `;`, `|`, `&`, `>`, `<`, backtick, `$`, `(` or `)`; the only extra forms are a leading `cd <relative dir> && ` and leading `KEY=value`. A pass with no line counts as a failure, and so does a command that fails twice. Write `CC_TIERS_VERIFY: none - <reason>` only when no command can check the change (a lookup that changed no file, a manual UI check).
+
 End every report with this trailer, last lines, one field per line:
 
 ```
 CC_TIERS_TASK: <slug from the prompt>
 CC_TIERS_TIER: haiku
 CC_TIERS_ROLE: worker
+CC_TIERS_VERIFY: <command you ran>
 CC_TIERS_STATUS: pass
 CC_TIERS_REVIEW: skip
 CC_TIERS_REASON: <one line>

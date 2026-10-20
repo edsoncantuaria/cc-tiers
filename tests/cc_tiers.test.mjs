@@ -1370,7 +1370,7 @@ test('task cost is recorded without cc-cost, and the log feeds the report', asyn
 
     const proc = spawnSync(process.execPath, [path.join(ROOT, 'hooks', 'report.mjs'), path.join(dir, 'data')], { encoding: 'utf8' })
     assert.equal(proc.status, 0, proc.stderr)
-    assert.ok(proc.stdout.includes('| users-pagination | sonnet | 2 | 0 | sonnet xhigh | — | done on sonnet | $0.014 |'))
+    assert.ok(proc.stdout.includes('| users-pagination | sonnet | 2 | 0 | sonnet xhigh | — | — | done on sonnet | $0.014 |'))
     assert.ok(proc.stdout.includes('% less'))
     const empty = spawnSync(process.execPath, [path.join(ROOT, 'hooks', 'report.mjs'), path.join(dir, 'nothing')], { encoding: 'utf8' })
     assert.equal(empty.stdout, 'cc-tiers has no session data yet.\n')

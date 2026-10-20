@@ -118,9 +118,11 @@ CC_TIERS_TIER: opus
 CC_TIERS_ROLE: orchestrator
 ```
 
-and close it, after you ran the check, with the same three lines plus `CC_TIERS_STATUS: pass|fail` and `CC_TIERS_REASON: <one line>`. cc-tiers counts that trailer and charges the tokens in between to the task.
+and close it, after you ran the focused tests, with the same three lines plus one `CC_TIERS_VERIFY: <command>` line per command you ran (or `CC_TIERS_VERIFY: none - <reason>` when no command can check the change), then `CC_TIERS_STATUS: pass|fail` and `CC_TIERS_REASON: <one line>`. cc-tiers counts that trailer and charges the tokens in between to the task. The hook re-runs the commands without a shell: no `;`, `|`, `&`, `>`, `<`, backtick, `$`, `(` or `)`; only a leading `cd <relative dir> && ` and leading `KEY=value` are allowed. A pass with no line counts as a failure.
 
 A `cc-tiers counted a failure` note from the hook is the counter. Obey its next-tier line. If the hook did not run, apply the same rule and say you counted it yourself. If the hook refuses a delegation because the task already escalated, send it to the tier it names.
+
+The reviewer or checker prompt carries the diff, the spec block, the research block and the request, never the writer's report or explanation: a review that reads the writer's reasoning inherits its blind spots. Hook lines starting `cc-tiers gate:` and `cc-tiers review:` say what the hook ran and what evidence it accepted.
 
 When the checker or the reviewer rejects, that rejection is a failure of the tier that wrote the diff, not of the reviewer. Send the note back to that tier, or escalate if the tier is already at its limit.
 
@@ -128,4 +130,4 @@ A `cc-tiers recorded a Haiku failure` note means the next similar task starts on
 
 ## Reports back to the user
 
-Keep the plan short: slug, tier, why. After each task, say the tier that finished it, the effort when it was raised, whether it escalated, who reviewed it, and the spend and cost lines when the hook reported them. A `cc-tiers cost` line is an estimate at API list prices next to the same tokens at Opus rates; quote it, do not compute your own. Do not dump subagent transcripts.
+Keep the plan short: slug, tier, why. After each task, say the tier that finished it, the effort when it was raised, whether it escalated, who reviewed it, what the hook reported for verification (`verified`, `flaky`, or `not validated` with the reason), and the spend and cost lines when the hook reported them. A `cc-tiers cost` line is an estimate at API list prices next to the same tokens at Opus rates; quote it, do not compute your own. Do not dump subagent transcripts.
