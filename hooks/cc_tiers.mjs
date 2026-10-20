@@ -198,6 +198,22 @@ function pickNumber(userValue, projectValue, fallback, note, notes) {
   return fallback
 }
 
+/** Out-of-range numbers clamp to the bound; anything that is not a number falls back. */
+function clampRange(value, min, max, fallback) {
+  if (value == null || value === '') return fallback
+  const number = Number(value)
+  if (!Number.isFinite(number)) return fallback
+  return Math.min(max, Math.max(min, Math.round(number)))
+}
+
+/** `verify_allow` is "npm test, make check": one argv prefix per comma-separated entry. */
+function parseVerifyAllow(value) {
+  return String(value ?? '')
+    .split(',')
+    .map((entry) => entry.trim().split(/\s+/).filter(Boolean))
+    .filter((argv) => argv.length)
+}
+
 export function mergeRouting(defaults, project = null, user = null) {
   const source = project || {}
   const config = user || {}
@@ -285,6 +301,12 @@ export function mergeRouting(defaults, project = null, user = null) {
   const showCost = parseLearn(config.show_cost, parseLearn(defaults.showCost, true))
   const research = parseLearn(config.research, parseLearn(source.research, parseLearn(defaults.research, true)))
   const specify = parseLearn(config.specify, parseLearn(source.specify, parseLearn(defaults.specify, true)))
+  const verify = parseLearn(config.verify, parseLearn(defaults.verify, true))
+  let verifyAllow = parseVerifyAllow(config.verify_allow)
+  if (!verifyAllow.length) verifyAllow = parseVerifyAllow(defaults.verifyAllow)
+  const verifyTimeout = clampRange(config.verify_timeout, 10, 600, clampRange(defaults.verifyTimeout, 10, 600, 300))
+  const verifyBudget = clampRange(config.verify_budget, 30, 600, clampRange(defaults.verifyBudget, 30, 600, 600))
+  const reviewEvidence = parseLearn(config.review_evidence, parseLearn(defaults.reviewEvidence, true))
   const prices = defaults.prices && typeof defaults.prices === 'object' ? defaults.prices : { families: {}, models: {} }
   const largeFileBytes = Number(source.largeFileBytes) > 0 ? Number(source.largeFileBytes) : Number(defaults.largeFileBytes) || 400000
 
@@ -313,6 +335,11 @@ export function mergeRouting(defaults, project = null, user = null) {
     showCost,
     research,
     specify,
+    verify,
+    verifyAllow,
+    verifyTimeout,
+    verifyBudget,
+    reviewEvidence,
     prices,
     largeFileBytes,
     notes,
@@ -744,6 +771,12 @@ export function specifyLine(routing) {
   )
 }
 
+export function verifyLine(routing) {
+  const evidence = `Review evidence: ${routing.reviewEvidence ? 'on' : 'off'}.`
+  if (!routing.verify) return `Verify: off. ${evidence}`
+  return `Verify: on (gate runs CC_TIERS_VERIFY commands; review needs evidence). ${evidence}`
+}
+
 export function formatSessionContext(routing, projectNote, snapshot = {}) {
   const tiers = routing.tiers
   const lines = [
@@ -758,6 +791,7 @@ export function formatSessionContext(routing, projectNote, snapshot = {}) {
     classifierLine(routing),
     researchLine(routing),
     specifyLine(routing),
+    verifyLine(routing),
     `A Haiku-looking task with a complexity score of ${COMPLEX_THRESHOLD} or more (several steps, many files, design or investigation wording, a long brief) starts on Sonnet.`,
     routing.light === 'inline'
       ? 'Light path: inline. When a request is one trivial task, cc-tiers says so as it arrives: do it yourself in this session, with no delegation and no checker.'
@@ -2063,6 +2097,11 @@ export function userFromEnv(env = process.env) {
     show_cost: env.CLAUDE_PLUGIN_OPTION_SHOW_COST || null,
     research: env.CLAUDE_PLUGIN_OPTION_RESEARCH || null,
     specify: env.CLAUDE_PLUGIN_OPTION_SPECIFY || null,
+    verify: env.CLAUDE_PLUGIN_OPTION_VERIFY || null,
+    verify_allow: env.CLAUDE_PLUGIN_OPTION_VERIFY_ALLOW || '',
+    verify_timeout: env.CLAUDE_PLUGIN_OPTION_VERIFY_TIMEOUT || null,
+    verify_budget: env.CLAUDE_PLUGIN_OPTION_VERIFY_BUDGET || null,
+    review_evidence: env.CLAUDE_PLUGIN_OPTION_REVIEW_EVIDENCE || null,
   }
 }
 

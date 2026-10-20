@@ -2319,3 +2319,69 @@ test('the login check accepts a token that identifies the user by email only', a
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+const VERIFY_ALLOW_DEFAULT = 'npm test, npm run test, node --test, npx tsc, npx eslint, npx vitest, npx jest, npx playwright test, vendor/bin/phpunit, ./vendor/bin/phpunit, vendor/bin/phpstan, ./vendor/bin/phpstan, vendor/bin/phpcs, ./vendor/bin/phpcs, pytest, python -m pytest, go test, cargo test'
+
+test('manifest declares the verify knobs', () => {
+  const manifest = JSON.parse(readFileSync(path.join(ROOT, '.claude-plugin/plugin.json'), 'utf8'))
+  for (const key of ['verify', 'review_evidence']) {
+    const option = manifest.userConfig[key]
+    assert.equal(option.type, 'string')
+    assert.deepEqual(option.options, ['on', 'off'])
+    assert.equal(option.default, 'on')
+    assert.ok(option.title && option.description)
+  }
+  const allow = manifest.userConfig.verify_allow
+  assert.equal(allow.type, 'string')
+  assert.equal(allow.default, VERIFY_ALLOW_DEFAULT)
+  assert.equal(allow.default.includes('docker'), false)
+  assert.ok(allow.title && allow.description)
+  for (const [key, def, min, max] of [['verify_timeout', 300, 10, 600], ['verify_budget', 600, 30, 600]]) {
+    const option = manifest.userConfig[key]
+    assert.equal(option.type, 'number')
+    assert.equal(option.default, def)
+    assert.equal(option.min, min)
+    assert.equal(option.max, max)
+    assert.ok(option.title && option.description)
+  }
+})
+
+test('verify options come from /config env', () => {
+  const defaults = tiers.loadJson(path.join(ROOT, 'config/routing.default.json'))
+  const base = tiers.mergeRouting(defaults)
+  assert.equal(base.verify, true)
+  assert.equal(base.reviewEvidence, true)
+  assert.equal(base.verifyTimeout, 300)
+  assert.equal(base.verifyBudget, 600)
+  assert.deepEqual(base.verifyAllow, VERIFY_ALLOW_DEFAULT.split(',').map((entry) => entry.trim().split(/\s+/)))
+  assert.deepEqual(tiers.mergeRouting(defaults, null, { verify_allow: '  ' }).verifyAllow, base.verifyAllow)
+
+  const env = tiers.userFromEnv({
+    CLAUDE_PLUGIN_OPTION_VERIFY: 'off',
+    CLAUDE_PLUGIN_OPTION_REVIEW_EVIDENCE: 'off',
+    CLAUDE_PLUGIN_OPTION_VERIFY_ALLOW: 'make  check, ,npm run lint',
+    CLAUDE_PLUGIN_OPTION_VERIFY_TIMEOUT: '700',
+    CLAUDE_PLUGIN_OPTION_VERIFY_BUDGET: '5',
+  })
+  const routing = tiers.mergeRouting(defaults, null, env)
+  assert.equal(routing.verify, false)
+  assert.equal(routing.reviewEvidence, false)
+  assert.deepEqual(routing.verifyAllow, [['make', 'check'], ['npm', 'run', 'lint']])
+  assert.equal(routing.verifyTimeout, 600)
+  assert.equal(routing.verifyBudget, 30)
+  assert.equal(tiers.mergeRouting(defaults, null, { verify_timeout: 'abc' }).verifyTimeout, 300)
+  assert.equal(tiers.userFromEnv({}).verify, null)
+  assert.equal(tiers.userFromEnv({}).verify_allow, '')
+})
+
+test('session context states verify and review evidence', () => {
+  const defaults = tiers.loadJson(path.join(ROOT, 'config/routing.default.json'))
+  const ctx = (user) => tiers.formatSessionContext(tiers.mergeRouting(defaults, null, user), 'not present', { ccCost: { installed: false } })
+  const on = ctx(null)
+  assert.ok(on.includes('Verify: on (gate runs CC_TIERS_VERIFY commands; review needs evidence)'))
+  assert.ok(on.includes('Review evidence: on'))
+  assert.ok(on.indexOf('Verify: on') > on.indexOf('Specify: on'))
+  const off = ctx({ verify: 'off', review_evidence: 'off' })
+  assert.ok(off.includes('Verify: off'))
+  assert.ok(off.includes('Review evidence: off'))
+})

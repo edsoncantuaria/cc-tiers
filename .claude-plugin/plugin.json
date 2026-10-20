@@ -102,6 +102,42 @@
       "description": "on (default): before code goes to cc-tiers:implementer or cc-tiers:architect, the prompt must carry acceptance criteria between CC_TIERS_SPEC_BEGIN and CC_TIERS_SPEC_END lines, or say CC_TIERS_SPEC: none - <reason>. Otherwise cc-tiers refuses the call. off: no written criteria are required.",
       "default": "on",
       "options": ["on", "off"]
+    },
+    "verify": {
+      "type": "string",
+      "title": "Verify gate",
+      "description": "on (default): a writer's pass must name the commands that prove it in CC_TIERS_VERIFY lines. cc-tiers runs the ones on the allow list and counts a failing one as a task failure. off: a pass is taken from the report alone.",
+      "default": "on",
+      "options": ["on", "off"]
+    },
+    "verify_allow": {
+      "type": "string",
+      "title": "Verify allow list",
+      "description": "Comma-separated command prefixes the gate may run, compared on whole words. Add the one your project needs, such as make check. Docker commands are not in the default list. Blank uses the default.",
+      "default": "npm test, npm run test, node --test, npx tsc, npx eslint, npx vitest, npx jest, npx playwright test, vendor/bin/phpunit, ./vendor/bin/phpunit, vendor/bin/phpstan, ./vendor/bin/phpstan, vendor/bin/phpcs, ./vendor/bin/phpcs, pytest, python -m pytest, go test, cargo test"
+    },
+    "verify_timeout": {
+      "type": "number",
+      "title": "Verify timeout (seconds)",
+      "description": "How long one gate command may run before it counts as timed out. Default 300.",
+      "default": 300,
+      "min": 10,
+      "max": 600
+    },
+    "verify_budget": {
+      "type": "number",
+      "title": "Verify budget (seconds)",
+      "description": "Total time the gate may spend on one report; commands past it are left as not validated. Default 600.",
+      "default": 600,
+      "min": 30,
+      "max": 600
+    },
+    "review_evidence": {
+      "type": "string",
+      "title": "Review evidence",
+      "description": "on (default): a reviewer's blocking finding needs evidence, and cc-tiers re-runs a finding's command; one that passes is discarded. off: a reviewer's fail needs no finding.",
+      "default": "on",
+      "options": ["on", "off"]
     }
   }
 }
