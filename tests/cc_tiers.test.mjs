@@ -1953,3 +1953,22 @@ test('the calculator check ignores eval in comments and strings but catches a re
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('a slug named like an Object.prototype key works through every per-slug map', () => {
+  const routing = riskyRouting()
+  const task = 'constructor'
+  const trailer = (role, status) => `ok\nCC_TIERS_TASK: ${task}\nCC_TIERS_TIER: sonnet\nCC_TIERS_ROLE: ${role}\nCC_TIERS_STATUS: ${status}\n`
+  let state = apply(tiers.emptyState('s'), routing, 'r1', 'researcher', 'brief\nCC_TIERS_STATUS: pass', `CC_TIERS_TASK: ${task}\nResearch.`).state
+  const prompt = `${HEADER(task, 'sonnet', 'implementer')}CC_TIERS_RESEARCH: done\nBuild it.`
+  assert.equal(tiers.checkDelegation(state, { subagent_type: 'cc-tiers:implementer', prompt }, routing).deny, '')
+  const passed = apply(state, routing, 'i1', 'implementer', `${trailer('implementer', 'pass')}CC_TIERS_REVIEW: pending\n`, prompt)
+  assert.equal(passed.meta.outcome, 'review')
+  state = passed.state
+  tiers.addSpend(state.spend, task, 'sonnet', 10)
+  tiers.addCost(state.cost, task, { tier: 'sonnet', usd: 1, opus: 2 })
+  const reviewed = apply(state, routing, 'v1', 'reviewer', `${trailer('reviewer', 'pass')}CC_TIERS_REASON: checked\n`)
+  assert.equal(reviewed.meta.outcome, 'pass')
+  for (const map of ['log', 'cost', 'spend']) assert.ok(Object.hasOwn(reviewed.state[map], task), map)
+  assert.equal(reviewed.state.cost[task].sonnet, 1)
+  assert.equal(reviewed.state.spend[task].sonnet, 10)
+})

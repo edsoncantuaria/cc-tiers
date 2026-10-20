@@ -792,6 +792,9 @@ function freshCursor() {
   return { file: '', offset: 0, task: '', ids: [], limits: {} }
 }
 
+/** Per-slug maps are plain objects: a slug like `constructor` must not read an inherited property. */
+const own = (map, key) => (map && Object.hasOwn(map, key) ? map[key] : undefined)
+
 export function emptyState(sessionId) {
   return {
     session_id: sessionId,
@@ -1095,7 +1098,7 @@ export function applyEvent(state, event, routing) {
   }
 
   const tasks = state.tasks || (state.tasks = {})
-  let current = tasks[task]
+  let current = own(tasks, task)
   if (!current || typeof current !== 'object') current = { tier, failures: [], carried: [] }
 
   // The counter already moved past this tier. A stale lower-tier run must not reset it.
@@ -1327,7 +1330,7 @@ export function checkDelegation(state, toolInput, routing, { history = null, pro
 
   const tier = ROLES[role]
   const tasks = state.tasks || (state.tasks = {})
-  let current = tasks[task]
+  let current = own(tasks, task)
   const notes = []
   const routed = stripResearch(prompt)
   if (current && typeof current === 'object' && TIERS.includes(current.tier)) {
@@ -1559,7 +1562,7 @@ export function usageCost(usage, model, routing) {
 
 export function addCost(cost, task, entry) {
   if (!task || !entry || !TIERS.includes(entry.tier)) return cost
-  const current = cost[task] || { haiku: 0, sonnet: 0, opus: 0, opusRate: 0 }
+  const current = own(cost, task) || { haiku: 0, sonnet: 0, opus: 0, opusRate: 0 }
   current[entry.tier] = (Number(current[entry.tier]) || 0) + (Number(entry.usd) || 0)
   current.opusRate = (Number(current.opusRate) || 0) + (Number(entry.opus) || 0)
   cost[task] = current
@@ -1781,7 +1784,7 @@ export function readTodayTotal(env = process.env, now = Date.now()) {
 
 export function addSpend(spend, task, tier, amount) {
   if (!task || !TIERS.includes(tier) || !amount) return spend
-  const current = spend[task] || { haiku: 0, sonnet: 0, opus: 0 }
+  const current = own(spend, task) || { haiku: 0, sonnet: 0, opus: 0 }
   current[tier] = (Number(current[tier]) || 0) + amount
   spend[task] = current
   return spend
@@ -2156,12 +2159,12 @@ export function processReport(ctx, state, event, usage = null) {
     message += `\ncc-tiers recorded that ${task} escalated past Sonnet. Similar tasks will start on Sonnet${top ? ` at effort ${top}` : ''}.`
   }
   if (applied.meta.planner) return ''
-  if (ctx.ccCost && task && state.spend?.[task]) {
-    const line = formatTaskSpend(task, state.spend[task])
+  if (ctx.ccCost && task && own(state.spend, task)) {
+    const line = formatTaskSpend(task, own(state.spend, task))
     if (line) message = message ? `${message}\n${line}` : line
   }
-  if (ctx.routing.showCost && task && state.cost?.[task]) {
-    const line = formatTaskCost(task, state.cost[task])
+  if (ctx.routing.showCost && task && own(state.cost, task)) {
+    const line = formatTaskCost(task, own(state.cost, task))
     if (line) message = message ? `${message}\n${line}` : line
   }
   return message
@@ -2171,7 +2174,7 @@ const MAX_LOG = 60
 
 function logEntry(state, task) {
   state.log = state.log && typeof state.log === 'object' ? state.log : {}
-  const entry = state.log[task] || { tiers: [], attempts: 0, failures: 0, escalations: 0, reviews: [], effort: {}, status: 'open', finished: '' }
+  const entry = own(state.log, task) || { tiers: [], attempts: 0, failures: 0, escalations: 0, reviews: [], effort: {}, status: 'open', finished: '' }
   state.log[task] = entry
   const names = Object.keys(state.log)
   if (names.length > MAX_LOG) {
