@@ -291,7 +291,7 @@ node bench/run.mjs --tasks-file bench/tasks-hard.json --session --repeat 3 --tim
 > [!WARNING]
 > Uma rodada usa o seu login real do Claude Code, então no Pro ou no Max ela gasta a sua janela de uso. Uma rodada com `--repeat 3` de quatro configurações são muitas sessões. Comece pela suíte da calculadora. `npm run bench:table -- <arquivos de resultado>` imprime a tabela a partir de resultados salvos.
 
-**Comparação barata.** As tarefas que separam as configurações são a armadilha e duas tarefas difíceis. Isto roda só essas, contra só Opus, só Sonnet e cc-tiers, e junta os resultados numa tabela:
+**Comparação barata.** A armadilha e duas tarefas difíceis devem separar as configurações. Os prompts delas enunciam as regras, então uma rodada simples e cuidadosa também pode passar; a suíte mede se esse cuidado acontece. Isto roda só essas tarefas, contra só Opus, só Sonnet e cc-tiers, e junta os resultados numa tabela:
 
 ```bash
 npm run bench -- --tasks-file bench/tasks-trap.json --configs opus,sonnet,cc-tiers --repeat 3 --out bench/results/trap.json

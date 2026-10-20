@@ -427,7 +427,8 @@ export function table(results) {
     }
     let points = '—'
     if (config !== 'opus' && opus) {
-      const change = Math.round((m.pass1 - opus.pass1) * 100)
+      const difference = (m.pass1 - opus.pass1) * 100
+      const change = Math.sign(difference) * Math.round(Math.abs(difference))
       points = change < 0 ? `−${-change} pp` : change > 0 ? `+${change} pp` : '0 pp'
     }
     const tokens = kilo(m.tokensPerResolved)
@@ -466,7 +467,8 @@ export function differenceTable(results, baseline = 'opus') {
   for (const task of new Set(results.map((row) => row.task))) {
     const base = share(baseline, task)
     const cells = configs.map((config) => share(config, task))
-    if (!base || !cells.some((cell) => cell && cell.resolved / cell.runs !== base.resolved / base.runs)) continue
+    // A task the baseline did not run cannot be compared, so it is listed.
+    if (base && !cells.some((cell) => cell && cell.resolved / cell.runs !== base.resolved / base.runs)) continue
     lines.push(`| \`${task}\` | ${cells.map((cell) => (cell ? `${cell.resolved}/${cell.runs}` : '—')).join(' | ')} |`)
   }
   if (!lines.length) return [`No task differs from ${label(baseline)}.`]

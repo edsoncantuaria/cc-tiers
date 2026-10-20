@@ -13,7 +13,8 @@ async function configFrom(files, env = {}) {
   const cwd = mkdtempSync(path.join(os.tmpdir(), 'trap-check-'))
   try {
     for (const [name, text] of Object.entries(files)) if (text != null) writeFileSync(path.join(cwd, name), text)
-    return loadConfig({ cwd, env })
+    // Awaited before the folder goes; spread so a null-prototype result compares like a plain one.
+    return { ...(await loadConfig({ cwd, env })) }
   } finally {
     rmSync(cwd, { recursive: true, force: true })
   }
@@ -60,4 +61,10 @@ test('the installed dotenv is still 8.6.0', () => {
   const require = createRequire(root)
   assert.equal(require('dotenv/package.json').version, '8.6.0')
   assert.deepEqual(JSON.parse(readFileSync(root, 'utf8')).dependencies, { dotenv: '8.6.0' })
+})
+
+test('src/config.js uses the installed dotenv package', () => {
+  const source = readFileSync(new URL('../src/config.js', import.meta.url), 'utf8')
+  const code = source.replace(/\/\/[^\n]*|\/\*[\s\S]*?\*\//g, ' ')
+  assert.match(code, /from\s+['"]dotenv['"]|require\(\s*['"]dotenv['"]\s*\)|import\(\s*['"]dotenv['"]\s*\)/)
 })

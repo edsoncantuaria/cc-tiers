@@ -1552,6 +1552,20 @@ test('the tables show where cc-tiers and Sonnet differ from Opus only', async ()
   assert.ok(table(noOpus).includes('| Sonnet only | 50% | 50% (k=2) | 2/4 | 0 | 20.0k | — | — |'))
 })
 
+test('Δ pass@1 rounds halves away from zero, and a task Opus did not run is listed', async () => {
+  const { table, differenceTable } = await import(pathToFileURL(path.join(ROOT, 'bench', 'run.mjs')).href)
+  const runs = (config, task, resolved, total) => Array.from({ length: total }, (_, i) => ({ config, task, kind: 'hard', resolved: i < resolved }))
+  const text = table([...runs('opus', 'a', 4, 8), ...runs('sonnet', 'a', 5, 8), ...runs('cc-tiers', 'a', 3, 8)])
+  assert.ok(text.includes('| 63% | 0% (k=8) | 5/8 | — | — | — | +13 pp |'), text)
+  assert.ok(text.includes('| 38% | 0% (k=8) | 3/8 | — | — | — | −13 pp |'), text)
+  const rows = [...runs('opus', 'a', 1, 1), ...runs('sonnet', 'a', 1, 1), ...runs('sonnet', 'b', 1, 1)]
+  assert.deepEqual(differenceTable(rows).slice(2), [
+    '| Task | Opus only | Sonnet only |',
+    '| --- | --: | --: |',
+    '| `b` | — | 1/1 |',
+  ])
+})
+
 test('old result rows render with pass as resolved', async () => {
   const { metrics, table } = await import(pathToFileURL(path.join(ROOT, 'bench', 'run.mjs')).href)
   const usage = (input, output, cacheRead, cacheWrite) => ({ 'claude-opus-5-5': { input, output, cacheRead, cacheWrite } })
@@ -2014,6 +2028,58 @@ test('the dotenv trap check fails on the fixture and on a naive dotenv 8.6.0 par
     cpSync(path.join(bench, 'solutions-trap', 'config.js'), path.join(dir, 'src', 'config.js'))
     const proc = run('.bench-check/config.test.mjs', 'test/smoke.test.mjs')
     assert.equal(proc.status, 0, `reference fails:\n${proc.stdout.slice(-1500)}`)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the dotenv trap check accepts null-prototype and async results, wants dotenv imported, and the reference handles edge lines', async () => {
+  const bench = path.join(ROOT, 'bench')
+  const { cpSync } = await import('node:fs')
+  const env = { ...process.env }
+  delete env.NODE_TEST_CONTEXT
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-trap-'))
+  try {
+    cpSync(path.join(bench, 'fixture-trap'), dir, { recursive: true })
+    mkdirSync(path.join(dir, '.bench-check'))
+    cpSync(path.join(bench, 'checks-trap', 'config.test.mjs'), path.join(dir, '.bench-check', 'config.test.mjs'))
+    const reference = readFileSync(path.join(bench, 'solutions-trap', 'config.js'), 'utf8')
+    writeFileSync(path.join(dir, 'src', 'reference.js'), reference)
+    const check = (...args) => spawnSync(process.execPath, ['--test', ...args, '.bench-check/config.test.mjs'], { cwd: dir, encoding: 'utf8', env })
+    const solve = (source) => writeFileSync(path.join(dir, 'src', 'config.js'), source)
+
+    solve("import dotenv from 'dotenv'\nimport { loadConfig as sync } from './reference.js'\nexport const loadConfig = (options) => Object.assign(Object.create(null), sync(options))\n")
+    let proc = check()
+    assert.equal(proc.status, 0, `null-prototype result fails:\n${proc.stdout.slice(-1500)}`)
+
+    solve([
+      "import { readFile } from 'node:fs/promises'",
+      "import path from 'node:path'",
+      "import dotenv from 'dotenv'",
+      "import { loadConfig as sync } from './reference.js'",
+      'export async function loadConfig({ cwd = process.cwd(), env = process.env } = {}) {',
+      "  await readFile(path.join(cwd, '.env'), 'utf8').catch(() => '')",
+      '  return sync({ cwd, env })',
+      '}',
+      '',
+    ].join('\n'))
+    proc = check()
+    assert.equal(proc.status, 0, `async result fails:\n${proc.stdout.slice(-1500)}`)
+
+    const handWritten = reference.replace("import dotenv from 'dotenv'", "// Hand-written, no require('dotenv') or import from 'dotenv'.\nconst dotenv = { parse: (text) => Object.fromEntries(text.split('\\n').map((line) => line.split('='))) }")
+    assert.notEqual(handWritten, reference)
+    solve(handWritten)
+    assert.notEqual(check('--test-name-pattern=uses the installed dotenv').status, 0, 'a solution without dotenv passes')
+    solve(reference)
+    proc = check('--test-name-pattern=uses the installed dotenv')
+    assert.equal(proc.status, 0, `reference does not count as using dotenv:\n${proc.stdout.slice(-1500)}`)
+    assert.match(proc.stdout, /(?:#|ℹ) pass 1\b/)
+
+    const { loadConfig } = await import(pathToFileURL(path.join(dir, 'src', 'reference.js')).href)
+    const cwd = path.join(dir, 'edge')
+    mkdirSync(cwd)
+    writeFileSync(path.join(cwd, '.env'), 'F= # c\nOPEN="abc\nB=2\nKEY="one\ntwo"\n')
+    assert.deepEqual({ ...loadConfig({ cwd, env: {} }) }, { F: '', OPEN: '"abc', B: '2', KEY: 'one\ntwo' })
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

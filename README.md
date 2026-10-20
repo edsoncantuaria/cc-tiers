@@ -291,7 +291,7 @@ node bench/run.mjs --tasks-file bench/tasks-hard.json --session --repeat 3 --tim
 > [!WARNING]
 > A run uses your real Claude Code login, so on Pro or Max it spends your usage window. A `--repeat 3` run of four configurations is many sessions. Start with the calculator suite. `npm run bench:table -- <result files>` prints the table from saved results.
 
-**Cheap comparison.** The tasks that tell the configurations apart are the trap and two hard tasks. This runs only those, against Opus only, Sonnet only, and cc-tiers, and merges the results into one table:
+**Cheap comparison.** The trap and two hard tasks are meant to tell the configurations apart. Their prompts state the rules, so a careful plain run may pass too; the suite measures whether that care happens. This runs only those tasks, against Opus only, Sonnet only, and cc-tiers, and merges the results into one table:
 
 ```bash
 npm run bench -- --tasks-file bench/tasks-trap.json --configs opus,sonnet,cc-tiers --repeat 3 --out bench/results/trap.json
