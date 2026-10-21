@@ -45,6 +45,7 @@ function main() {
           id: `agent:${agentId}`,
           role,
           prompt: launched.prompt || '',
+          launchedAt: launched.at,
           text,
           error: '',
         },

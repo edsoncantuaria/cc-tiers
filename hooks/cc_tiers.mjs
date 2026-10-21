@@ -959,6 +959,20 @@ export function policyLines(routing) {
   return lines
 }
 
+/** When an agent started: its background launch, or, for a foreground run, now minus how long it ran. */
+function launchTime(event) {
+  return Number(event.launchedAt) || Date.now() - (Number(event.durationMs) || 0)
+}
+
+/**
+ * A background writer's pass that arrives after the task finished on a review launched after this writer:
+ * that review already saw the work, so the late report must not reopen it.
+ */
+function coveredByReview(state, tasks, task, event) {
+  const launched = Number(event.launchedAt)
+  return Boolean(launched && !own(tasks, task) && Number(own(state.log, task)?.reviewLaunched) > launched)
+}
+
 /** The skipped infra and pre-existing failures travel with the task across tiers, so MAX_INFRA_SKIPS and MAX_PREEXISTING_SKIPS bound the whole task. */
 function infraKept(entry) {
   const kept = {}
@@ -1262,7 +1276,7 @@ export function applyEvent(state, event, routing) {
   if (event.kind === 'background') {
     if (event.agent_id) {
       state.background = state.background || {}
-      state.background[event.agent_id] = { role: event.role, prompt: event.prompt || '', tool_use_id: event.tool_use_id || '' }
+      state.background[event.agent_id] = { role: event.role, prompt: event.prompt || '', tool_use_id: event.tool_use_id || '', at: Number(event.at) || Date.now() }
       return {
         state,
         meta,
@@ -1382,10 +1396,21 @@ export function applyEvent(state, event, routing) {
       gateReason = `the report says pass but criteria ${failedIds.join(', ')} failed`
     }
   }
-  if (status === 'pass' && !REVIEW_ROLES.has(role)) recordEvidence(state, task, criterionReports, meta.gate || null)
+  const covered = status === 'pass' && !REVIEW_ROLES.has(role) && coveredByReview(state, tasks, task, event)
+  if (status === 'pass' && !REVIEW_ROLES.has(role) && !covered) recordEvidence(state, task, criterionReports, meta.gate || null)
   const scopeNote = workspaceNote(task, event.workspace, Object.keys(tasks).filter((name) => name !== task))
   const flagged = Boolean(event.workspace?.sensitive?.length)
   if (scopeNote) gateNote += `${scopeNote}\n`
+  if (covered) {
+    meta.tier = tier
+    return {
+      state,
+      meta,
+      message:
+        `${gateNote}cc-tiers: ${task}'s writer report arrived after its review had already passed, and that review started after this writer, ` +
+        'so it was not counted again and the task stays finished. Only if this writer was still editing when the review started, send the new diff to review.',
+    }
+  }
 
   let current = own(tasks, task)
   if (!current || typeof current !== 'object') current = { tier, failures: [], carried: [] }
@@ -1520,6 +1545,7 @@ export function applyEvent(state, event, routing) {
     meta.diagnosis = applied.diagnosis
   }
   if (meta.outcome === 'pass') {
+    if (REVIEW_ROLES.has(role)) logEntry(state, task).reviewLaunched = launchTime(event)
     const finished = finishTask(state, task, routing, { reviewed: REVIEW_ROLES.has(role), tier })
     meta.completion = finished.result
     message = `${message}\n${finished.line}`

@@ -667,3 +667,61 @@ test('pre-existing failure: a declared command first never hides a later failure
   assert.match(done.message, /Checks run 2, passed 1, failed 1, not run 0\./)
   assert.match(done.message, /`npm run lint` failed and was declared pre-existing/)
 })
+
+test('background order: a late writer pass covered by a later review does not reopen it; a newer writer or a failed gate still counts', () => {
+  const routing = routingWith()
+  const reviewPrompt = `${header('paging', 'sonnet', 'reviewer')}diff --git a/src/users.js`
+  const passText = report('paging', 'implementer', 'sonnet', 'pass', ['CC_TIERS_VERIFY: npm test'])
+  const reviewed = (writerAt, reviewAt) => {
+    const state = tiers.emptyState('s')
+    delegate(state, routing, 'implementer', writer('paging'))
+    assert.equal(tiers.applyEvent(state, event('w1', 'implementer', passText, writer('paging'), { gate: passGate(), launchedAt: writerAt - 1000 }), routing).meta.outcome, 'review')
+    tiers.releaseIdleWriters(state)
+    delegate(state, routing, 'reviewer', reviewPrompt)
+    const done = tiers.applyEvent(state, event('r1', 'reviewer', report('paging', 'reviewer', 'opus', 'pass'), reviewPrompt, { launchedAt: reviewAt }), routing)
+    assert.equal(done.meta.outcome, 'pass')
+    return state
+  }
+
+  // C1: the retry writer launched before the review; its SubagentStop lands after the review passed.
+  const state = reviewed(2000, 3000)
+  const log = structuredClone(state.log.paging)
+  const late = tiers.applyEvent(state, event('agent:w2', 'implementer', passText, writer('paging'), { gate: passGate(), launchedAt: 2000 }), routing)
+  assert.equal(late.meta.outcome, 'uncounted')
+  assert.match(late.message, /paging's writer report arrived after its review had already passed/)
+  assert.equal(state.tasks.paging, undefined, 'the task is not reopened')
+  tiers.logReport(state, late.meta)
+  assert.deepEqual(state.log.paging, log, 'status and counters stay as the review left them')
+
+  // C2: a writer launched after the review started is new work and follows the normal flow.
+  const newer = reviewed(2000, 3000)
+  const fresh = tiers.applyEvent(newer, event('agent:w3', 'implementer', passText, writer('paging'), { gate: passGate(), launchedAt: 4000 }), routing)
+  assert.equal(fresh.meta.outcome, 'review')
+  assert.doesNotMatch(fresh.message, /arrived after its review/)
+
+  // C3: a late report whose gate fails still counts as a failure.
+  const failing = reviewed(2000, 3000)
+  const gate = { status: 'fail', verified: [], flaky: [], unverified: [], failure: { raw: 'npm test', code: 1, timedOut: false, tail: 'AssertionError: boom', seconds: 2 }, cached: [] }
+  const broken = tiers.applyEvent(failing, event('agent:w4', 'implementer', passText, writer('paging'), { gate, launchedAt: 2000 }), routing)
+  assert.equal(broken.meta.outcome, 'retry')
+  assert.equal(failing.tasks.paging.failures.length, 1)
+  assert.doesNotMatch(broken.message, /arrived after its review/)
+})
+
+test('background order: a background launch records when it started, and a foreground review falls back to its duration', () => {
+  const routing = routingWith()
+  const state = tiers.emptyState('s')
+  tiers.applyEvent(state, { kind: 'background', agent_id: 'a1', role: 'implementer', prompt: writer('paging'), session_id: 's' }, routing)
+  assert.ok(Number(state.background.a1.at) > 0, 'the launch time is stored')
+
+  delegate(state, routing, 'implementer', writer('paging'))
+  const passText = report('paging', 'implementer', 'sonnet', 'pass', ['CC_TIERS_VERIFY: npm test'])
+  tiers.applyEvent(state, event('w1', 'implementer', passText, writer('paging'), { gate: passGate() }), routing)
+  tiers.releaseIdleWriters(state)
+  const reviewPrompt = `${header('paging', 'sonnet', 'reviewer')}diff --git a/src/users.js`
+  delegate(state, routing, 'reviewer', reviewPrompt)
+  const before = Date.now()
+  tiers.applyEvent(state, event('r1', 'reviewer', report('paging', 'reviewer', 'opus', 'pass'), reviewPrompt, { durationMs: 60000 }), routing)
+  const at = state.log.paging.reviewLaunched
+  assert.ok(at <= Date.now() - 60000 && at >= before - 60000, 'a foreground review started its duration ago')
+})
