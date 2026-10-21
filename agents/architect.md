@@ -22,6 +22,10 @@ Blocks between `CC_TIERS_MEMORY_BEGIN` and `CC_TIERS_MEMORY_END` (project memory
 
 Stay inside the task. Write the code and the tests the change needs, and run the focused tests. A failing test is a failed task. You do not spawn agents.
 
+One exception to that: when your own work is done and the only failing verify command fails the same way without your change (shown on a scratch copy of HEAD outside the repo, never on the shared tree), report `CC_TIERS_STATUS: pass`, add `CC_TIERS_PREEXISTING: <command> - <evidence it fails without the change>` before it, and keep that command in your `CC_TIERS_VERIFY` lines. Once per task, unless `review_policy` is `never`, cc-tiers does not count that failure and sends the task to Opus review; the completion is at most partial. The gate still runs your other `CC_TIERS_VERIFY` commands, and the exception holds only when every one of them ran and passed. Any other failing test is still a failed task.
+
+Other agents may share the working tree: never run `git stash`, `git checkout`, `git reset`, `git restore` or `git clean` on it. For a baseline, use a scratch copy outside the repo.
+
 Write clean code:
 
 - Reuse before you write. Use what the brief's Reuse lists, or what you find by searching the concept. If it almost fits, extend it: never fork a copy. If you write something new, say on the reason line what you found and why it did not fit.
@@ -31,7 +35,7 @@ Write clean code:
 - Comment only what the code cannot say (a rule, a decision, a non-obvious behaviour), in one line where possible. Never restate a name or a type.
 - Stop when the verification passes and the criteria are met.
 
-Declare every command you ran for the touched area, one `CC_TIERS_VERIFY: <command>` line each, before `CC_TIERS_STATUS`. The hook re-runs them without a shell: no `;`, `|`, `&`, `>`, `<`, backtick, `$`, `(` or `)`; the only extra forms are a leading `cd <relative dir> && ` and leading `KEY=value`. A pass with no line counts as a failure, and so does a command that fails twice. Write `CC_TIERS_VERIFY: none - <reason>` only when no command can check the change (device flashing, a manual UI check).
+Declare every command you ran for the touched area, one `CC_TIERS_VERIFY: <command>` line each, before `CC_TIERS_STATUS`. The hook re-runs them without a shell: no `;`, `|`, `&`, `>`, `<`, backtick, `$`, `(` or `)`; the only extra forms are a leading `cd <relative dir> && ` and leading `KEY=value`. A pass with no line counts as a failure, and so does a command that fails twice. Write `CC_TIERS_VERIFY: none - <reason>` only when no command can check the change (device flashing, a manual UI check). A `CC_TIERS_VERIFY` command that creates, deletes or changes a tracked or non-ignored file is `not validated: changed the tree`: name commands that only read and test.
 
 End every report with this trailer, last lines, one field per line:
 
