@@ -152,6 +152,8 @@ Quando nada verifica a mudança (gravar no aparelho, tela conferida à mão), o 
 - `verify_budget` (padrão 600 s) limita o relatório inteiro, segundas tentativas incluídas. No Stop ele limita todos os passes estacionados juntos, para caberem no timeout do hook. Os comandos depois dele não rodam e entram como não validados. Isso não é falha, então uma suíte lenta não empurra a tarefa para o Opus.
 - Uma falha interrompe os comandos que vêm depois.
 - Um comando fora da lista, uma linha `none` ou uma linha recusada fica **não validado**: nada roda e não é falha. A mensagem diz qual prefixo acrescentar em `/config`.
+- Um comando que não consegue nem começar (o programa não está instalado, o arquivo não existe) também fica **não validado**: `could not start: <comando>`. Nada rodou, então não diz nada sobre o código e não é falha.
+- Um comando que já passou na mesma árvore (mesmo `HEAD`, mesmo conteúdo em cada arquivo alterado) não roda de novo: o relatório diz `reused for the same tree`.
 - Um `pass` sem nenhuma linha `CC_TIERS_VERIFY` conta como falha.
 
 O relatório final diz, por tarefa, `verified: <comandos>`, `flaky: <comando>` ou `not validated: <motivo>`, e o `/cc-tiers:report` tem uma coluna Verify para isso. O gate roda onde o relatório é contado. O teto Opus e o dispatcher não têm chamada Agent, então o pass espera até o hook Stop, que roda os comandos fora do lock da sessão. O pass fica estacionado até ser contado, então um Stop interrompido no meio do gate o deixa para o próximo. Um reprovado bloqueia o Stop uma vez com a nota. O caminho leve (tarefa trivial feita inline) fica fora do gate; o caminho pequeno inline fica dentro, porque usa o trailer de tentativa. `verify: off` tira o gate.
@@ -178,7 +180,7 @@ where: src/booking.js:142
 CC_TIERS_FINDING_END
 ```
 
-`category` é `correctness`, `regression`, `security`, `state` ou `scope`. `severity` é `blocking` ou `note`. O achado descreve o defeito, nunca a correção: quem escreve escolhe a correção. Endurecimento que o spec não pede, estilo e o que é de outra issue são sempre notas.
+`category` é `correctness`, `regression`, `security`, `state` ou `scope`, ou uma das mais finas em Protocolo de revisão (`access-control`, `input-validation`, `data-exposure`, `error-handling`, `concurrency`, `api-usage`, `compatibility`). `severity` é `blocking` ou `note`, ou uma das graduadas de lá (`blocker`, `high`, `medium`, `low`, `suggestion`). O achado descreve o defeito, nunca a correção: quem escreve escolhe a correção. Endurecimento que o spec não pede, estilo e o que é de outra issue são sempre notas.
 
 **O que conta.** `CC_TIERS_STATUS: fail` só é falha com pelo menos um achado bloqueante válido. `evidence` é um de três:
 
@@ -211,6 +213,9 @@ Os hooks garantem o que os prompts pedem:
 - **Especificação** (`specify: on`, o padrão): a chamada ao implementer ou ao architect é recusada quando o prompt não tem um bloco `CC_TIERS_SPEC_BEGIN` / `CC_TIERS_SPEC_END` com conteúdo nem a linha `CC_TIERS_SPEC: none - <motivo>`.
 - **Verificação** (`verify: on`, o padrão): um `pass` de quem escreve só vale depois de o hook rodar os comandos de `CC_TIERS_VERIFY` que estão na lista. Um `pass` sem essas linhas, ou com um comando que falha, conta como falha. O teto Opus e o dispatcher são verificados no Stop.
 - **Evidência** (`review_evidence: on`, o padrão): um `fail` do revisor ou do checker só conta com um achado bloqueante válido. O hook roda o comando do achado e descarta o que passa, e um `fail` sem achado vira notas.
+- **Contrato** (`specify: on`): uma nova tentativa ou uma escalada que tira ou reescreve um critério do spec guardado é recusada até o prompt dizer o motivo em `CC_TIERS_RESPEC: <motivo>`.
+- **Orçamento da tarefa** (`task_budget_*`): a chamada a quem escreve numa tarefa que passou do orçamento é recusada até o prompt trazer `CC_TIERS_BUDGET: override - <motivo>`, depois de você concordar.
+- **Escritores em paralelo**: a chamada a quem escreve cujos arquivos se sobrepõem aos de um escritor em andamento, ou que espera uma tarefa de `CC_TIERS_DEPENDS`, é recusada, e a que passa do teto `max_parallel` também.
 - **Agentes em background** também contam. O lançamento grava o id do agente, e o SubagentStop conta o relatório quando ele termina. O aviso chega ao orquestrador na próxima delegação ou no fim do turno.
 - **O teto Opus** não tem chamada Agent, então o orquestrador marca a própria tentativa com o header `CC_TIERS_TASK` / `CC_TIERS_TIER: opus` / `CC_TIERS_ROLE: orchestrator` e fecha com `CC_TIERS_STATUS`. O hook conta esse trailer como qualquer outro relatório.
 - Agentes em paralelo dividem um arquivo de contador por sessão, com lock e gravação atômica.
@@ -295,6 +300,224 @@ A primeira gravação adiciona o arquivo ao `.git/info/exclude` quando o projeto
 
 ---
 
+## 🏗️ Controles de engenharia
+
+A 0.10 acrescenta controles em volta do fluxo que pesquisa, spec, implementação, verificação e revisão já faziam. Uma tarefa ganha um nível de risco, os critérios dela são mantidos entre as tentativas, uma falha é classificada antes da próxima tentativa, escritores dividem um checkout sem colidir, o projeto guarda uma memória pequena, e todo pass termina com uma linha que diz o quanto o resultado é confiável. Nenhum controle tira um gate ou um passo acima. As opções novas (`profile`, `memory`, `telemetry`, `max_parallel`, `task_budget_usd`, `task_budget_calls`, `task_budget_minutes`, `budget_warn_at`) estão na tabela de Configuração.
+
+### Avaliação de risco
+
+O hook pontua cada tarefa a partir do pedido, dos arquivos que ela cita, do histórico e do projeto, em cinco dimensões de 0 a 3, e tira daí um nível: `low`, `medium`, `high` ou `critical`.
+
+- **Complexidade**: a pontuação do Classificador.
+- **Regressão**: uma palavra de contrato público (`endpoint`, `public api`, `contract`, `breaking`, `signature`) soma 2. Uma palavra de dependência ou de versão, ou um arquivo de manifesto ou de lock, soma 1. Arquivos em três ou mais diretórios de topo somam 1, e uma falha anterior do Sonnet numa tarefa parecida também.
+- **Sensibilidade**: 3 para uma palavra de risco ou um caminho sensível, que é uma palavra inteira como `auth`, `login`, `session`, `payment`, `migration`, `schema`, `secret`, `token`, `jwt`, `password`, ou um arquivo `.env*`. 2 para dados persistentes (`database`, `sql`, `persist`, `drop`).
+- **Ambiguidade**: um ponto para cada hesitação ("maybe", "not sure", "figure out", "talvez") e um para duas ou mais interrogações.
+- **Evidência**: 0 quando o projeto tem testes (um diretório de testes, um script de teste ou a config de um runner), 1 quando isso não se sabe, 2 quando não tem nenhum, e mais 1 depois de uma falha do Haiku numa tarefa parecida.
+
+Sensibilidade 3 é `critical`. Sensibilidade 2, regressão 2 ou mais junto com complexidade 2 ou mais, ou uma soma de 6 ou mais de complexidade, regressão, ambiguidade e evidência, é `high`. Uma soma de 2 ou mais, ou qualquer regressão ou sensibilidade, é `medium`. O resto é `low`. O `/cc-tiers:route` imprime o nível ao lado do tier, com as pontuações e os fatores por trás, e `risky` mantém o significado de antes. Resumido, para "Add a login endpoint to src/auth.js and a users table migration":
+
+```
+{ "tier": "opus", "because": "hard", "risk": "critical",
+  "riskDimensions": { "complexity": 0, "regression": 2, "sensitivity": 3, "ambiguity": 0, "evidence": 0 },
+  "riskFactors": ["risk keyword", "sensitive path: src/auth.js", "public contract"] }
+```
+
+O que o nível muda:
+
+- Uma tarefa que parece trabalho do Haiku mas tem risco `high` ou `critical` começa no Sonnet (`because: risk`). Com `hard_start: opus`, uma tarefa do Sonnet de risco `critical` começa no Opus.
+- Uma tarefa `critical` começa o escritor um nível de effort acima, como uma que bate numa palavra-chave de revisão.
+- O prompt de quem escreve ganha um bloco de contexto, entre `CC_TIERS_CONTEXT_BEGIN` e `CC_TIERS_CONTEXT_END`, com as checagens do projeto que cabem no risco (veja Perfis). O bloco é dado, não instrução.
+- Quem escreve não pode fechar com `CC_TIERS_REVIEW: skip` quando mudou um arquivo sensível que o prompt não citou, quando o risco é `critical`, ou quando o risco alcança o piso de revisão do perfil. `review_policy: never` é o único jeito de passar disso.
+
+### Contrato do spec e conclusão
+
+O bloco de spec vira um contrato numerado. O hook lê as linhas sob `Criteria:`, `Preserve:`, `Checks:`, `Security:`, `Evidence:` e `Edge cases:` como `C1`, `C2` e assim por diante, e guarda isso na primeira delegação da tarefa. `Assumed:` e `Ambiguous:` continuam sendo notas.
+
+```
+CC_TIERS_SPEC_BEGIN
+Criteria:
+- GET /users takes a cursor and returns the next page (request)
+Preserve:
+- GET /orders keeps its current response (repo: src/orders.js:12)
+Checks:
+- `node --test test/users.test.mjs`
+Security:
+- the cursor is validated before it reaches the query (decided: it is user input)
+CC_TIERS_SPEC_END
+```
+
+- Quem escreve reporta cada critério antes do trailer, como `CC_TIERS_CRITERION: C<n> pass|fail|unverifiable|na - <evidência>`. `na` e `unverifiable` pedem um motivo, e a última linha de um id vale.
+- Um critério de `Checks:` com um comando entre crases só tem evidência quando esse comando exato passa no gate. Sem comando entre crases, fica sem evidência.
+- Um `pass` ou um `na` que quem escreveu só declarou vira evidência depois que uma revisão independente passou, nunca antes, e nunca dá confiança alta.
+- Uma nova tentativa ou uma escalada que tira ou reescreve um critério é recusada. Quando o critério estava errado, o prompt diz por quê em `CC_TIERS_RESPEC: <motivo>`, e a mudança é auditada.
+- O prompt do revisor e o do checker precisam levar o mesmo bloco de spec, senão a chamada é recusada.
+
+Quando uma tarefa passa, o hook imprime uma linha de conclusão:
+
+```
+cc-tiers completion: users-pagination verified on sonnet, high risk; confidence high (gate verified 1 command). Checks run 1, passed 1, failed 0, not run 0. Criteria with evidence: 4/4.
+```
+
+O status é `verified`, `partial`, `failed` ou `unverified`. `verified` pede um comando verificado, nenhum `na` que só quem escreveu declarou, evidência para cada critério do risco de evidência do perfil para cima, e uma revisão aprovada para risco `high` e `critical`. `failed` é um gate reprovado, uma revisão rejeitada ou um critério que falhou. A confiança é `high`, `moderate` ou `low`, e os motivos vêm depois dela. Uma tarefa `critical` sem revisão é sempre `low`, e a linha termina com `Remaining:` quando algo ficou em aberto. `specify: off` tira o contrato.
+
+### Diagnóstico de falha
+
+Uma falha é classificada antes da próxima tentativa: `syntax`, `type`, `test`, `regression`, `requirement`, `docs-version`, `dependency`, `integration`, `architecture`, `security`, `infra`, `flaky`, `scope` ou `unknown`. A fonte é a categoria do achado do revisor, quando há um, e a saída do gate ou o erro, quando não há. A nota da próxima tentativa leva isso:
+
+```
+Diagnosis: dependency (confirmed by the output). A module, package or command the code needs is missing from the environment.
+Next: The environment is missing something: fix it, then rerun. Do not change code until then.
+```
+
+- `retry`: syntax, type, test, regression, requirement, integration, scope e unknown, com o que ler primeiro.
+- `retry-research`: docs-version. Rode o `cc-tiers:researcher` de novo para a versão instalada.
+- `rerun-env`: dependency, infra e flaky. Conserte o ambiente e rode de novo; não mude código.
+- `escalate`: architecture e security.
+- A mesma falha duas vezes (texto citado, caminhos e números à parte), ou nenhuma tentativa sobrando, também sobe a tarefa. No Opus é `stop`.
+
+Um diagnóstico é **confirmado** só por uma categoria do revisor ou pela saída de um comando, e para dependency e infra só por uma assinatura de máquina (`Cannot find module`, `command not found`, `ECONNREFUSED`, `ENOSPC`, `EADDRINUSE`). Palavras no relatório de quem escreveu fazem uma hipótese, e a nota diz `suspected from the reason`. Um nome de teste ou uma mensagem de assertion que tem essas palavras é falha de código, não de ambiente. Uma falha de infra confirmada no gate não conta como falha, até 2 por tarefa; a terceira conta, então uma queda de serviço não empurra o trabalho para um nível acima e um loop não se esconde atrás dela.
+
+### Protocolo de revisão
+
+O revisor e o checker agora podem usar categorias mais finas e severidades graduadas. As cinco categorias do bloco de evidência continuam, e `access-control`, `input-validation`, `data-exposure`, `error-handling`, `concurrency`, `api-usage` e `compatibility` entram junto. `severity` é `blocking`, `note`, ou uma entre `blocker`, `high`, `medium`, `low`, `suggestion`.
+
+```
+CC_TIERS_FINDING_BEGIN
+category: input-validation
+severity: high
+confidence: high
+justification: the cursor reaches the query as typed
+scenario: GET /users?cursor=1%20OR%201=1 returns every row
+evidence: trace
+expected: a 400 for a cursor that is not an id
+observed: 200 with all rows
+where: src/users.js:58
+CC_TIERS_FINDING_END
+```
+
+- `blocker` e `high` contam como bloqueantes, como `blocking`, e pedem `confidence` (`low`, `medium` ou `high`) e `justification`. Um de baixa confiança vira nota. `medium`, `low` e `suggestion` são notas. `scenario`, `confidence` e `justification` são opcionais nos demais.
+- Um prompt de revisão ganha um bloco de foco de revisão, entre `CC_TIERS_CONTEXT_BEGIN` e `CC_TIERS_CONTEXT_END`: até 5 de 8 classes de risco (controle de acesso, validação de entrada, exposição de dados, concorrência, consistência de estado, APIs externas, tratamento de erro, compatibilidade com o que já existe) escolhidas pelas palavras do diff e do pedido. Um achado bloqueante continua precisando de evidência.
+- Um prompt de revisor ou checker que leve o trailer de quem escreveu (uma linha `CC_TIERS_ROLE` de escritor e uma linha `CC_TIERS_STATUS`) é recusado: a revisão recebe o diff, o spec, a pesquisa e o pedido, nunca o relatório de quem escreveu.
+
+### Perfis
+
+`profile` move alguns limiares juntos. `balanced`, o padrão, é o comportamento da 0.9. Defina no `/config`, ou em `.claude/cc-tiers.json` quando o `/config` deixa o campo vazio.
+
+| Perfil | Effort de quem escreve | Evidência a partir de | Revisão a partir de | Escritores em paralelo | Itens de memória | Checagens |
+| --- | --- | --- | --- | --: | --: | --- |
+| `balanced` (padrão) | escada | `medium` | `critical` | 4 | 5 | por risco |
+| `quality` | um nível acima | `low` | `high` | 3 | 8 | uma profundidade a mais |
+| `budget` | escada | `medium` | `critical` | 2 | 3 | por risco |
+| `fast` | escada | `high` | `critical` | 6 | 3 | uma profundidade a menos |
+
+- **Effort de quem escreve**: `quality` começa um escritor Sonnet ou Opus um nível de effort acima do primeiro degrau da escada dele. Uma nova tentativa continua subindo a partir daí.
+- **Evidência a partir de**: o menor risco a partir do qual cada critério precisa de evidência (um comando verificado ou uma revisão aprovada) para o status `verified`. Abaixo dele a regra é leve; a partir dele, padrão; para `high` e `critical`, forte.
+- **Revisão a partir de**: o menor risco a partir do qual `CC_TIERS_REVIEW: skip` é recusado.
+- **Escritores em paralelo**: o teto quando `max_parallel` é 0.
+- **Itens de memória**: quantas notas lembradas, no máximo, quem escreve recebe.
+- **Checagens**: o hook lê as checagens que o projeto declara (os scripts `test`, `lint` e `typecheck` do `package.json`, `tsconfig.json`, uma config do ESLint, `phpunit.xml`, `phpstan.neon`, `pytest`, `go.mod`, `Cargo.toml`, `package-lock.json`) e diz a quem escreve as que cabem no risco. Profundidade 0 e 1 são as checagens de teste, e a 0 pede os testes que cobrem a mudança. A profundidade 2 soma a checagem de tipos e o lint. A 3 é toda checagem, `npm audit --omit=dev` incluído. No `balanced`, `low` é profundidade 0, `medium` 1 e `high` 2. Uma checagem que não está em `verify_allow` aparece como uma que o gate não vai rodar.
+
+Nenhum perfil tira um agente, um gate, um critério ou um passo, nem passa por cima de um valor do `/config`, nem baixa o que uma tarefa `critical` recebe: ela sempre tem profundidade 3, revisão e evidência forte.
+
+```json
+{ "profile": "quality" }
+```
+
+### Orçamento da tarefa
+
+`budget_5h` e `budget_7d` guardam a sua janela de uso. O orçamento da tarefa guarda uma tarefa só: um loop de tentativas fora de controle, ou uma tarefa que cresce além do que você queria. As quatro opções vêm desligadas.
+
+| Chave | Padrão | Significado |
+| --- | --- | --- |
+| `task_budget_usd` | `0` | Custo estimado, a preços de tabela da API, a partir do qual as chamadas de escrita daquela tarefa pedem sua aprovação. 0–1000, 0 é sem limite |
+| `task_budget_calls` | `0` | Chamadas Agent que uma tarefa pode fazer. 0–200, 0 é sem limite |
+| `task_budget_minutes` | `0` | Minutos desde a primeira delegação da tarefa. 0–1440, 0 é sem limite |
+| `budget_warn_at` | `80` | Porcentagem de um limite em que o cc-tiers avisa antes. 50–99 |
+
+Perto de um limite, o hook avisa: `cc-tiers: users-pagination is close to its budget (calls 8/10).` Acima dele, o hook recusa novas chamadas de escrita daquela tarefa. As chamadas de revisão e de verificação continuam rodando, então o que foi construído ainda pode ser conferido. O orquestrador te pergunta; quando você concorda, ele acrescenta esta linha à delegação, e o hook deixa a chamada passar com uma nota:
+
+```
+CC_TIERS_BUDGET: override - the user approved more calls for the pagination work
+```
+
+Chamadas e minutos são medidos. O custo é uma estimativa a partir da contagem de tokens, nunca um valor cobrado. Uma tarefa `critical` acima do orçamento pede a sua decisão e não é pulada em silêncio.
+
+### Memória
+
+Com `memory` em `on` (o padrão), o projeto guarda notas pequenas em `.claude/cc-tiers-memory.json`, para a tarefa seguinte não redescobrir tudo. A primeira gravação adiciona o arquivo ao `.git/info/exclude`, como no arquivo de histórico. `off` não lê nem grava.
+
+- **Categorias**: `convention`, `command`, `failure`, `fix`, `dead-end`, `version` e `warning`. Um registro tem uma confiança (`low`, `medium`, `high`), um status (`hypothesis` ou `confirmed`) e um prazo de validade: `convention` e `warning` valem até serem invalidados, `command` e `version` 30 dias, `failure` e `dead-end` 60, `fix` 90. O limite é 200 registros.
+- **Preso a um arquivo**: um registro que depende de um arquivo guarda o hash dele. Quando o arquivo muda, o registro fica vencido e não é lembrado.
+- **O que o hook grava**: um comando que o gate verificou (preso ao manifesto que o declara), uma falha diagnosticada, uma correção depois de um pass que veio após falhas, e um beco sem saída quando uma tarefa é parada. Segredos e linhas `CC_TIERS_*` saem antes (veja Redação de segredos).
+- **Lembrança**: quem escreve recebe as notas que têm duas ou mais palavras em comum com a tarefa dele, ou o mesmo slug, no máximo o número do perfil. Elas chegam entre `CC_TIERS_MEMORY_BEGIN` e `CC_TIERS_MEMORY_END`, marcadas como dado de tarefas anteriores, nunca instrução.
+
+```
+/cc-tiers:memory list
+/cc-tiers:memory add convention Tests sit next to the code and run with node --test
+/cc-tiers:memory invalidate m-9f3a17ebaf the test script was renamed
+```
+
+O comando é `/cc-tiers:memory [list [--all] | add <categoria> <texto> | invalidate <id> <motivo> | delete <id> | prune | clear --yes]`. Uma nota que você adiciona é confirmada, com confiança alta. `clear` pede `--yes`. `list --all` inclui os registros vencidos e invalidados.
+
+### Escritores em paralelo
+
+Escritores que rodam ao mesmo tempo num checkout podem sobrescrever um ao outro. Uma delegação diz quais arquivos ela toca, e o hook mantém um registro dos escritores em andamento:
+
+```
+CC_TIERS_TASK: users-pagination
+CC_TIERS_FILES: src/users.js, src/routes/*.js, test/users.test.mjs
+CC_TIERS_DEPENDS: users-schema
+```
+
+- `CC_TIERS_FILES` lista caminhos e diretórios. Um glob vira o diretório fixo dele (`src/routes/*.js` vira `src/routes/`). `.`, mais de 40 entradas, um caminho absoluto ou um `../` significa o projeto inteiro. Sem o header, o hook cai nos caminhos que o prompt cita.
+- Escritores cujos arquivos se sobrepõem, ou cujos arquivos são desconhecidos, rodam um de cada vez: a segunda chamada é recusada até a primeira terminar.
+- `CC_TIERS_DEPENDS` bloqueia a chamada até cada tarefa listada ter passado.
+- Uma chamada Agent com `isolation: "worktree"` nunca conflita em arquivos, e continua contando para o teto.
+- `max_parallel` (0–16, padrão 0) limita os escritores ao mesmo tempo. 0 usa o teto do perfil: 4 no `balanced`.
+- Um escritor cujo relatório nunca voltou é liberado depois de 2 horas, e o Stop libera todos os parados (os de background ficam). `CC_TIERS_RELEASE: <slug>` numa delegação libera um à mão.
+
+### Guarda do workspace
+
+Antes e depois de cada tentativa de quem escreve, o hook tira uma foto da árvore de trabalho: `git status` e um hash do conteúdo de cada arquivo alterado. O que a tentativa mudou é a diferença, e o hook reporta duas coisas que o prompt não pediu:
+
+- **Arquivos sensíveis** que o prompt não citou: arquivos `.env`, material de chave, chaves SSH, arquivos de credencial e de credencial de registry, workflows de CI, lockfiles, configurações do Claude, internos do git, `Dockerfile` e arquivos do Compose. Um pass assim não pode pular a revisão.
+- **Arquivos fora de `CC_TIERS_FILES`**, quando o header está lá. Um arquivo de teste conta como dentro do escopo quando testa um arquivo declarado pelo nome.
+
+Quando a árvore tem mais de 400 arquivos alterados, a foto é cortada e não dá fingerprint. Outra tarefa aberta no mesmo checkout também pode mudar arquivos, e a nota diz isso.
+
+A cada carregamento, o estado das tarefas é validado. Uma entrada com slug inválido, tier desconhecido, lista de falhas inválida, ou mais falhas do que o limite abaixo do Opus é descartada, vai para a auditoria e é reportada ao orquestrador uma vez.
+
+### Telemetria e insights
+
+Com `telemetry` em `on` (o padrão), o hook acrescenta um evento pequeno por transição em `events.jsonl`, no diretório de dados do plugin: `task.received`, `risk.assessed`, `model.selected`, `research.done`, `criteria.defined`, `implementation.done`, `verify.done`, `failure.diagnosed`, `escalated`, `review.done`, `task.passed`, `task.stopped`, `budget.warning` e `state.recovered`. Um evento guarda campos de uma lista permitida (slug, tier, nível de risco, categoria, contagens), nunca texto de prompt nem de arquivo, e passa pela redação de segredos. O arquivo roda uma vez para `events.1.jsonl` acima de 1 MB. `reduced` guarda só `escalated`, `failure.diagnosed`, `task.passed`, `task.stopped` e `budget.warning`; `off` não grava nada. Nada sai da sua máquina.
+
+O `/cc-tiers:insights` lê esse log e imprime falhas por categoria, motivos de escalada, custo estimado por nível de risco, gates que não foram validados e a confiança nas tarefas que passaram. Uma amostra de menos de 10 tarefas é marcada como pequena, e a saída diz que isso não é motivo para mudar o roteamento. O comando nunca edita config nem roteamento.
+
+### Redação de segredos
+
+A memória, a telemetria e a trilha de auditoria guardam só texto que passou antes por `hooks/redact.mjs`. Ele mascara chaves privadas, chaves de provedor (`sk-`, `pk-`, `glpat-`, `npm_`, `ghp_` e as parecidas, `github_pat_`, `xox`, `AKIA`, `AIza`, URLs de webhook do Slack), JWTs, credenciais dentro de URLs, valores de `Bearer`, `Basic` e `Token`, headers `Cookie`, flags no estilo `--password` e `--token`, pares `chave=valor` cuja chave nomeia um segredo, e endereços de e-mail. `[redacted]` entra no lugar do valor e a chave continua legível.
+
+### Relatório e notas de sessão
+
+- O `/cc-tiers:report` tem mais quatro colunas no fim: Risk, Completion, Confidence e Time. O tempo é medido, mostrado como `N s` ou `N.N min`; o rodapé diz que o tempo é medido e o custo é estimado.
+- O SessionStart lista o trabalho aberto que encontra no estado da sessão (uma tarefa com falhas, uma revisão pendente, um escritor que estava rodando, um pass do teto esperando o gate) e diz que nada é rodado de novo sozinho: confira o `git status` e a árvore de trabalho antes de delegar ou revisar de novo.
+- O contexto da sessão informa o perfil, a memória, a telemetria, o orçamento da tarefa e as regras de paralelismo e de contrato em vigor.
+- O `.claude/cc-tiers.json` também pode definir `profile`, `memory`, `telemetry`, `maxParallel`, `taskBudgetUsd`, `taskBudgetCalls`, `taskBudgetMinutes` e `budgetWarnAt`. O `/config` ganha quando os dois estão definidos.
+
+### Limitações
+
+- O lock de estado espera 3 s; depois disso um hook segue sem ele, então uma sessão muito ocupada pode perder uma contagem.
+- A foto do workspace vem do `git status`, então arquivos que o git ignora não são vistos.
+- Sem `CC_TIERS_FILES`, o escopo são os caminhos que o prompt cita. Caminhos absolutos são descartados, então um prompt que cita só esses tem escopo desconhecido e o escritor dele roda sozinho.
+- O Claude Code não documenta por completo como um hook reescreve o prompt do Agent (`updatedInput`), nem o que o PostToolUse enxerga dele. O cc-tiers guarda o estado de que precisa no PreToolUse, em vez de ler de volta o prompt reescrito.
+- A redação casa padrões conhecidos. Um segredo num formato que ela não conhece pode passar.
+- O diagnóstico lê texto. Uma chamada flaky ou de infra é hipótese, a menos que uma assinatura de máquina confirme.
+- Uma linha `Checks:` sem comando entre crases não casa com nenhuma execução, então fica sem evidência.
+- A pontuação de risco é uma heurística de palavras-chave e caminhos, não uma leitura do código.
+- O cc-tiers não roda benchmark de modelo por conta própria. A telemetria é local e descritiva, e o `/cc-tiers:insights` não ajusta nada.
+
+---
+
 ## 💬 Comandos
 
 | Comando | O que faz |
@@ -302,7 +525,9 @@ A primeira gravação adiciona o arquivo ao `.git/info/exclude` quando o projeto
 | `/cc-tiers:tiers [tarefa]` | Planeja, encaminha e executa |
 | `/cc-tiers:route [tarefa]` | Diz o nível e para. Usa a mesma heurística dos hooks. Sem editar |
 | `/cc-tiers:escalate [slug]` | Sobe essa tarefa um nível agora, com as notas |
-| `/cc-tiers:report [--all]` | Tabela por tarefa da sessão: níveis, tentativas, effort, revisão, verify, status e custo ao lado do preço do Opus. A coluna Verify diz `ok`, `flaky` ou `not validated` |
+| `/cc-tiers:report [--all]` | Tabela por tarefa da sessão: níveis, tentativas, effort, revisão, verify, status e custo ao lado do preço do Opus, depois risco, conclusão, confiança e tempo medido. A coluna Verify diz `ok`, `flaky` ou `not validated` |
+| `/cc-tiers:memory [list\|add\|invalidate\|delete\|prune\|clear]` | Lista, adiciona, invalida, apaga, limpa os vencidos ou zera o que o cc-tiers lembra deste projeto. Não edita código |
+| `/cc-tiers:insights` | Falhas por categoria, motivos de escalada, custo estimado por risco, gates não validados e confiança, a partir da telemetria local. Não muda nada |
 
 Dá também para pedir em linguagem comum. A skill `tiers` entra quando o pedido é implementar, corrigir, renomear ou revisar. Mencione um agente direto com `@agent-cc-tiers:worker`, `@agent-cc-tiers:implementer`, `@agent-cc-tiers:checker` ou `@agent-cc-tiers:reviewer`.
 
@@ -349,6 +574,14 @@ Abra `/config` e ajuste as linhas do cc-tiers. Valem na sessão seguinte (o hook
 | `verify_timeout` | `300` | Segundos que um comando do gate pode rodar antes de contar como falha. 10–600 |
 | `verify_budget` | `600` | Segundos que o gate pode gastar em um relatório. Comandos além disso ficam não validados, não reprovados. 30–600 |
 | `review_evidence` | `on` | O `fail` do revisor só conta com um achado bloqueante que tenha evidência. `off` conta qualquer `fail` |
+| `profile` | `balanced` | `balanced`, `quality`, `budget` ou `fast`. Move juntos effort, evidência, revisão, escritores em paralelo, memória e checagens. Veja Perfis |
+| `memory` | `on` | Guarda notas do projeto em `.claude/cc-tiers-memory.json` e entrega as que servem a quem escreve. `off` não lê nem grava |
+| `telemetry` | `on` | `on` grava eventos locais, `reduced` só os que importam para falha e escalada, `off` não grava nada |
+| `max_parallel` | `0` | Escritores ao mesmo tempo. 0–16, 0 usa o teto do perfil |
+| `task_budget_usd` | `0` | Custo estimado, a preços de tabela da API, a partir do qual as chamadas de escrita da tarefa pedem sua aprovação. 0–1000, 0 é sem limite |
+| `task_budget_calls` | `0` | Chamadas Agent que uma tarefa pode fazer. 0–200, 0 é sem limite |
+| `task_budget_minutes` | `0` | Minutos desde a primeira delegação da tarefa. 0–1440, 0 é sem limite |
+| `budget_warn_at` | `80` | Porcentagem de um limite em que o cc-tiers avisa antes. 50–99 |
 
 O `verify_allow` padrão é `npm test, npm run test, node --test, npx tsc, npx eslint, npx vitest, npx jest, npx playwright test, vendor/bin/phpunit, ./vendor/bin/phpunit, vendor/bin/phpstan, ./vendor/bin/phpstan, vendor/bin/phpcs, ./vendor/bin/phpcs, pytest, python -m pytest, go test, cargo test`.
 
@@ -356,7 +589,7 @@ O `verify_allow` padrão é `npm test, npm run test, node --test, npx tsc, npx e
 
 O roteamento usa dois tipos de lista. **Frases** (`when`, `reviewWhen` e as opções `_extra`) casam quando a frase inteira aparece na tarefa. **Palavras-chave** (`haiku.keywords`, `opus.reviewKeywords`) casam no começo de uma palavra, sem diferenciar maiúsculas nem acentos: `migra` acha "migration" e "migração", `authent` acha "authentication" mas não "author". As palavras-chave embutidas cobrem renomear, typos, formatação e buscas para o Haiku, e auth, pagamentos, migrações, schemas, APIs públicas, segurança e concorrência para a revisão Opus, em inglês e português. Uma tarefa que parece miúda mas bate numa palavra-chave de revisão, ou soma 2 de complexidade (`sonnet.complexKeywords` é um dos sinais), começa no Sonnet.
 
-Para trocar uma lista inteira, crie `.claude/cc-tiers.json` no projeto. A lista que você incluir substitui aquela lista; as que você omitir ficam no padrão. O mesmo arquivo pode definir `learn`, `budget5h` e `budget7d` quando o `/config` deixa esses campos vazios. O `/config` continua ganhando quando os dois estão definidos. Veja `config/cc-tiers.example.json`.
+Para trocar uma lista inteira, crie `.claude/cc-tiers.json` no projeto. A lista que você incluir substitui aquela lista; as que você omitir ficam no padrão. O mesmo arquivo pode definir `learn`, `budget5h`, `budget7d`, `profile`, `memory`, `telemetry`, `maxParallel`, `taskBudgetUsd`, `taskBudgetCalls`, `taskBudgetMinutes` e `budgetWarnAt` quando o `/config` deixa esses campos vazios. O `/config` continua ganhando quando os dois estão definidos. Veja `config/cc-tiers.example.json`.
 
 ```json
 {
@@ -372,7 +605,7 @@ Para trocar uma lista inteira, crie `.claude/cc-tiers.json` no projeto. A lista 
 }
 ```
 
-A ordem de escalonamento é fixa. As frases e palavras-chave de roteamento, o limite de tentativas, as escadas de effort, a política de revisão, o gate de pesquisa, o gate de especificação, o gate de verificação e a revisão com evidência, o classificador, o aprendizado e os dois limiares de orçamento são os controles.
+A ordem de escalonamento é fixa. As frases e palavras-chave de roteamento, o limite de tentativas, as escadas de effort, a política de revisão, o gate de pesquisa, o gate de especificação, o gate de verificação e a revisão com evidência, o classificador, o aprendizado, os dois limiares de orçamento, o perfil, a memória, a telemetria, o teto de escritores e o orçamento da tarefa são os controles.
 
 ---
 
@@ -527,13 +760,26 @@ claude --plugin-dir .
 | `hooks/verify.mjs` | O gate de verificação: ler `CC_TIERS_VERIFY`, a lista de prefixos, rodar os comandos e julgar os achados |
 | `hooks/report.mjs` | A tabela por trás do `/cc-tiers:report` |
 | `commands/report.md` | `/cc-tiers:report` |
+| `commands/memory.md` | `/cc-tiers:memory` |
+| `commands/insights.md` | `/cc-tiers:insights` |
+| `hooks/base.mjs` | Funções compartilhadas pelos módulos abaixo: caminhos, listas de arquivos e dólares |
+| `hooks/risk.mjs` | A pontuação de risco: cinco dimensões e o nível |
+| `hooks/contract.mjs` | O spec como critérios numerados, os relatórios de critério e o status de conclusão |
+| `hooks/diagnose.mjs` | As categorias de falha e a próxima ação |
+| `hooks/policy.mjs` | Os perfis, as checagens do projeto e as checagens que um risco escolhe |
+| `hooks/budget.mjs` | O orçamento por tarefa: limites, status e o aviso |
+| `hooks/memory.mjs`, `hooks/memory_cli.mjs` | A memória do projeto e o auxiliar por trás do `/cc-tiers:memory` |
+| `hooks/parallel.mjs` | O registro dos escritores em andamento, o escopo de arquivos, as dependências e o teto |
+| `hooks/workspace.mjs` | Fotos da árvore de trabalho, arquivos sensíveis e fora do escopo, e a validação do estado |
+| `hooks/telemetry.mjs`, `hooks/insights.mjs` | O log local de eventos e o auxiliar por trás do `/cc-tiers:insights` |
+| `hooks/redact.mjs` | A máscara de segredos antes da memória, da telemetria e da trilha de auditoria |
 | `bench/` | O benchmark: as suítes de login e difícil (tarefas, fixtures, checagens ocultas, referências), o executor e os resultados medidos |
 | `.github/workflows/ci.yml` | Testes no Linux, macOS e Windows, e `claude plugin validate` |
 | `CHANGELOG.md` | Notas da versão |
 
 ## 🔒 Privacidade
 
-Sem telemetria, e os hooks de comando não fazem chamadas de rede. Com `classifier: haiku`, o hook classificador manda o input de cada chamada a `cc-tiers:worker` para o Haiku pelo Claude Code, do mesmo jeito que a sessão fala com o Claude. Os hooks leem os arquivos de roteamento, as opções de plugin que o Claude Code já passa, o transcript da sessão, e os dados locais do cc-cost quando esse plugin está instalado. Gravam o contador de tentativas no diretório de dados do plugin (`latest.json` e um arquivo por sessão) e, com o aprendizado ligado, `.claude/cc-tiers-history.json` no projeto mais uma linha em `.git/info/exclude`. Desinstalar o plugin remove o diretório de dados, a menos que você passe `--keep-data`. O arquivo de histórico fica no projeto até você apagá-lo.
+Nada sai da sua máquina, e os hooks de comando não fazem chamadas de rede. O cc-tiers guarda um log local de eventos (veja Telemetria e insights), que `telemetry: off` desliga. Com `classifier: haiku`, o hook classificador manda o input de cada chamada a `cc-tiers:worker` para o Haiku pelo Claude Code, do mesmo jeito que a sessão fala com o Claude. Os hooks leem os arquivos de roteamento, as opções de plugin que o Claude Code já passa, o transcript da sessão, e os dados locais do cc-cost quando esse plugin está instalado. Gravam o contador de tentativas no diretório de dados do plugin (`latest.json` e um arquivo por sessão), o log de eventos `events.jsonl` (e `events.1.jsonl`) ali, a menos que a telemetria esteja `off`, e, com o aprendizado ligado, `.claude/cc-tiers-history.json` no projeto mais uma linha em `.git/info/exclude`. Com a memória ligada, gravam também `.claude/cc-tiers-memory.json` no projeto, mantido fora do git por uma linha própria em `.git/info/exclude`. Os eventos não guardam texto de prompt nem de arquivo, e os dois arquivos passam antes pela redação de segredos. Desinstalar o plugin remove o diretório de dados, a menos que você passe `--keep-data`. Os arquivos de histórico e de memória ficam no projeto até você apagá-los.
 
 ---
 
