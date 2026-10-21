@@ -19,6 +19,7 @@ export const FAILURE_CATEGORIES = [
   'infra',
   'flaky',
   'scope',
+  'unverifiable',
   'unknown',
 ]
 
@@ -29,6 +30,27 @@ const MAX_EVIDENCE_LINES = 3
 /** What a real environment failure prints; a test name or assertion message can carry the words but not these codes. */
 const DEPENDENCY_MACHINE = /cannot find module|modulenotfounderror|err_module_not_found|no module named|command not found|spawn \S+ enoent/
 const INFRA_MACHINE = /econnrefused|enotfound|eaddrinuse|etimedout|enospc|eai_again|javascript heap out of memory|cannot connect to the docker daemon/
+
+/** Only an explicit inability to test, reproduce or verify: a missing test, credentials or production alone prove nothing. */
+const CANNOT = "(?:cannot|can['’]t|can not|unable to|no way to|impossible to) (?:be )?"
+const UNVERIFIABLE_RE = new RegExp(
+  [
+    'unverifiable',
+    `${CANNOT}(?:test(?:ed)?|reproduc(?:ed|e)|exercis(?:ed|e))`,
+    // A bare "verify" is also a TLS or signature error ("unable to verify the first certificate"), so it needs a place.
+    `${CANNOT}verif(?:ied|y)(?: (?:it|this))? (?:here|locally|in this repo)`,
+    '(?:needs?|requires?) (?:a |an )?(?:live|real) (?:\\w+ )?(?:service|device|browser|database|account) to (?:test|verify|reproduce)',
+    'nao (?:da|e possivel) (?:para |pra )?(?:testar|reproduzir)',
+    'nao consigo (?:testar|reproduzir)',
+    'sem (?:como|jeito de) (?:testar|reproduzir)',
+  ].join('|'),
+)
+const SECURITY_RE = /security|injection|\bxss\b|\bcsrf\b|\bleak|exposure|seguranca/
+/** Words that make a failure security-like even when the security rule does not name it; such a failure is never reported as partial. */
+const SENSITIVE_RE = new RegExp(
+  `${SECURITY_RE.source}|auth|login|logon|sign.?in|session|\\broles?\\b|permiss|privileg|access control|forbidden|\\b40[13]\\b|api.?key|jwt|` +
+    'secret|token|credential|credencia|password|passwd|senha|segredo|autentic|autoriz|acesso negado|papel de',
+)
 
 /** An assertion is a code failure, whatever words its message or its test name carry. */
 const ASSERTION_RE = /assertionerror|\bnot ok\b|\bfail\b|expected .* to |\bassert/
@@ -47,6 +69,8 @@ const FAILED_TEST_RE = /^(?:not ok \d+ - (.+)|✖ (?!failing tests)(.+?)(?: \([\
  * the earliest stage of a failure comes first because it explains the later ones, and a sharper word beats a generic one.
  * A rule with `machine` confirms from a detail only on that pattern; `re` adds prose that counts only in a reason, as a hypothesis.
  * A `guard` marks a claim an assertion outranks: 'line' ignores assertion lines, 'output' ignores the whole text that holds one.
+ * An `unless` pattern drops the rule when any line of the reason or the output matches it.
+ * A `reasonOnly` rule is never read from the output: a runner line cannot decide it, only the reporter's own words.
  */
 const RULES = [
   { category: 'syntax', re: /syntaxerror|unexpected token|parseerror|parse error|erro de sintaxe/ },
@@ -71,8 +95,10 @@ const RULES = [
   { category: 'architecture', re: /architecture|design|circular|coupling|layering|arquitetura/ },
   { category: 'requirement', re: /requirement|\bspec\b|criterion|acceptance|misunderstood|requisito|criterio/ },
   { category: 'integration', re: /integration|contract mismatch|\b4xx\b|\b4\d\d response|status(?: code)? 4\d\d|schema mismatch|integracao/ },
-  { category: 'security', re: /security|injection|\bxss\b|\bcsrf\b|\bleak|exposure|seguranca/ },
+  { category: 'security', re: SECURITY_RE },
   { category: 'scope', re: /scope|unrelated file|escopo/ },
+  // Last: only a failure no other category explains, a failed assertion stays a test, and a security-like one is never reported as partial.
+  { category: 'unverifiable', guard: 'output', reasonOnly: true, unless: SENSITIVE_RE, re: UNVERIFIABLE_RE },
 ]
 
 const DESIGN_RE = /architecture|design|circular|coupling|layering|arquitetura/
@@ -108,6 +134,7 @@ const HYPOTHESES = {
   infra: 'The environment failed (network, port, disk, memory, rate limit or service), not the code.',
   flaky: 'The failure is intermittent and may pass on a rerun.',
   scope: 'The change touches files or behavior outside the task.',
+  unverifiable: 'The repo has no way to exercise this failure, so another attempt cannot be checked.',
   unknown: 'The text does not show a cause; read the full output before changing code.',
 }
 
@@ -157,11 +184,13 @@ export function diagnoseFailure(input) {
   const reasonLines = linesOf(reasonText)
 
   const reviewed = source === 'review' ? reviewCategoryToCategory(asText(reviewCategory), reasonText) : null
-  const detailRule = reviewed ? null : RULES.find((rule) => matchingLines(rule, detailLines, true).length)
+  const allowed = (rule) => !rule.unless || ![...detailLines, ...reasonLines].some((line) => rule.unless.test(fold(line)))
+  const detailRule = reviewed ? null : RULES.find((rule) => !rule.reasonOnly && allowed(rule) && matchingLines(rule, detailLines, true).length)
   const category =
-    reviewed ?? detailRule?.category ?? RULES.find((rule) => matchingLines(rule, reasonLines, false).length)?.category ?? 'unknown'
+    reviewed ?? detailRule?.category ?? RULES.find((rule) => allowed(rule) && matchingLines(rule, reasonLines, false).length)?.category ?? 'unknown'
   const rule = RULES.find((item) => item.category === category)
-  const found = rule ? matchingLines(rule, detailLines, Boolean(detailRule)) : []
+  // A reason-only category takes nothing from the output, so a runner line cannot change its symptom or signature either.
+  const found = rule && !rule.reasonOnly ? matchingLines(rule, detailLines, Boolean(detailRule)) : []
   const foundInReason = rule ? matchingLines(rule, reasonLines, false) : []
   const firstMeaningful = detailLines.find((line) => !TAP_NOISE_RE.test(fold(line)))
 
@@ -195,12 +224,15 @@ const ACTIONS = {
   security: ['escalate', 'A security finding needs a stronger tier to fix.'],
   integration: ['retry', 'Check the contract on both sides, then retry.'],
   scope: ['retry', 'Revert what is outside the task and retry with only the files it names.'],
+  unverifiable: ['report-partial', 'The repo cannot exercise this failure: do not move up a tier. Deliver the verifiable part, report the task as partial, and name the test setup that is missing.'],
   unknown: ['retry', 'Read the full output to find the cause, then retry.'],
 }
 
 export function nextAction(diagnosis, { tier, attemptsLeft } = {}) {
   const category = diagnosis?.category in ACTIONS ? diagnosis.category : 'unknown'
   const [action, note] = ACTIONS[category]
+  // A stronger tier cannot verify what the repo cannot exercise, so repeating or running out of attempts changes nothing.
+  if (action === 'report-partial') return { action, note }
   const exhausted = diagnosis?.repeated === true || (typeof attemptsLeft === 'number' && attemptsLeft <= 0 && action.startsWith('retry'))
   const stronger = action === 'escalate' || exhausted
   if (!stronger) return { action, note }

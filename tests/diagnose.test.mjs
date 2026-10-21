@@ -9,8 +9,8 @@ const { FAILURE_CATEGORIES, diagnoseFailure, nextAction } = await import(pathToF
 const fromDetail = (detail) => diagnoseFailure({ detail })
 const fromReason = (reason) => diagnoseFailure({ reason })
 
-test('exports the fourteen categories', () => {
-  assert.equal(FAILURE_CATEGORIES.length, 14)
+test('exports the fifteen categories', () => {
+  assert.equal(FAILURE_CATEGORIES.length, 15)
   assert.equal(FAILURE_CATEGORIES.at(-1), 'unknown')
 })
 
@@ -254,6 +254,7 @@ test('nextAction maps each category', () => {
     security: 'escalate',
     integration: 'retry',
     scope: 'retry',
+    unverifiable: 'report-partial',
     unknown: 'retry',
   }
   assert.deepEqual(Object.keys(expected).sort(), [...FAILURE_CATEGORIES].sort())
@@ -278,7 +279,7 @@ test('architecture and security stop at the top tier', () => {
 })
 
 test('a repeated diagnosis escalates, or stops at opus', () => {
-  for (const category of FAILURE_CATEGORIES) {
+  for (const category of FAILURE_CATEGORIES.filter((item) => item !== 'unverifiable')) {
     assert.equal(nextAction(diag(category, { repeated: true }), { tier: 'sonnet' }).action, 'escalate', category)
     assert.equal(nextAction(diag(category, { repeated: true }), { tier: 'opus' }).action, 'stop', category)
   }
@@ -422,4 +423,135 @@ test('two different failing tests in spec-reporter output get different signatur
 test('a Jest assertion is a test failure whatever its Received value quotes', () => {
   const jest = "expect(received).toBe(expected) // Object.is equality\n\nExpected: 'ok'\nReceived: 'Cannot find module x'"
   assert.equal(diagnoseFailure({ detail: jest }).category, 'test')
+})
+
+test('an unverifiable diagnosis reports partial and is never escalated or stopped', () => {
+  const diagnosis = fromReason('cannot be tested here: needs a real payment gateway')
+  assert.equal(diagnosis.category, 'unverifiable')
+  assert.equal(diagnosis.confirmed, false)
+  const first = nextAction(diagnosis, { tier: 'sonnet', attemptsLeft: 2 })
+  assert.equal(first.action, 'report-partial')
+  assert.match(first.note, /do not move up a tier/)
+  for (const tier of ['haiku', 'sonnet', 'opus']) {
+    assert.equal(nextAction(diag('unverifiable', { repeated: true }), { tier }).action, 'report-partial', tier)
+    assert.equal(nextAction(diag('unverifiable'), { tier, attemptsLeft: 0 }).action, 'report-partial', tier)
+  }
+})
+
+test('unverifiable phrasing in English and Portuguese is recognized', () => {
+  for (const text of [
+    'unverifiable without the device',
+    'this cannot be reproduced locally',
+    "we can't test the checkout flow here",
+    'unable to exercise the webhook in this repo',
+    'there is no way to verify it locally',
+    'needs a live browser to reproduce the bug',
+    'requires a real payment database to test it',
+    'Nao da para testar sem o ambiente',
+    'Não é possível reproduzir aqui',
+    'sem como testar isso aqui',
+    'sem jeito de reproduzir o erro',
+  ]) {
+    assert.equal(fromReason(text).category, 'unverifiable', text)
+  }
+})
+
+test('unverifiable is the last resort: a reason another category explains keeps that category', () => {
+  const cases = [
+    ['architecture', 'design coupling makes the module impossible to test'],
+    ['architecture', 'circular dependency between services: cannot be tested in isolation'],
+    ['architecture', 'arquitetura acoplada, nao da para testar'],
+    ['requirement', 'acceptance criterion cannot be tested as written'],
+    ['integration', 'integration cannot be tested here'],
+    ['integration', 'status 404 from the gateway; cannot test against staging'],
+    ['scope', 'touches an unrelated file, cannot test that file'],
+  ]
+  for (const [category, reason] of cases) assert.equal(fromReason(reason).category, category, reason)
+  assert.equal(nextAction(fromReason('design coupling makes the module impossible to test'), { tier: 'sonnet', attemptsLeft: 1 }).action, 'escalate')
+})
+
+test('an auth or permission failure is never reported as partial', () => {
+  for (const reason of ['auth bypass, cannot be tested here', 'permission check missing, cannot test without real accounts', 'autorizacao falha, nao da para testar']) {
+    assert.notEqual(fromReason(reason).category, 'unverifiable', reason)
+  }
+})
+
+test('common wordings of not being able to test are recognized', () => {
+  for (const reason of ['nao da pra testar sem o servidor', 'nao consigo reproduzir aqui', 'can\u2019t test the webhook without a public URL']) {
+    assert.equal(fromReason(reason).category, 'unverifiable', reason)
+  }
+})
+
+test('reasons that only mention a missing test, credentials or production keep their own category', () => {
+  const cases = [
+    ['requirement', 'criterio sem teste para o caso vazio'],
+    ['requirement', 'acceptance criterion has no test setup for the empty list'],
+    ['security', 'requires credentials to be stored in plain text, security leak'],
+    ['integration', 'the endpoint requires credentials and returns status 401'],
+    ['unknown', 'no test harness for the module'],
+    ['unknown', 'requires production access to deploy'],
+    ['unknown', 'unable to verify the first certificate'],
+  ]
+  for (const [category, text] of cases) {
+    assert.equal(fromReason(text).category, category, text)
+  }
+})
+
+test('a security reason that also says it cannot be tested stays security and escalates', () => {
+  for (const text of ['cannot be tested here: data exposure through the endpoint', 'unverifiable security leak']) {
+    const diagnosis = fromReason(text)
+    assert.equal(diagnosis.category, 'security', text)
+    assert.equal(nextAction(diagnosis, { tier: 'sonnet' }).action, 'escalate', text)
+  }
+  assert.equal(fromDetail('cannot be tested here\nsecurity: token leak in the log').category, 'security')
+})
+
+test('a failed assertion that mentions an unverifiable phrase stays a test', () => {
+  const detail = "not ok 1 - charges the card\nAssertionError: expected 1 to equal 2\nnote: cannot be tested here, needs a real payment gateway"
+  assert.equal(fromDetail(detail).category, 'test')
+  assert.equal(fromReason('assertion failed; cannot be tested here').category, 'test')
+})
+
+test('an unverifiable line in the output never overrides the reason, and never confirms', () => {
+  const cases = [
+    ['security', 'cannot be tested here', 'sql injection in the search endpoint'],
+    ['security', 'cannot be reproduced locally', 'security leak: token printed in the log'],
+    ['requirement', 'cannot be tested here', 'acceptance criterion for the empty list is not met'],
+    ['architecture', 'unable to reproduce in this repo', 'circular dependency between modules'],
+    ['regression', 'cannot be tested here', 'regression: broke existing checkout'],
+  ]
+  for (const [category, detail, reason] of cases) assert.equal(diagnoseFailure({ detail, reason }).category, category, reason)
+  const auth = diagnoseFailure({ detail: 'cannot be tested here', reason: 'auth bypass on the admin route' })
+  assert.notEqual(auth.category, 'unverifiable')
+  assert.equal(diagnoseFailure({ detail: 'skipped: cannot be tested here' }).category, 'unknown', 'a runner line alone decides nothing')
+  const own = diagnoseFailure({ reason: 'cannot be tested here: needs a real payment gateway', detail: 'ok 1 - other' })
+  assert.equal(own.category, 'unverifiable')
+  assert.equal(own.confirmed, false)
+})
+
+test('a secret, token or password failure is never reported as partial', () => {
+  for (const reason of ['secret token logged; cannot test in prod', 'senha exposta, nao da para testar', 'password reset cannot be tested here']) {
+    assert.notEqual(diagnoseFailure({ reason }).category, 'unverifiable', reason)
+  }
+})
+
+test('auth-like wordings are never reported as partial', () => {
+  const reasons = [
+    'returns 401 Unauthorized, cannot be reproduced locally',
+    'unauthenticated request accepted, cannot be tested here',
+    'OAuth login cannot be tested here',
+    'admin role check missing, cannot be tested here',
+    'forbidden 403, cannot be tested here',
+    'api key hardcoded, cannot be tested here',
+    'jwt signature not checked; cannot be tested here',
+    'nao consigo reproduzir o login do admin',
+  ]
+  for (const reason of reasons) assert.notEqual(diagnoseFailure({ reason }).category, 'unverifiable', reason)
+})
+
+test('the symptom of an unverifiable diagnosis comes from the reason, never from the output', () => {
+  const diagnosis = diagnoseFailure({ reason: 'cannot be tested here: needs a real payment gateway', detail: 'warning: cannot be tested here' })
+  assert.equal(diagnosis.category, 'unverifiable')
+  assert.match(diagnosis.symptom, /payment gateway/)
+  assert.equal(diagnosis.evidence, '')
 })
