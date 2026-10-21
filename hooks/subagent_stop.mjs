@@ -13,6 +13,7 @@ import {
   openContext,
   parseHeaders,
   parsePayload,
+  peekFor,
   prepareReport,
   processReport,
   queueMessage,
@@ -27,7 +28,10 @@ function main() {
   const ctx = openContext(payload)
 
   // Read the launch first, run the gate with no lock held, then count under the lock.
-  const launched = withSession(ctx, payload, (state) => state.background?.[agentId])
+  const { launched, peek } = withSession(ctx, payload, (state) => {
+    const found = state.background?.[agentId]
+    return { launched: found, peek: found ? peekFor(state, { prompt: found.prompt || '' }) : null }
+  })
   if (!launched) return
   const role = launched.role || matchRole(payload.agent_type)
   // A background agent delivers its report through the SubagentHandback tool, so the last message is not the trailer.
@@ -45,6 +49,7 @@ function main() {
           error: '',
         },
         payload,
+        { peek },
       )
     : null
 

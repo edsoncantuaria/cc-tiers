@@ -1029,6 +1029,9 @@ test('checkDelegation refuses model overrides, missing headers, and downgrades',
   assert.ok(up.context.includes('moved b from haiku to sonnet'))
   assert.deepEqual(state.tasks.b, { tier: 'sonnet', failures: [], carried: ['haiku/worker: first'] })
 
+  // b names no files, so c would wait for it; its report releases it.
+  assert.match(tiers.checkDelegation(state, { subagent_type: 'cc-tiers:worker', prompt: `${header('c', 'haiku', 'worker')}Rename the login handler` }, routing).deny, /unknown scope/)
+  state.active = {}
   const hint = tiers.checkDelegation(state, { subagent_type: 'cc-tiers:worker', prompt: `${header('c', 'haiku', 'worker')}Rename the login handler` }, routing)
   assert.equal(hint.deny, '')
   assert.ok(hint.context.includes('routing hint'))

@@ -139,6 +139,67 @@
       "min": 30,
       "max": 600
     },
+    "profile": {
+      "type": "string",
+      "title": "Operating profile",
+      "description": "balanced (default) keeps today's behavior. quality starts writers one effort level up, asks for evidence on every criterion and an Opus review from high risk up. budget runs fewer writers at once and recalls less memory. fast runs more writers at once and selects fewer checks below critical. No profile removes an agent, gate, criterion or step, overrides a /config value, or lowers the checks and review a critical task gets.",
+      "default": "balanced",
+      "options": ["balanced", "quality", "budget", "fast"]
+    },
+    "memory": {
+      "type": "string",
+      "title": "Engineering memory",
+      "description": "on (default): cc-tiers keeps small evidence-backed notes per project in .claude/cc-tiers-memory.json (verified test commands, failure classes, what fixed them, dead ends), kept out of git, and gives a writer the few that match its task as data, never as instructions. off: it neither reads nor writes the file. /cc-tiers:memory lists, invalidates or clears it.",
+      "default": "on",
+      "options": ["on", "off"]
+    },
+    "telemetry": {
+      "type": "string",
+      "title": "Telemetry",
+      "description": "on (default): cc-tiers appends one small event per transition (risk, model, verify, failure, escalation, review, outcome) to events.jsonl in its own data directory, never prompt or file contents, for /cc-tiers:insights. reduced: only failures, escalations and outcomes. off: nothing is written. Nothing leaves the machine.",
+      "default": "on",
+      "options": ["on", "reduced", "off"]
+    },
+    "max_parallel": {
+      "type": "number",
+      "title": "Max writers at once",
+      "description": "How many writer agents may run at the same time. 0 (default) uses the profile's limit (balanced 4). Writers whose files overlap, or whose files are unknown, always run one at a time unless one uses isolation: worktree.",
+      "default": 0,
+      "min": 0,
+      "max": 16
+    },
+    "task_budget_usd": {
+      "type": "number",
+      "title": "Task budget (USD, estimated)",
+      "description": "Estimated cost at API list prices after which cc-tiers refuses new writer calls for one task until the user approves more (CC_TIERS_BUDGET: override - <reason>). Review and verification calls still run. 0 (default) is no limit.",
+      "default": 0,
+      "min": 0,
+      "max": 1000
+    },
+    "task_budget_calls": {
+      "type": "number",
+      "title": "Task budget (agent calls)",
+      "description": "Agent calls one task may make before writer calls need the user's approval. 0 (default) is no limit.",
+      "default": 0,
+      "min": 0,
+      "max": 200
+    },
+    "task_budget_minutes": {
+      "type": "number",
+      "title": "Task budget (minutes)",
+      "description": "Wall-clock minutes from a task's first delegation before writer calls need the user's approval. 0 (default) is no limit.",
+      "default": 0,
+      "min": 0,
+      "max": 1440
+    },
+    "budget_warn_at": {
+      "type": "number",
+      "title": "Task budget warning (%)",
+      "description": "Percent of a task budget at which cc-tiers warns before the limit. Default 80.",
+      "default": 80,
+      "min": 50,
+      "max": 99
+    },
     "review_evidence": {
       "type": "string",
       "title": "Review evidence",

@@ -6,6 +6,7 @@ import {
   normalizeEvent,
   openContext,
   parsePayload,
+  peekFor,
   prepareReport,
   processReport,
   readStdin,
@@ -20,8 +21,11 @@ function main() {
   const normalized = normalizeEvent(payload)
   if (!normalized) return
   const ctx = openContext(payload)
-  // The gate runs its commands here, before the session lock is taken.
-  const event = prepareReport(ctx, normalized, payload)
+  const measured = Number(payload.tool_response?.totalDurationMs ?? payload.duration_ms)
+  if (Number.isFinite(measured) && measured > 0 && normalized.kind !== 'background') normalized.durationMs = measured
+  // The tree before the attempt and the reusable gate results, read before the gate runs outside the lock.
+  const peek = normalized.kind === 'report' ? withSession(ctx, payload, (state) => peekFor(state, normalized)) : null
+  const event = prepareReport(ctx, normalized, payload, { peek })
 
   const message = withSession(ctx, payload, (state) => {
     let text

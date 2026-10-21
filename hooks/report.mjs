@@ -35,6 +35,13 @@ function verifyCell(verify) {
   return verify.verified?.length ? 'ok' : '—'
 }
 
+/** Measured agent time, as Claude Code reports it; '—' when no run reported it. */
+function minutes(ms) {
+  const value = Number(ms)
+  if (!Number.isFinite(value) || value <= 0) return '—'
+  return value < 60000 ? `${Math.round(value / 1000)} s` : `${(value / 60000).toFixed(1)} min`
+}
+
 function cell(value) {
   return String(value ?? '').replace(/\|/g, '\\|') || '—'
 }
@@ -60,8 +67,8 @@ export function renderReport(states) {
   if (!tasks.length && !cost[OVERHEAD]) return 'cc-tiers has not recorded a task in this session yet.\n'
 
   const lines = [
-    '| Task | Tiers | Attempts | Escalated | Effort | Review | Verify | Status | Cost | At Opus rates |',
-    '| --- | --- | --: | --: | --- | --- | --- | --- | --: | --: |',
+    '| Task | Tiers | Attempts | Escalated | Effort | Review | Verify | Status | Cost | At Opus rates | Risk | Completion | Confidence | Time |',
+    '| --- | --- | --: | --: | --- | --- | --- | --- | --: | --: | --- | --- | --- | --: |',
   ]
   for (const task of tasks) {
     const entry = own(log, task) || {}
@@ -72,18 +79,18 @@ export function renderReport(states) {
     const reviews = [...new Set(entry.reviews || [])].join(', ')
     const status = entry.status === 'done' && entry.finished ? `done on ${entry.finished}` : entry.status
     lines.push(
-      `| ${cell(task)} | ${cell((entry.tiers || []).join(' → '))} | ${entry.attempts ?? 0} | ${entry.escalations ?? 0} | ${cell(effort)} | ${cell(reviews)} | ${verifyCell(entry.verify)} | ${cell(status)} | ${row ? dollars(costTotal(row)) : '—'} | ${row ? dollars(row.opusRate) : '—'} |`,
+      `| ${cell(task)} | ${cell((entry.tiers || []).join(' → '))} | ${entry.attempts ?? 0} | ${entry.escalations ?? 0} | ${cell(effort)} | ${cell(reviews)} | ${verifyCell(entry.verify)} | ${cell(status)} | ${row ? dollars(costTotal(row)) : '—'} | ${row ? dollars(row.opusRate) : '—'} | ${cell(entry.risk)} | ${cell(entry.completion)} | ${cell(entry.confidence)} | ${minutes(entry.durationMs)} |`,
     )
   }
   if (cost[OVERHEAD]) {
-    lines.push(`| ${OVERHEAD} | — | — | — | — | — | — | — | ${dollars(costTotal(cost[OVERHEAD]))} | ${dollars(cost[OVERHEAD].opusRate)} |`)
+    lines.push(`| ${OVERHEAD} | — | — | — | — | — | — | — | ${dollars(costTotal(cost[OVERHEAD]))} | ${dollars(cost[OVERHEAD].opusRate)} | — | — | — | — |`)
   }
   const summary = costSummary(cost)
   lines.push('')
   lines.push(
     `Total: about ${dollars(summary.total)} at Anthropic API list prices. The same tokens at Opus rates: about ${dollars(summary.opus)} ` +
       `(${Math.round(summary.saved * 100)}% less). Subscription plans are not billed this way; read it as a comparison. ` +
-      'Opus-only work would not use exactly the same tokens, so the comparison is an estimate.',
+      'Opus-only work would not use exactly the same tokens, so the comparison is an estimate. Time is measured; cost is estimated.',
   )
   const fresh = formatSpend(spend)
   if (fresh.length) lines.push('', 'cc-cost fresh tokens (input + cache write + output):', ...fresh.map((line) => `- ${line}`))

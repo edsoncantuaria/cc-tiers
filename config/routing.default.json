@@ -15,6 +15,9 @@
   "verifyTimeout": 300,
   "verifyBudget": 600,
   "reviewEvidence": true,
+  "profile": "balanced",
+  "memory": true,
+  "telemetry": "on",
   "effort": {
     "on": true,
     "haiku": [

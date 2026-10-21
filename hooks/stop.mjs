@@ -21,6 +21,7 @@ import {
   prepareParked,
   processReport,
   readStdin,
+  releaseIdleWriters,
   takePending,
   withSession,
 } from './cc_tiers.mjs'
@@ -41,7 +42,10 @@ function main() {
     if (message) process.stdout.write(`${JSON.stringify(hookOutput('UserPromptSubmit', message))}\n`)
     return
   }
-  const { awaiting, pending } = withSession(ctx, payload, (state) => ({ awaiting: peekAwaiting(state), pending: takePending(state) }))
+  const { awaiting, pending } = withSession(ctx, payload, (state) => {
+    releaseIdleWriters(state)
+    return { awaiting: peekAwaiting(state), pending: takePending(state) }
+  })
   const prepared = prepareParked(ctx, awaiting, payload)
   // The second scan may count a new trailer; its message goes out with the gated ones. Only the counted ids leave the parked list.
   const gated = prepared.length

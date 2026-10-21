@@ -7,6 +7,7 @@ import {
   hookOutput,
   loadHistory,
   openContext,
+  openWork,
   parsePayload,
   readStdin,
   readTodayTotal,
@@ -37,6 +38,7 @@ function main() {
       spend: installed ? state.spend || {} : null,
       today: installed ? readTodayTotal(ctx.env) : null,
       cost: state.cost || {},
+      openWork: openWork(state),
     }),
   }))
   const body = pending ? `${text}\n\n${pending}` : text

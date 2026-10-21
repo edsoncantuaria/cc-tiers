@@ -36,6 +36,9 @@ const complexity = assessComplexity(text, routing, { projectDir })
 const review = selectReviewer({ policy: routing.reviewPolicy, writerTier: decision.tier, risky, conserve: budget.conserve })
 const result = {
   ...decision,
+  risk: decision.risk.level,
+  riskDimensions: decision.risk.dimensions,
+  riskFactors: decision.risk.factors,
   risky,
   complexity: complexity.score,
   signals: complexity.signals,
