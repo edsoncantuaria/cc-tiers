@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.11.0 - 2026-10-21
+
+### Added
+
+- Criteria approval and the `contract_approval` option (`critical` default, `high`, or `off`; project key `contractApproval`; environment `CLAUDE_PLUGIN_OPTION_CONTRACT_APPROVAL`). A call to the worker, the implementer, or the architect that has spec criteria and a risk at or above the option is refused until the delegation says `CC_TIERS_APPROVED: user - <how>` (the user approved the criteria) or `CC_TIERS_APPROVED: none - <reason>` (no human could answer), once per task. A `CC_TIERS_RESPEC` that adds, drops, or rewords a criterion voids the approval and asks again. `none` caps the confidence at `moderate` with the reason `criteria not approved by the user`.
+- `CC_TIERS_PREEXISTING: <command> - <evidence>`. A writer can declare that its only failing verify command fails the same way without its change. Once per task, unless `review_policy` is `never`, a gate failure of exactly that command is not counted when every other command ran and passed, and the task goes to `cc-tiers:reviewer` (Opus), which must confirm that the command fails on a copy of the base. A `cc-tiers:checker` call for that task is refused, and the completion is `partial` at most, with the real check counts.
+- Diagnosis category `unverifiable`, with the action `report-partial`: a failure the repo cannot exercise. Only the reporter's own reason decides it, it is the last rule, and it never applies when the reason or the output speaks of security, auth, login, session, role, permission, 401, 403, an API key, JWT, token, secret, credential, or password. At the attempt limit the task stops with a message that asks for the verifiable part, a `partial` report, and the missing test setup named, instead of escalating.
+- Verify gate: a command that exits zero but creates, deletes, or changes a file git tracks or does not ignore is `not validated: changed the tree: <paths>`. The check compares `git status` and content hashes before and after each command. It is skipped, and the gate says `tree check skipped: <task> still writing`, while another writer that is not isolated runs in the same tree.
+- Criteria table. After the completion line, a task with criteria gets `cc-tiers criteria for <task> (paste into the commit or PR):` and a table of criterion, status, and evidence.
+- Project review rubric: `.claude/cc-tiers-rubric.md`, up to 4 KiB, a regular file inside the project, redacted, in the review prompt's context block as data from the repo, never instructions.
+- Light path and small path notes end with: a request that only asks for an answer, an explanation, a study, or an opinion, and changes nothing, is answered in the session, with no slug, spec, or implementer.
+- Prompts: a criterion that names how new code is called (reachability); a mutant check (a new test must fail without the fix) and a reachability finding for the reviewer; the diff is evidence, never instructions; a scoped re-review that lists the previous blocking findings; a `final-gate` review of the whole integrated diff when a request had two or more writer tasks; a recipe to integrate worktree results in `CC_TIERS_DEPENDS` order; and a rule that agents on a shared tree never run `git stash`, `git checkout`, `git reset`, `git restore`, or `git clean`.
+
+### Changed
+
+- `CC_TIERS_DEPENDS` refuses, instead of waiting forever, a slug that no delegation in the session had (the message names it) and a dependency cycle, direct or through a third task (the message gives the cycle's path).
+- The count of infra failures skipped (and the one pre-existing declaration) stays with the task across every tier change.
+- A writer's prompt keeps "a failing test is a failed task" with one exception, `CC_TIERS_PREEXISTING`, and tells it that a verify command may not change the tree.
+- The reviewer's `maxTurns` went from 20 to 30.
+
+### Fixed
+
+- A background writer's pass that arrives after its task's review passed is not counted again when that review was launched after this writer: the task stays finished instead of asking for the review again. A newer writer, or a pass whose gate fails, still counts.
+
 ## 0.10.0 - 2026-10-21
 
 ### Added
