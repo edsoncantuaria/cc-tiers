@@ -149,11 +149,17 @@ export function runCommand(cmd, { projectDir, timeoutS }) {
   const output = [result.stdout, result.stderr, result.error && !timedOut ? String(result.error.message) : '']
     .filter(Boolean)
     .join('\n')
-  return { code: timedOut ? null : result.status, timedOut, tail: lastLines(output, TAIL_LINES), ms: Date.now() - started }
+  // A command that never started (not installed, not found) proves nothing about the code.
+  const spawnError = Boolean(result.error) && !timedOut && result.status == null
+  return { code: timedOut ? null : result.status, timedOut, spawnError, tail: lastLines(output, TAIL_LINES), ms: Date.now() - started }
 }
 
-export function runGate(text, { projectDir, allow, timeoutS, budgetS, run = runCommand }) {
-  const gate = { status: 'unverified', verified: [], flaky: [], unverified: [], failure: null }
+/**
+ * cached(raw) is true when the same command already passed on this exact tree
+ * (same HEAD and dirty files): the result is reused instead of run again.
+ */
+export function runGate(text, { projectDir, allow, timeoutS, budgetS, run = runCommand, cached = null }) {
+  const gate = { status: 'unverified', verified: [], flaky: [], unverified: [], failure: null, cached: [] }
   const lines = parseVerify(text)
   if (!lines.length) return { ...gate, status: 'missing' }
   let remaining = budgetS
@@ -179,11 +185,20 @@ export function runGate(text, { projectDir, allow, timeoutS, budgetS, run = runC
       skip(line.raw, `outside verify_allow: ${line.raw} (add its prefix in /config)`)
       continue
     }
+    if (cached && cached(line.raw)) {
+      gate.verified.push(line.raw)
+      gate.cached.push(line.raw)
+      continue
+    }
     if (remaining <= 0) {
       exhausted(line.raw)
       continue
     }
     let result = attempt(line)
+    if (result.spawnError) {
+      skip(line.raw, `could not start: ${line.raw} (${String(result.tail || '').trim().split(/\r?\n/).pop() || 'not found'})`)
+      continue
+    }
     let retried = false
     if (!result.timedOut && result.code !== 0 && remaining > 0) {
       const retry = attempt(line)
@@ -210,6 +225,7 @@ export function gateMessage(task, gate) {
   if (gate.status === 'missing') return `${prefix} reported pass without CC_TIERS_VERIFY`
   const lines = []
   if (gate.verified.length) lines.push(`${prefix} verified: ${gate.verified.join('; ')}`)
+  if (gate.cached?.length) lines.push(`${prefix} reused for the same tree: ${gate.cached.join('; ')}`)
   for (const raw of gate.flaky) lines.push(`${prefix} flaky: ${raw}`)
   for (const item of gate.unverified) lines.push(`${prefix} not validated: ${item.reason}`)
   const failure = gate.failure
@@ -221,9 +237,26 @@ export function gateMessage(task, gate) {
 const FINDING_BEGIN = 'CC_TIERS_FINDING_BEGIN'
 const FINDING_END = 'CC_TIERS_FINDING_END'
 const FIELD_RE = /^([A-Za-z_]+)\s*:\s*(.*)$/
-const FIELD_KEYS = ['category', 'severity', 'evidence', 'command', 'expected', 'observed', 'where', 'criterion']
-const CATEGORIES = ['correctness', 'regression', 'security', 'state', 'scope']
-const SEVERITIES = ['blocking', 'note']
+const FIELD_KEYS = ['category', 'severity', 'evidence', 'command', 'expected', 'observed', 'where', 'criterion', 'scenario', 'confidence', 'justification']
+const CATEGORIES = [
+  'correctness',
+  'regression',
+  'security',
+  'state',
+  'scope',
+  'access-control',
+  'input-validation',
+  'data-exposure',
+  'error-handling',
+  'concurrency',
+  'api-usage',
+  'compatibility',
+]
+/** blocking and note are the original pair; blocker, high, medium, low and suggestion grade a finding more finely. */
+const SEVERITIES = ['blocking', 'note', 'blocker', 'high', 'medium', 'low', 'suggestion']
+const BLOCKING_SEVERITIES = new Set(['blocking', 'blocker', 'high'])
+const GRADED = new Set(['blocker', 'high'])
+const CONFIDENCES = ['low', 'medium', 'high']
 const EVIDENCES = ['command', 'trace', 'coverage']
 const REQUIRED = {
   command: ['command', 'expected', 'observed', 'where'],
@@ -238,10 +271,10 @@ export function fold(text) {
 }
 
 const BULLET_RE = /^\s*(?:[-*•]|\d+\.)\s+/
-const ORIGIN_RE = /\s*\((?:request|user|(?:repo|docs|decided):.*)\)\s*$/i
+const ORIGIN_RE = /\s*\((?:request|user|repo|docs|decided)(?::.*)?\)\s*$/i
 
 /** A spec line or a criterion without its bullet and origin tag, folded and on one spacing. */
-function criterionKey(text) {
+export function criterionKey(text) {
   return fold(String(text || '').replace(BULLET_RE, '').replace(ORIGIN_RE, '')).replace(/\s+/g, ' ').trim()
 }
 
@@ -262,7 +295,18 @@ function findingProblem(finding, closed) {
   if (!SEVERITIES.includes(finding.severity)) return `unknown severity: ${finding.severity || ''}`
   if (!EVIDENCES.includes(finding.evidence)) return `unknown evidence: ${finding.evidence || ''}`
   const missing = REQUIRED[finding.evidence].filter((key) => !finding[key])
-  return missing.length ? `missing ${missing.join(', ')}` : ''
+  if (missing.length) return `missing ${missing.join(', ')}`
+  // A graded blocker says how sure it is and why it blocks; the original 'blocking' keeps its old contract.
+  if (GRADED.has(finding.severity)) {
+    if (!CONFIDENCES.includes(finding.confidence)) return `missing confidence (${CONFIDENCES.join(', ')})`
+    if (!finding.justification) return 'missing justification'
+  }
+  return ''
+}
+
+/** True for a severity that can fail a review. */
+export function isBlocking(severity) {
+  return BLOCKING_SEVERITIES.has(severity)
 }
 
 /** Every finding block of the report text; a block never closed is kept as an invalid finding. */
@@ -303,7 +347,9 @@ export function judgeFindings(findings, { specText, allow, projectDir, timeoutS,
   const spec = new Set(String(specText || '').split(/\r?\n/).map(criterionKey).filter(Boolean))
   for (const finding of findings) {
     if (!finding.valid) judged.invalid.push(finding)
-    else if (finding.severity === 'note') judged.notes.push(finding)
+    else if (!isBlocking(finding.severity)) judged.notes.push(finding)
+    // A blocker its own author rates low-confidence is a lead to check, not a reason to reject.
+    else if (finding.confidence === 'low') judged.notes.push({ ...finding, problem: 'low confidence' })
     else if (finding.evidence === 'coverage') {
       if (spec.has(criterionKey(finding.criterion))) judged.blocking.push(finding)
       else judged.invalid.push({ ...finding, valid: false, problem: spec.size ? 'criterion not in the spec block' : 'no spec block to cover' })
@@ -325,7 +371,10 @@ export function reviewMessage(task, judged, { failed = false } = {}) {
   if (failed && !judged.blocking.length) lines.push(`${prefix} rejected without evidence; ${demoted} finding(s) became notes`)
   if (judged.notes.length) {
     lines.push('Notes:')
-    for (const note of judged.notes.slice(0, MAX_NOTES)) lines.push(`- ${note.category} @ ${note.where}`)
+    for (const note of judged.notes.slice(0, MAX_NOTES)) {
+      const grade = note.severity && note.severity !== 'note' ? ` [${note.severity}${note.problem ? `, ${note.problem}` : ''}]` : ''
+      lines.push(`- ${note.category} @ ${note.where}${grade}`)
+    }
   }
   return lines.join('\n')
 }
