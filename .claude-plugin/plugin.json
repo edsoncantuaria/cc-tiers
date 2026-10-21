@@ -206,6 +206,13 @@
       "description": "on (default): a reviewer's blocking finding needs evidence, and cc-tiers re-runs a finding's command; one that passes is discarded. off: a reviewer's fail needs no finding.",
       "default": "on",
       "options": ["on", "off"]
+    },
+    "contract_approval": {
+      "type": "string",
+      "title": "Criteria approval",
+      "description": "critical (default): before a critical-risk task is first delegated, the user approves its acceptance criteria (CC_TIERS_APPROVED: user - <how>), or the prompt says no human could answer (CC_TIERS_APPROVED: none - <reason>) and the task finishes at moderate confidence at most. high: the same from high risk up. off: no approval is asked.",
+      "default": "critical",
+      "options": ["critical", "high", "off"]
     }
   }
 }

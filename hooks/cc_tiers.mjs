@@ -21,7 +21,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { TIERS, dollars, extractFiles, writeAtomic } from './base.mjs'
 import { BUDGET_OVERRIDE_RE, budgetMessage, budgetStatus, parseTaskBudget } from './budget.mjs'
-import { completion, evaluateCriteria, parseContract, parseCriterionReports, weakenedCriteria } from './contract.mjs'
+import { completion, evaluateCriteria, oneSpacing, parseContract, parseCriterionReports, weakenedCriteria } from './contract.mjs'
 import { diagnoseFailure, nextAction } from './diagnose.mjs'
 import { MEMORY_BEGIN, MEMORY_END, MEMORY_IGNORE, addRecord, formatRecall, loadMemory, memoryPath, recall, sanitize, saveMemory } from './memory.mjs'
 import { checkParallel, declaredFiles, pruneActive, registerActive, releaseActive } from './parallel.mjs'
@@ -30,7 +30,7 @@ import { clip } from './redact.mjs'
 import { assessRisk, riskRank, testsAvailableIn } from './risk.mjs'
 import { parseTelemetry, recordEvent, telemetryPath } from './telemetry.mjs'
 import { attemptChanges, outOfScope, sensitiveFiles, treeFingerprint, validateState, workspaceSnapshot } from './workspace.mjs'
-import { findingsNote, fold, gateMessage, isBlocking, judgeFindings, parseFindings, parseVerify, reviewMessage, runGate } from './verify.mjs'
+import { findingsNote, fold, gateFailure, gateMessage, isBlocking, judgeFindings, parseFindings, parseVerify, reviewMessage, runGate } from './verify.mjs'
 
 export { TIERS, dollars, extractFiles, fold, writeAtomic }
 export const NEXT_TIER = { haiku: 'sonnet', sonnet: 'opus', opus: null }
@@ -68,6 +68,7 @@ export const REVIEW_POLICIES = new Set(['cheap', 'risky', 'always', 'never'])
 export const CLASSIFIERS = new Set(['haiku', 'local'])
 export const LIGHT_MODES = new Set(['inline', 'delegate', 'off'])
 export const HARD_STARTS = new Set(['opus', 'sonnet'])
+export const CONTRACT_APPROVALS = new Set(['critical', 'high', 'off'])
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 export const DEFAULT_LADDERS = { haiku: ['low', 'medium'], sonnet: ['high', 'xhigh'], opus: ['high', 'xhigh'] }
 /** The effort each agent file pins, so the hook only rewrites a call that needs a different level. */
@@ -101,6 +102,7 @@ const SPEC_BEGIN = 'CC_TIERS_SPEC_BEGIN'
 const SPEC_END = 'CC_TIERS_SPEC_END'
 const SPEC_NONE_RE = /^none\s*-\s*\S/i
 const RISK_NONE_RE = /^none\s*-\s*\S/i
+const APPROVED_RE = /^(user|none)\s*-\s*\S/i
 const SPEC_HEADING_RE = /^[*_#\s]*(criteria|edge cases|assumed|preserve|checks|security|evidence|ambiguous)[*_#\s]*:?[*_#\s]*$/i
 const CONTEXT_BEGIN = 'CC_TIERS_CONTEXT_BEGIN'
 const CONTEXT_END = 'CC_TIERS_CONTEXT_END'
@@ -178,6 +180,12 @@ export function parseLightPath(value, fallback = 'inline') {
 export function parseHardStart(value, fallback = 'opus') {
   const text = String(value ?? '').trim().toLowerCase()
   return HARD_STARTS.has(text) ? text : fallback
+}
+
+/** The lowest risk whose criteria the user must approve before delegation: critical, high, or off. */
+export function parseContractApproval(value, fallback = 'critical') {
+  const text = String(value ?? '').trim().toLowerCase()
+  return CONTRACT_APPROVALS.has(text) ? text : fallback
 }
 
 export function parseEffort(value) {
@@ -339,6 +347,7 @@ export function mergeRouting(defaults, project = null, user = null) {
   const verifyTimeout = clampRange(config.verify_timeout, 10, 600, clampRange(defaults.verifyTimeout, 10, 600, 300))
   const verifyBudget = clampRange(config.verify_budget, 30, 600, clampRange(defaults.verifyBudget, 30, 600, 600))
   const reviewEvidence = parseLearn(config.review_evidence, parseLearn(defaults.reviewEvidence, true))
+  const contractApproval = parseContractApproval(config.contract_approval, parseContractApproval(source.contractApproval, parseContractApproval(defaults.contractApproval)))
   const prices = defaults.prices && typeof defaults.prices === 'object' ? defaults.prices : { families: {}, models: {} }
   const largeFileBytes = Number(source.largeFileBytes) > 0 ? Number(source.largeFileBytes) : Number(defaults.largeFileBytes) || 400000
   const profile = parseProfile(config.profile ?? '', parseProfile(source.profile ?? '', parseProfile(defaults.profile ?? '')))
@@ -387,6 +396,7 @@ export function mergeRouting(defaults, project = null, user = null) {
     verifyTimeout,
     verifyBudget,
     reviewEvidence,
+    contractApproval,
     prices,
     largeFileBytes,
     profile,
@@ -949,10 +959,11 @@ export function policyLines(routing) {
   return lines
 }
 
-/** The skipped infra failures travel with the task across tiers, so MAX_INFRA_SKIPS bounds the whole task. */
+/** The skipped infra and pre-existing failures travel with the task across tiers, so MAX_INFRA_SKIPS and MAX_PREEXISTING_SKIPS bound the whole task. */
 function infraKept(entry) {
-  const infra = Number(entry?.infra) || 0
-  return infra ? { infra } : {}
+  const kept = {}
+  for (const key of ['infra', 'preexisting']) if (Number(entry?.[key])) kept[key] = Number(entry[key])
+  return kept
 }
 
 /** Open work a resumed session finds in its state; nothing is rerun, the orchestrator checks the tree first. */
@@ -1345,7 +1356,7 @@ export function applyEvent(state, event, routing) {
       gateReason = 'reported pass without CC_TIERS_VERIFY'
     } else if (gate.status === 'fail') {
       status = 'fail'
-      const { raw, code, timedOut, tail, seconds } = gate.failure
+      const { raw, code, timedOut, tail, seconds } = gateFailure(gate)
       const last = String(tail || '').trim().split(/\r?\n/).pop() || 'no output'
       gateReason = timedOut ? `${raw} timed out after ${seconds} s: ${last}` : `${raw} exit ${code ?? 'none'}: ${last}`
       gateDetail = String(tail || '').trim()
@@ -1371,15 +1382,7 @@ export function applyEvent(state, event, routing) {
       gateReason = `the report says pass but criteria ${failedIds.join(', ')} failed`
     }
   }
-  if (status === 'pass' && !REVIEW_ROLES.has(role)) {
-    const gate = meta.gate || null
-    state.evidence = state.evidence && typeof state.evidence === 'object' ? state.evidence : {}
-    state.evidence[task] = {
-      reports: criterionReports,
-      verified: gate ? [...gate.verified, ...gate.flaky] : [],
-      gate: gate ? { status: gate.status, verified: gate.verified, flaky: gate.flaky, unverified: gate.unverified } : null,
-    }
-  }
+  if (status === 'pass' && !REVIEW_ROLES.has(role)) recordEvidence(state, task, criterionReports, meta.gate || null)
   const scopeNote = workspaceNote(task, event.workspace, Object.keys(tasks).filter((name) => name !== task))
   const flagged = Boolean(event.workspace?.sensitive?.length)
   if (scopeNote) gateNote += `${scopeNote}\n`
@@ -1423,6 +1426,24 @@ export function applyEvent(state, event, routing) {
           `It was not counted as a failure (${skipped + 1} of ${MAX_INFRA_SKIPS}). Fix the environment and run the same tier again; the next environment failure after that counts.`,
       }
     }
+    // A failure the writer declares the base already had: not counted once per task, and only an Opus review that confirms it lets the task finish.
+    // Only when every other command ran and passed: any other failing command is gate.failure and counts as always.
+    const declared = declaredPreexisting(event.text)
+    const used = Number(current.preexisting) || 0
+    const othersPassed = !meta.gate.failure && !meta.gate.unverified.length
+    if (declared && declared.raw === meta.gate.preexisting?.raw && othersPassed && used < MAX_PREEXISTING_SKIPS && routing.reviewPolicy !== 'never') {
+      tasks[task] = { ...current, tier, failures: current.failures || [], preexisting: used + 1 }
+      recordEvidence(state, task, criterionReports, meta.gate, { command: declared.command, evidence: declared.evidence })
+      meta.outcome = 'review'
+      meta.floor = reviewFloor(state, task, routing, flagged)
+      return {
+        state,
+        meta,
+        message:
+          `${gateNote}${task}: \`${declared.command}\` failed, and the writer declares it fails without this change too (${declared.evidence}). ` +
+          `Not counted as a failure (${used + 1} of ${MAX_PREEXISTING_SKIPS}). Send it to cc-tiers:reviewer (Opus): the review must confirm the failure exists without this change; a review that cannot confirm it rejects.`,
+      }
+    }
   }
 
   let reason = gateReason || headers.REASON || event.error || 'no reason given'
@@ -1434,6 +1455,7 @@ export function applyEvent(state, event, routing) {
   if (REVIEW_ROLES.has(role)) {
     // Evidence review: a rejection with no blocking finding approves; with findings, only they reach the writer.
     const judged = routing.reviewEvidence && event.judged ? event.judged : null
+    const inherited = role === 'checker' && Boolean(own(state.evidence, task)?.preexisting)
     let reviewLine = ''
     let applied
     if (judged) {
@@ -1448,13 +1470,14 @@ export function applyEvent(state, event, routing) {
         })
         meta.reason = `${lines[0]}${more}`.slice(0, MAX_REASON)
       } else {
-        applied = applyReview(tasks, task, current, tier, 'pass', reason, routing, role)
+        applied = applyReview(tasks, task, current, tier, 'pass', reason, routing, role, inherited)
         if (status === 'fail') applied.message += ' The rejection had no blocking finding backed by evidence, so it counts as a pass.'
       }
     } else {
-      applied = applyReview(tasks, task, current, tier, status, reason, routing, role)
+      applied = applyReview(tasks, task, current, tier, status, reason, routing, role, inherited)
     }
     meta.outcome = applied.outcome
+    if (applied.outcome === 'review') meta.floor = reviewFloor(state, task, routing, flagged)
     message = reviewLine ? `${reviewLine}\n${applied.message}` : applied.message
     meta.haikuFailure = applied.haikuFailure
     meta.sonnetEscalated = applied.sonnetEscalated === true
@@ -1505,11 +1528,34 @@ export function applyEvent(state, event, routing) {
 }
 
 const MAX_INFRA_SKIPS = 2
+const MAX_PREEXISTING_SKIPS = 1
+
+/** The CC_TIERS_VERIFY line a writer's report declares failing without its change, with the evidence; null when it names none or gives no evidence. */
+function declaredPreexisting(text) {
+  const declared = oneSpacing(parseHeaders(text || '').PREEXISTING)
+  for (const line of parseVerify(text)) {
+    const command = line.kind === 'command' ? oneSpacing(line.raw) : ''
+    if (command && declared.startsWith(`${command} - `)) return { raw: line.raw, command, evidence: clip(declared.slice(command.length + 3), 200) }
+  }
+  return null
+}
+
+/** What a writer's report and gate proved, kept until the task finishes; preexisting is the failure the writer declared it did not cause. */
+function recordEvidence(state, task, reports, gate, preexisting = null) {
+  state.evidence = state.evidence && typeof state.evidence === 'object' ? state.evidence : {}
+  state.evidence[task] = {
+    reports,
+    verified: gate ? [...gate.verified, ...gate.flaky] : [],
+    gate: gate ? { status: gate.status, verified: gate.verified, flaky: gate.flaky, unverified: gate.unverified } : null,
+    ...(preexisting ? { preexisting } : {}),
+  }
+}
 
 /** Why a pass must go to review even under CC_TIERS_REVIEW: skip, or '' when it may skip. review_policy never always wins. */
 function reviewFloor(state, task, routing, flagged) {
   if (routing.reviewPolicy === 'never') return ''
   if (flagged) return 'it changed a sensitive file the prompt did not name'
+  if (own(state.evidence, task)?.preexisting) return 'its failing check was declared pre-existing and a review must confirm it'
   const risk = own(state.log, task)?.risk
   if (risk === 'critical') return 'its risk is critical'
   if (risk && reviewRequired(risk, routing.profile)) return `the ${routing.profile} profile reviews ${risk}-risk work`
@@ -1552,6 +1598,8 @@ function finishTask(state, task, routing, { reviewed, tier }) {
     gate: evidence.gate || { status: 'missing', verified: [], flaky: [], unverified: [] },
     review: reviewed ? 'pass' : 'none',
     strictFrom: routing.policy?.strictFrom || 'medium',
+    approved: contract.approved,
+    preexisting: evidence.preexisting?.command,
   })
   if (state.contracts) delete state.contracts[task]
   if (state.evidence) delete state.evidence[task]
@@ -1595,8 +1643,12 @@ function applyResearch(state, meta, task, headers, event) {
   return { state, meta, message: `cc-tiers marked ${slugs.join(', ')} as researched.` }
 }
 
-function applyReview(tasks, task, current, tier, status, reason, routing, role) {
+/** inherited: a checker cannot confirm a failure the writer declared pre-existing, so its pass leaves the task waiting for the Opus reviewer. */
+function applyReview(tasks, task, current, tier, status, reason, routing, role, inherited = false) {
   if (status === 'pass') {
+    if (inherited) {
+      return { outcome: 'review', message: `Task ${task} passed the checker, but a failure the writer declared pre-existing needs cc-tiers:reviewer (Opus) to confirm it. Send it there.`, haikuFailure: false }
+    }
     delete tasks[task]
     const who = role === 'checker' ? 'Sonnet' : 'Opus'
     return { outcome: 'pass', message: `Task ${task} passed ${who} review. cc-tiers cleared its attempt counter.`, haikuFailure: false }
@@ -1747,6 +1799,9 @@ export function checkDelegation(state, toolInput, routing, { history = null, pro
     )
   }
   if (role === 'researcher') return pass
+  if (role === 'checker' && own(state.evidence, task)?.preexisting) {
+    return refuse(`cc-tiers: ${task} has a failure declared pre-existing; only cc-tiers:reviewer (Opus) can confirm it. Delegate the review to cc-tiers:reviewer.`)
+  }
   if (REVIEW_ROLES.has(role)) return checkReview(state, input, routing, { task, prompt, headers, scoped, projectDir })
   const writer = role === 'implementer' || role === 'architect'
   const specMissing = routing.specify && writer && !specCriteria(stripResearch(prompt)).length && !SPEC_NONE_RE.test(headers.SPEC || '')
@@ -1773,6 +1828,19 @@ export function checkDelegation(state, toolInput, routing, { history = null, pro
   }
   const held = holdContract(state, task, prompt, headers, routing)
   if (held.deny) return refuse(held.deny)
+  const routed = stripBriefs(prompt)
+  const risk = taskRisk(routed, routing, { history, projectDir })
+  // A writer at or above the configured risk needs the user's OK on the task's criteria, or a stated reason no human could answer; once the contract holds one, a retry needs no new line.
+  let approved = ''
+  if (held.commit && DELEGATED_WRITERS.has(role) && routing.contractApproval !== 'off' && riskRank(risk.level) >= riskRank(routing.contractApproval)) {
+    approved = (APPROVED_RE.exec(headers.APPROVED || '')?.[1] || '').toLowerCase()
+    if (!approved && !held.kept) {
+      return refuse(
+        `cc-tiers: ${task} is ${risk.level} risk. Show the user its acceptance criteria and get their OK (AskUserQuestion, recommended option first) before delegating it, then add CC_TIERS_APPROVED: user - <how>. ` +
+          'If no human can answer, add CC_TIERS_APPROVED: none - <reason> and say so in the final report.',
+      )
+    }
+  }
   const now = Date.now()
   const spent = taskBudgetStatus(state, task, routing, now)
   if (spent.state === 'over' && !BUDGET_OVERRIDE_RE.test(headers.BUDGET || '')) return refuse(`cc-tiers: ${budgetMessage(task, spent)}`)
@@ -1795,7 +1863,6 @@ export function checkDelegation(state, toolInput, routing, { history = null, pro
   const tasks = state.tasks || (state.tasks = {})
   let current = own(tasks, task)
   const notes = []
-  const routed = stripBriefs(prompt)
   if (current && typeof current === 'object' && TIERS.includes(current.tier)) {
     if (TIER_RANK[tier] < TIER_RANK[current.tier]) {
       return refuse(
@@ -1834,12 +1901,11 @@ export function checkDelegation(state, toolInput, routing, { history = null, pro
     }
   }
 
-  const risk = taskRisk(routed, routing, { history, projectDir })
   const effort = attemptEffort(routing, role, tier, current, routed, history, input.effort, risk)
   if (effort.note) notes.push(effort.note)
   const level = effort.level || parseEffort(input.effort) || AGENT_EFFORT[role]
   logEffort(state, task, tier, level)
-  held.commit?.()
+  held.commit?.(approved)
   noteDelegation(state, task, { role, tier, risk, effort: level, now, files: scope.files, isolated, projectDir })
   if (spent.state === 'near') notes.push(`cc-tiers: ${budgetMessage(task, spent)}`)
   if (spent.state === 'over') notes.push(`cc-tiers: ${task} is over its budget; the user approved more with CC_TIERS_BUDGET (${headers.BUDGET}).`)
@@ -1869,15 +1935,22 @@ function holdContract(state, task, prompt, headers, routing) {
     }
   }
   if (!next.criteria.length) return {}
+  // A respec that adds, drops or rewords a criterion voids the approval the old ones had.
+  const changed = stored && (weakenedCriteria(stored, next).length > 0 || next.criteria.length > stored.criteria.length)
+  const kept = stored && !(respec && changed) ? stored.approved || '' : ''
   // Stored only once the call is allowed, so a refused call never sets the criteria later attempts are held to.
-  const commit = () => {
+  const commit = (approved = '') => {
     if (stored && respec) auditState(state, `${task}: spec changed on purpose: ${String(headers.RESPEC).slice(0, 200)}`)
     if (!stored) queueEvent(state, { type: 'criteria.defined', task })
-    contracts[task] = { criteria: next.criteria.map(({ id, kind, text, mandatory, check }) => ({ id, kind, text, mandatory, check })) }
+    const now = approved || kept
+    contracts[task] = {
+      criteria: next.criteria.map(({ id, kind, text, mandatory, check }) => ({ id, kind, text, mandatory, check })),
+      ...(now ? { approved: now } : {}),
+    }
     const names = Object.keys(contracts)
     names.slice(0, Math.max(0, names.length - MAX_SEEN)).forEach((name) => delete contracts[name])
   }
-  return { commit }
+  return { commit, kept }
 }
 
 /** Measured calls and minutes, and the estimated cost so far, against the task budget in /config. */
@@ -2684,6 +2757,7 @@ export function userFromEnv(env = process.env) {
     task_budget_calls: env.CLAUDE_PLUGIN_OPTION_TASK_BUDGET_CALLS || null,
     task_budget_minutes: env.CLAUDE_PLUGIN_OPTION_TASK_BUDGET_MINUTES || null,
     budget_warn_at: env.CLAUDE_PLUGIN_OPTION_BUDGET_WARN_AT || null,
+    contract_approval: env.CLAUDE_PLUGIN_OPTION_CONTRACT_APPROVAL || null,
   }
 }
 
@@ -2829,7 +2903,8 @@ export function prepareReport(ctx, event, payload = {}, { budgetS = ctx.routing.
   // Another writer sharing the tree may save files while the command runs; its edits are not this command's.
   const writing = peek?.writing || []
   const snapshot = projectDir && !writing.length ? () => workspaceSnapshot(projectDir) : null
-  const options = { projectDir, allow: routing.verifyAllow, timeoutS: routing.verifyTimeout, budgetS, cached, snapshot }
+  const preexisting = declaredPreexisting(event.text)?.raw || ''
+  const options = { projectDir, allow: routing.verifyAllow, timeoutS: routing.verifyTimeout, budgetS, cached, snapshot, preexisting }
   if (projectDir) {
     const treeCheck = writing.length ? { treeCheck: `skipped: ${writing.join(', ')} still writing` } : {}
     return { ...event, gate: { ...runGate(event.text, options), tree, ...treeCheck } }
@@ -3002,7 +3077,7 @@ function emitEvents(state, meta, task, ctx) {
       type: 'verify.done',
       status: gate.status,
       reason,
-      gate: { verified: gate.verified?.length || 0, failed: gate.failure ? 1 : 0, unverified: gate.unverified?.length || 0, flaky: gate.flaky?.length || 0 },
+      gate: { verified: gate.verified?.length || 0, failed: gateFailure(gate) ? 1 : 0, unverified: gate.unverified?.length || 0, flaky: gate.flaky?.length || 0 },
     })
   }
   if (REVIEW_ROLES.has(meta.role)) queueEvent(state, { ...base, type: 'review.done', outcome: meta.outcome, review: meta.review })

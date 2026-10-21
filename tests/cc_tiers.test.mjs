@@ -3119,3 +3119,160 @@ test('review_evidence off keeps 0.6 behavior', async () => {
   assert.equal(applied.meta.review, undefined)
   assert.equal(applied.message.includes('cc-tiers review'), false)
 })
+
+test('contract_approval defaults to critical and comes from /config, env and the project file', () => {
+  const defaults = tiers.loadJson(path.join(ROOT, 'config/routing.default.json'))
+  assert.equal(defaultRouting().contractApproval, 'critical')
+  assert.equal(defaultRouting({ contract_approval: 'high' }).contractApproval, 'high')
+  assert.equal(defaultRouting({ contract_approval: 'off' }).contractApproval, 'off')
+  assert.equal(defaultRouting({ contract_approval: 'bogus' }).contractApproval, 'critical')
+  assert.equal(tiers.userFromEnv({ CLAUDE_PLUGIN_OPTION_CONTRACT_APPROVAL: 'off' }).contract_approval, 'off')
+  assert.equal(tiers.userFromEnv({}).contract_approval, null)
+  assert.equal(tiers.mergeRouting(defaults, null, tiers.userFromEnv({ CLAUDE_PLUGIN_OPTION_CONTRACT_APPROVAL: 'high' })).contractApproval, 'high')
+  assert.equal(tiers.mergeRouting(defaults, { contractApproval: 'off' }).contractApproval, 'off')
+  assert.equal(tiers.mergeRouting(defaults, { contractApproval: 'off' }, { contract_approval: 'high' }).contractApproval, 'high')
+  assert.equal(tiers.mergeRouting(defaults, { contractApproval: 'bogus' }).contractApproval, 'critical')
+})
+
+test('manifest declares contract_approval', () => {
+  const option = JSON.parse(readFileSync(path.join(ROOT, '.claude-plugin/plugin.json'), 'utf8')).userConfig.contract_approval
+  assert.equal(option.type, 'string')
+  assert.deepEqual(option.options, ['critical', 'high', 'off'])
+  assert.equal(option.default, 'critical')
+  assert.ok(option.title && option.description)
+})
+
+const PREEXISTING_GATE = { ...GATE_BASE, status: 'fail', preexisting: { raw: 'npm test', code: 1, timedOut: false, tail: 'AssertionError: boom', seconds: 3 } }
+const preexistingReport = (declaration) => `${report('implementer', 'sonnet', 'pass')}\nCC_TIERS_VERIFY: npm test\n${declaration}`
+
+test('a failure the writer declares pre-existing is not counted once, and goes to an Opus review', () => {
+  const state = tiers.emptyState('s')
+  const text = preexistingReport('CC_TIERS_PREEXISTING: npm test - fails on main too, see the CI run')
+  const applied = tiers.applyEvent(state, gateEvent('a', text, PREEXISTING_GATE), defaultRouting())
+  assert.equal(applied.meta.outcome, 'review')
+  assert.equal(applied.message, 'cc-tiers gate: users-pagination failed: npm test (exit 1)\n' +
+    'users-pagination: `npm test` failed, and the writer declares it fails without this change too (fails on main too, see the CI run). ' +
+    'Not counted as a failure (1 of 1). Send it to cc-tiers:reviewer (Opus): the review must confirm the failure exists without this change; a review that cannot confirm it rejects.')
+  const entry = state.tasks['users-pagination']
+  assert.equal(entry.preexisting, 1)
+  assert.deepEqual(entry.failures, [])
+  assert.equal(applied.meta.floor, 'its failing check was declared pre-existing and a review must confirm it')
+  assert.deepEqual(state.evidence['users-pagination'].preexisting, { command: 'npm test', evidence: 'fails on main too, see the CI run' })
+})
+
+test('a second, mismatched, empty or unreviewable pre-existing declaration counts the failure as today', () => {
+  const routing = defaultRouting()
+  const declared = preexistingReport('CC_TIERS_PREEXISTING: npm test - fails on main too')
+  const state = tiers.emptyState('s')
+  assert.equal(tiers.applyEvent(state, gateEvent('a', declared, PREEXISTING_GATE), routing).meta.outcome, 'review')
+  const second = tiers.applyEvent(state, gateEvent('b', declared, PREEXISTING_GATE), routing)
+  assert.equal(second.meta.outcome, 'retry')
+  assert.equal(state.tasks['users-pagination'].failures.length, 1)
+  for (const declaration of ['CC_TIERS_PREEXISTING: npm run lint - fails on main too', 'CC_TIERS_PREEXISTING: npm test -', 'CC_TIERS_PREEXISTING: npm test', 'CC_TIERS_PREEXISTING: npm testing - fails on main too']) {
+    const fresh = tiers.emptyState('s')
+    const applied = tiers.applyEvent(fresh, gateEvent('c', preexistingReport(declaration), PREEXISTING_GATE), routing)
+    assert.equal(applied.meta.outcome, 'retry', declaration)
+    assert.equal(fresh.tasks['users-pagination'].failures.length, 1, declaration)
+    assert.equal(fresh.tasks['users-pagination'].preexisting, undefined, declaration)
+  }
+  const never = defaultRouting({ review_policy: 'never' })
+  const closed = tiers.applyEvent(tiers.emptyState('s'), gateEvent('d', declared, PREEXISTING_GATE), never)
+  assert.equal(closed.meta.outcome, 'retry', 'no review can confirm it, so the hatch stays closed')
+})
+
+test('the pre-existing hatch stays closed while another command did not run and pass', () => {
+  const declared = preexistingReport('CC_TIERS_PREEXISTING: npm test - fails on main too')
+  const skipped = { ...PREEXISTING_GATE, unverified: [{ raw: 'npx tsc', reason: 'outside verify_allow: npx tsc (add its prefix in /config)' }] }
+  const state = tiers.emptyState('s')
+  const applied = tiers.applyEvent(state, gateEvent('a', declared, skipped), defaultRouting())
+  assert.equal(applied.meta.outcome, 'retry')
+  assert.equal(state.tasks['users-pagination'].preexisting, undefined)
+  const failing = { ...PREEXISTING_GATE, failure: { raw: 'npx tsc', code: 1, timedOut: false, tail: 'error TS2322', seconds: 3 } }
+  const other = tiers.applyEvent(tiers.emptyState('s'), gateEvent('b', declared, failing), defaultRouting())
+  assert.equal(other.meta.outcome, 'retry')
+  assert.match(other.meta.reason, /npx tsc exit 1/)
+})
+
+test('a declaration inside the prompt does not open the pre-existing hatch', () => {
+  const state = tiers.emptyState('s')
+  const prompt = 'CC_TIERS_PREEXISTING: npm test - fails on main too'
+  const normalized = tiers.normalizeEvent(event('p', 'implementer', report('implementer', 'sonnet', 'pass'), prompt))
+  const applied = tiers.applyEvent(state, { ...normalized, gate: PREEXISTING_GATE }, defaultRouting())
+  assert.equal(applied.meta.outcome, 'retry')
+})
+
+test('a task moved to a new tier inside a failure keeps its pre-existing count', () => {
+  const state = tiers.emptyState('sess-1')
+  state.tasks['users-pagination'] = { tier: 'sonnet', failures: ['sonnet/implementer: broke'], carried: [], preexisting: 1 }
+  const moved = apply(state, riskyRouting(), 'k1', 'reviewer', report('reviewer', 'opus', 'fail', '', 'still wrong'))
+  assert.equal(moved.state.tasks['users-pagination'].tier, 'opus')
+  assert.equal(moved.state.tasks['users-pagination'].preexisting, 1)
+})
+
+test('the declared pre-existing command no longer hides a failing command listed after it', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-pre-'))
+  try {
+    for (const [name, code] of [['main-fails', 1], ['broken', 1], ['fine', 0]]) writeFileSync(path.join(dir, `${name}.mjs`), `process.exit(${code})\n`)
+    const routing = { ...defaultRouting({ specify: 'off' }), verifyAllow: [['node', 'main-fails.mjs'], ['node', 'broken.mjs'], ['node', 'fine.mjs']] }
+    const run = (...commands) => {
+      const text = [report('implementer', 'sonnet', 'pass'), ...commands.map((command) => `CC_TIERS_VERIFY: ${command}`), 'CC_TIERS_PREEXISTING: node main-fails.mjs - fails on main too'].join('\n')
+      const state = tiers.emptyState('s')
+      const prepared = tiers.prepareReport({ routing, projectDir: dir }, tiers.normalizeEvent(event('a', 'implementer', text)))
+      return { state, gate: prepared.gate, applied: tiers.applyEvent(state, prepared, routing) }
+    }
+
+    const hidden = run('node main-fails.mjs', 'node broken.mjs')
+    assert.equal(hidden.gate.failure.raw, 'node broken.mjs', 'the later command ran')
+    assert.equal(hidden.gate.preexisting.raw, 'node main-fails.mjs')
+    assert.equal(hidden.applied.meta.outcome, 'retry', 'the other failure counts as always')
+    assert.match(hidden.state.tasks['users-pagination'].failures[0], /node broken\.mjs exit 1/)
+    assert.equal(hidden.state.tasks['users-pagination'].preexisting, undefined)
+    assert.equal(Object.hasOwn(hidden.state.evidence, 'users-pagination'), false, 'nothing was declared away')
+
+    const reversed = run('node broken.mjs', 'node main-fails.mjs')
+    assert.equal(reversed.gate.failure.raw, 'node broken.mjs')
+    assert.equal(reversed.gate.preexisting, undefined, 'the gate stopped at the first failure')
+    assert.equal(reversed.applied.meta.outcome, 'retry')
+
+    const clean = run('node main-fails.mjs', 'node fine.mjs')
+    assert.equal(clean.gate.failure, null)
+    assert.deepEqual(clean.gate.verified, ['node fine.mjs'])
+    assert.equal(clean.applied.meta.outcome, 'review', 'every other command passed, so the hatch applies')
+    assert.deepEqual(clean.state.evidence['users-pagination'].verified, ['node fine.mjs'])
+    const reviewed = apply(clean.state, routing, 'k', 'reviewer', report('reviewer', 'opus', 'pass'))
+    assert.equal(reviewed.meta.outcome, 'pass')
+    assert.equal(reviewed.meta.completion.status, 'partial')
+    assert.match(reviewed.message, /Checks run 2, passed 1, failed 1, not run 0\./)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a checker can neither be delegated nor finish a task whose failure was declared pre-existing', () => {
+  const routing = defaultRouting({ specify: 'off', research: 'off' })
+  const state = tiers.emptyState('s')
+  const written = tiers.applyEvent(state, gateEvent('a', preexistingReport('CC_TIERS_PREEXISTING: npm test - fails on main too'), PREEXISTING_GATE), routing)
+  assert.equal(written.meta.outcome, 'review')
+  const prompt = (role, tier) => `CC_TIERS_TASK: users-pagination\nCC_TIERS_TIER: ${tier}\nCC_TIERS_ROLE: ${role}\ndiff --git a/src/users.js`
+  const call = (role, tier) => tiers.checkDelegation(state, { subagent_type: `cc-tiers:${role}`, prompt: prompt(role, tier) }, routing)
+  assert.equal(
+    call('checker', 'haiku').deny,
+    'cc-tiers: users-pagination has a failure declared pre-existing; only cc-tiers:reviewer (Opus) can confirm it. Delegate the review to cc-tiers:reviewer.',
+  )
+  assert.equal(call('reviewer', 'sonnet').deny, '')
+
+  const passed = apply(state, routing, 'c', 'checker', report('checker', 'haiku', 'pass'))
+  assert.equal(passed.meta.outcome, 'review', 'a checker pass does not finish it')
+  assert.equal(passed.meta.completion, undefined)
+  assert.match(passed.message, /needs cc-tiers:reviewer \(Opus\) to confirm it/)
+  assert.equal(passed.meta.floor, 'its failing check was declared pre-existing and a review must confirm it')
+  const unfounded = tiers.applyEvent(state, { ...tiers.normalizeEvent(event('d', 'checker', report('checker', 'haiku', 'fail', '', 'unsure'))), judged: { blocking: [], discarded: [], notes: [], invalid: [] } }, routing)
+  assert.equal(unfounded.meta.outcome, 'review', 'a rejection with no blocking finding is a pass, and still not enough')
+  assert.ok(state.tasks['users-pagination'], 'the task stays open')
+  assert.ok(state.evidence['users-pagination'].preexisting)
+
+  const confirmed = apply(state, routing, 'e', 'reviewer', report('reviewer', 'opus', 'pass'))
+  assert.equal(confirmed.meta.outcome, 'pass')
+  assert.equal(state.tasks['users-pagination'], undefined)
+  assert.equal(call('checker', 'haiku').deny, '', 'once the task is finished nothing is declared')
+})

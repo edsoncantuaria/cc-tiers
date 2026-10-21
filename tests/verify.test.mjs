@@ -115,6 +115,45 @@ test('fails twice → fail with tail', () => {
   assert.equal(verify.gateMessage('booking', result), 'cc-tiers gate: booking failed: npm test (exit 1)')
 })
 
+test('a declared pre-existing failure is kept apart and the other commands still run', () => {
+  const lines = 'CC_TIERS_VERIFY: npm test\nCC_TIERS_VERIFY: node --test tests/a.test.mjs'
+  const { run, calls } = scripted({ code: 1, tail: 'main fails too' }, { code: 1, tail: 'main fails too' }, { code: 0 })
+  const result = gate(lines, run, { preexisting: 'npm test' })
+  assert.equal(result.status, 'fail')
+  assert.equal(result.failure, null, 'nothing but the declared command failed')
+  assert.deepEqual(result.preexisting, { raw: 'npm test', code: 1, timedOut: false, tail: 'main fails too', seconds: 300 })
+  assert.deepEqual(result.verified, ['node --test tests/a.test.mjs'], 'the later command ran and passed')
+  assert.deepEqual(calls.map((call) => call.cmd.raw), ['npm test', 'npm test', 'node --test tests/a.test.mjs'])
+  assert.equal(verify.gateMessage('booking', result), 'cc-tiers gate: booking verified: node --test tests/a.test.mjs\ncc-tiers gate: booking failed: npm test (exit 1)')
+
+  const other = scripted({ code: 1 }, { code: 1 }, { code: 1 }, { code: 1 })
+  const both = gate(lines, other.run, { preexisting: 'npm test' })
+  assert.equal(both.failure.raw, 'node --test tests/a.test.mjs', 'another failing command still counts')
+  assert.equal(both.preexisting.raw, 'npm test')
+  assert.equal(verify.gateFailure(both).raw, 'node --test tests/a.test.mjs')
+
+  const first = scripted({ code: 1 }, { code: 1 })
+  const reversed = gate('CC_TIERS_VERIFY: node --test tests/a.test.mjs\nCC_TIERS_VERIFY: npm test', first.run, { preexisting: 'npm test' })
+  assert.equal(reversed.failure.raw, 'node --test tests/a.test.mjs')
+  assert.equal(reversed.preexisting, undefined, 'the declared command listed after a failing one never ran')
+  assert.equal(first.calls.length, 2)
+})
+
+test('without a declaration or when the declared command passes, nothing is kept apart', () => {
+  const lines = 'CC_TIERS_VERIFY: npm test\nCC_TIERS_VERIFY: node --test tests/a.test.mjs'
+  const plain = scripted({ code: 1 }, { code: 1 }, { code: 0 })
+  const undeclared = gate(lines, plain.run)
+  assert.equal(undeclared.failure.raw, 'npm test')
+  assert.equal(undeclared.preexisting, undefined)
+  assert.equal(plain.calls.length, 2, 'the first failure stops the gate as before')
+  const other = scripted({ code: 1 }, { code: 1 })
+  assert.equal(gate(lines, other.run, { preexisting: 'node --test tests/a.test.mjs' }).failure.raw, 'npm test', 'a declaration for another command opens nothing')
+  const passing = gate(lines, scripted().run, { preexisting: 'npm test' })
+  assert.equal(passing.status, 'pass')
+  assert.equal(passing.preexisting, undefined)
+  assert.equal(verify.gateFailure(passing), null)
+})
+
 test('fails then passes → flaky and pass', () => {
   const { run, calls } = scripted({ code: 1 }, { code: 0 }, { code: 0 })
   const result = gate('CC_TIERS_VERIFY: npm test\nCC_TIERS_VERIFY: npx tsc --noEmit', run)

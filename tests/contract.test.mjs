@@ -421,3 +421,47 @@ test('a pass only the writer declared keeps confidence below high and is listed,
   assert.notEqual(result.confidence.level, 'high')
   assert.match(result.remaining.join('\n'), /npm run lint` did not run/)
 })
+
+test('completion: criteria approved as none cap the confidence at moderate and add the reason; a user approval changes nothing', () => {
+  const base = { criteria: evaluated(['pass', 'pass']), gate: gate() }
+  assert.equal(contract.completion(base).confidence.level, 'high')
+  const none = contract.completion({ ...base, approved: 'none' })
+  assert.equal(none.status, 'verified', 'the cap moves the confidence, not the status')
+  assert.equal(none.confidence.level, 'moderate')
+  assert.deepEqual(none.confidence.reasons, ['gate verified 1 command', 'criteria not approved by the user'])
+  assert.deepEqual(contract.completion({ ...base, approved: 'user' }), contract.completion(base))
+  assert.deepEqual(contract.completion({ ...base, approved: '' }), contract.completion(base))
+  const low = contract.completion({ criteria: evaluated(['pass', 'pending']), gate: gate(), approved: 'none' })
+  assert.equal(low.confidence.level, 'moderate', 'a level already at moderate stays there')
+  const unverified = contract.completion({ criteria: evaluated(['pending']), approved: 'none' })
+  assert.equal(unverified.confidence.level, 'low', 'the cap never raises a level')
+})
+
+test('completion: a failing check the writer declared pre-existing is reported, never verified, and never failed on its own', () => {
+  const failing = gate({ status: 'fail', verified: [], failure: { raw: 'npm test' } })
+  const counted = contract.completion({ criteria: evaluated(['pass']), gate: failing })
+  assert.equal(counted.status, 'failed')
+  const inherited = contract.completion({ criteria: evaluated(['pass']), gate: failing, preexisting: 'npm test' })
+  assert.equal(inherited.status, 'partial')
+  assert.equal(inherited.checks.failed, 1)
+  assert.deepEqual(inherited.confidence.reasons, ['no verified command', '`npm test` failed and was declared pre-existing'])
+  assert.equal(inherited.confidence.level, 'moderate')
+  const alone = contract.completion({ criteria: evaluated(['pending']), gate: failing, preexisting: 'npm test' })
+  assert.equal(alone.status, 'unverified')
+  const withPass = contract.completion({ criteria: evaluated(['pass', 'pass']), gate: gate({ status: 'fail', failure: { raw: 'npm test' } }), preexisting: 'npm test' })
+  assert.notEqual(withPass.status, 'verified', 'other passing commands do not hide the inherited failure')
+  const reviewFailed = contract.completion({ criteria: evaluated(['pass']), gate: failing, preexisting: 'npm test', review: 'fail' })
+  assert.equal(reviewFailed.status, 'failed', 'a failed review still fails the task')
+  const passing = contract.completion({ criteria: evaluated(['pass']), gate: gate(), preexisting: 'npm test' })
+  assert.equal(passing.status, 'verified', 'a declaration with no failing gate changes nothing')
+})
+
+test('completion: the checks of an inherited failure count the commands that ran, and a criterion is not evidenced by one that did not', () => {
+  const ran = gate({ status: 'fail', verified: ['node --test tests/x.test.mjs'], preexisting: { raw: 'npm test' } })
+  const inherited = contract.completion({ criteria: evaluated(['pass']), gate: ran, preexisting: 'npm test' })
+  assert.deepEqual(inherited.checks, { run: 2, passed: 1, failed: 1, notRun: 0, flaky: 0 })
+  assert.equal(inherited.status, 'partial')
+  const report = [{ id: 'C1', state: 'pass', evidence: 'npm test' }]
+  const criteria = contract.evaluateCriteria(contract.parseContract('Criteria:\n- it paginates'), { reports: report, verified: ran.verified, reviewPassed: false })
+  assert.equal(criteria[0].evidenced, false, 'npm test failed and was not verified, so citing it proves nothing without a review')
+})

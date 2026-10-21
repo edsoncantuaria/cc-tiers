@@ -160,8 +160,10 @@ export function runCommand(cmd, { projectDir, timeoutS }) {
  * cached(raw) is true when the same command already passed on this exact tree
  * (same HEAD and dirty files): the result is reused instead of run again.
  * snapshot() returns the tree state (null outside git): a command that changes it, retry included, is not evidence.
+ * preexisting is the raw command the writer declared failing without its change: its failure is kept apart
+ * in gate.preexisting and the other commands still run; any other failure is gate.failure and stops the gate.
  */
-export function runGate(text, { projectDir, allow, timeoutS, budgetS, run = runCommand, cached = null, snapshot = null }) {
+export function runGate(text, { projectDir, allow, timeoutS, budgetS, run = runCommand, cached = null, snapshot = null, preexisting = '' }) {
   const gate = { status: 'unverified', verified: [], flaky: [], unverified: [], failure: null, cached: [] }
   const lines = parseVerify(text)
   if (!lines.length) return { ...gate, status: 'missing' }
@@ -212,7 +214,9 @@ export function runGate(text, { projectDir, allow, timeoutS, budgetS, run = runC
     if (result.timedOut && result.seconds < timeoutS) {
       exhausted(line.raw)
     } else if (result.timedOut || result.code !== 0) {
-      gate.failure = { raw: line.raw, code: result.code, timedOut: result.timedOut, tail: result.tail, seconds: result.seconds }
+      const failure = { raw: line.raw, code: result.code, timedOut: result.timedOut, tail: result.tail, seconds: result.seconds }
+      if (preexisting && line.raw === preexisting) gate.preexisting = gate.preexisting || failure
+      else gate.failure = failure
     } else {
       const changed = before ? attemptChanges(before, snapshot()) : []
       if (changed.length) {
@@ -223,9 +227,14 @@ export function runGate(text, { projectDir, allow, timeoutS, budgetS, run = runC
       }
     }
   }
-  if (gate.failure) gate.status = 'fail'
+  if (gateFailure(gate)) gate.status = 'fail'
   else if (gate.verified.length) gate.status = 'pass'
   return gate
+}
+
+/** The failure a gate reports: a counted one, else the one the writer declared pre-existing. */
+export function gateFailure(gate) {
+  return gate.failure || gate.preexisting || null
 }
 
 /** The gate lines the benchmark greps, one per fact; commands join with '; ' since a command never holds one. */
@@ -238,7 +247,7 @@ export function gateMessage(task, gate) {
   for (const raw of gate.flaky) lines.push(`${prefix} flaky: ${raw}`)
   for (const item of gate.unverified) lines.push(`${prefix} not validated: ${item.reason}`)
   if (gate.treeCheck) lines.push(`${prefix} tree check ${gate.treeCheck} in this tree`)
-  const failure = gate.failure
+  const failure = gateFailure(gate)
   if (failure?.timedOut) lines.push(`${prefix} timed out: ${failure.raw} after ${failure.seconds} s`)
   else if (failure) lines.push(`${prefix} failed: ${failure.raw} (exit ${failure.code ?? 'none'})`)
   return lines.join('\n')

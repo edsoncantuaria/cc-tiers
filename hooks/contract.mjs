@@ -85,7 +85,7 @@ export function parseCriterionReports(text) {
   return [...reports.values()]
 }
 
-function oneSpacing(text) {
+export function oneSpacing(text) {
   return String(text ?? '').split(/\s+/).filter(Boolean).join(' ')
 }
 
@@ -136,6 +136,8 @@ export function completion({
   gate = { status: 'missing', verified: [], flaky: [], unverified: [] },
   review = 'none',
   strictFrom = 'medium',
+  approved = '',
+  preexisting = '',
 }) {
   const mandatory = (criteria || []).filter((criterion) => criterion.mandatory)
   const ids = (state) => mandatory.filter((criterion) => criterion.state === state).map((criterion) => criterion.id)
@@ -152,14 +154,17 @@ export function completion({
   // A pass the writer only declared (or a check whose own command never ran) is a claim, not evidence.
   const declaredPass = mandatory.filter((criterion) => criterion.state === 'pass' && !criterion.evidenced).map((criterion) => criterion.id)
   const gateFailed = gate.status === 'fail'
+  // A failing command the writer declared pre-existing is reported, not counted against the change, but it never lets the task reach 'verified'.
+  const inherited = gateFailed && Boolean(preexisting)
   const hasVerified = passed.length > 0 || gate.status === 'pass'
   const strict = riskRank(risk) >= riskRank(strictFrom)
   const needsReview = riskRank(risk) >= RISK_RANK.high
 
   let status = 'unverified'
-  if (gateFailed || review === 'fail' || failedIds.length) status = 'failed'
+  if ((gateFailed && !inherited) || review === 'fail' || failedIds.length) status = 'failed'
   else if (
     hasVerified &&
+    !inherited &&
     !declaredNa.length &&
     (!strict || mandatory.every((criterion) => evidenced.includes(criterion) || (criterion.state === 'na' && criterion.evidenced))) &&
     (!needsReview || review === 'pass')
@@ -172,11 +177,16 @@ export function completion({
   if (status === 'failed' || status === 'unverified' || criticalUnreviewed) level = 'low'
   else if (status === 'verified' && !flaky.length && !unverifiable.length && !pending.length && !declaredNa.length && !declaredPass.length) level = 'high'
 
+  // Criteria no human approved cap the confidence at moderate.
+  const unapproved = approved === 'none'
+  if (unapproved && level === 'high') level = 'moderate'
+
   const reasons = []
-  if (gateFailed) reasons.push('gate failed')
+  if (gateFailed && !inherited) reasons.push('gate failed')
   else if (passed.length) reasons.push(`gate verified ${plural(passed.length, 'command')}`)
   else if (gate.status === 'pass') reasons.push('gate passed')
   else reasons.push('no verified command')
+  if (inherited) reasons.push(`\`${preexisting}\` failed and was declared pre-existing`)
   if (flaky.length) reasons.push(plural(flaky.length, 'flaky command'))
   if (review === 'fail') reasons.push('review failed')
   for (const id of failedIds) reasons.push(`criterion ${id} failed`)
@@ -185,6 +195,7 @@ export function completion({
   for (const criterion of mandatory) if (criterion.state === 'na' && !criterion.evidenced) reasons.push(`criterion ${criterion.id} n/a only as declared`)
   for (const id of declaredPass) reasons.push(`criterion ${id} passed only as declared`)
   if (criticalUnreviewed) reasons.push('critical risk without review')
+  if (unapproved) reasons.push('criteria not approved by the user')
 
   const remaining = []
   for (const criterion of mandatory) {

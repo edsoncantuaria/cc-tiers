@@ -483,3 +483,187 @@ test('the infra skip count survives an early move up a tier and a stop', () => {
   assert.equal(out.meta.outcome, 'stop')
   assert.equal(ceiling.tasks.paging.infra, 1)
 })
+
+const critical = (task, extra = '', spec = SPEC) => writer(task, extra, spec).replace('src/users.js', 'src/auth/session.js')
+const REFUSAL = (task, risk) =>
+  `cc-tiers: ${task} is ${risk} risk. Show the user its acceptance criteria and get their OK (AskUserQuestion, recommended option first) before delegating it, then add CC_TIERS_APPROVED: user - <how>. ` +
+  'If no human can answer, add CC_TIERS_APPROVED: none - <reason> and say so in the final report.'
+
+test('approval: a critical writer with criteria needs the user\'s OK or a stated none, and a retry needs no new line', () => {
+  const routing = routingWith()
+  const state = tiers.emptyState('s')
+  const refused = delegate(state, routing, 'implementer', critical('login'))
+  assert.equal(refused.deny, REFUSAL('login', 'critical'))
+  assert.equal(Object.hasOwn(state.contracts, 'login'), false, 'a refused call stores no contract')
+  assert.equal(Object.hasOwn(state.log, 'login'), false, 'a refused call leaves no log entry')
+  for (const empty of ['CC_TIERS_APPROVED:\n', 'CC_TIERS_APPROVED: user\n', 'CC_TIERS_APPROVED: user -\n', 'CC_TIERS_APPROVED: maybe - later\n']) {
+    assert.equal(delegate(state, routing, 'implementer', critical('login', empty)).deny, REFUSAL('login', 'critical'), empty)
+  }
+  assert.equal(delegate(state, routing, 'implementer', critical('login', 'CC_TIERS_APPROVED: user - AskUserQuestion, option 1\n')).deny, '')
+  assert.equal(state.contracts.login.approved, 'user')
+  tiers.releaseIdleWriters(state)
+  assert.equal(delegate(state, routing, 'implementer', critical('login')).deny, '', 'the retry of the same task needs no new line')
+  assert.equal(state.contracts.login.approved, 'user', 'the approval stays with the task')
+
+  const none = tiers.emptyState('s')
+  assert.equal(delegate(none, routing, 'implementer', critical('login', 'CC_TIERS_APPROVED: none - no human in this run\n')).deny, '')
+  assert.equal(none.contracts.login.approved, 'none')
+  const architect = tiers.emptyState('s')
+  assert.equal(delegate(architect, routing, 'architect', critical('login').replace('CC_TIERS_TIER: sonnet\nCC_TIERS_ROLE: implementer', 'CC_TIERS_TIER: opus\nCC_TIERS_ROLE: architect')).deny, REFUSAL('login', 'critical'))
+})
+
+test('approval: low and medium risk, contract_approval off and CC_TIERS_SPEC none never need a line; high needs one only when the option is high', () => {
+  const plain = tiers.emptyState('s')
+  assert.equal(delegate(plain, routingWith(), 'implementer', writer('paging')).deny, '')
+  assert.equal(plain.contracts.paging.approved, undefined, 'a task the rule does not cover stores no approval')
+  assert.equal(delegate(tiers.emptyState('s'), routingWith({ contract_approval: 'off' }), 'implementer', critical('login')).deny, '')
+  const noSpec = `${header('login', 'sonnet', 'implementer')}CC_TIERS_RESEARCH: none - x\nCC_TIERS_SPEC: none - config tweak\nFix src/auth/session.js`
+  assert.equal(delegate(tiers.emptyState('s'), routingWith(), 'implementer', noSpec).deny, '')
+
+  const high = writer('paging').replace('src/users.js', 'src/db/migrations/001.sql')
+  const probe = tiers.emptyState('s')
+  delegate(probe, routingWith({ contract_approval: 'off' }), 'implementer', high)
+  const level = probe.log.paging.risk
+  assert.ok(['high', 'critical'].includes(level), `the migration path rates ${level}`)
+  const strict = routingWith({ contract_approval: 'high' })
+  assert.equal(delegate(tiers.emptyState('s'), strict, 'implementer', high).deny, REFUSAL('paging', level))
+  assert.equal(delegate(tiers.emptyState('s'), strict, 'implementer', high.replace('CC_TIERS_RESEARCH', 'CC_TIERS_APPROVED: user - asked\nCC_TIERS_RESEARCH')).deny, '')
+  assert.equal(delegate(tiers.emptyState('s'), strict, 'implementer', writer('paging')).deny, '', 'an ordinary task is below the high threshold')
+  if (level === 'high') assert.equal(delegate(tiers.emptyState('s'), routingWith(), 'implementer', high).deny, '', 'critical-only does not ask for high risk')
+})
+
+test('completion: criteria approved as none cap the confidence at moderate and say why', () => {
+  const routing = routingWith()
+  const criteria = ['CC_TIERS_VERIFY: npm test', 'CC_TIERS_CRITERION: C1 pass - npm test', 'CC_TIERS_CRITERION: C2 pass - npm test']
+  const reviewPrompt = `${header('login', 'sonnet', 'reviewer')}${SPEC}\ndiff --git a/src/auth/session.js`
+  const finish = (approval) => {
+    const state = tiers.emptyState('s')
+    const prompt = critical('login', approval)
+    assert.equal(delegate(state, routing, 'implementer', prompt).deny, '')
+    const written = tiers.applyEvent(state, event('a1', 'implementer', report('login', 'implementer', 'sonnet', 'pass', criteria), prompt, { gate: passGate() }), routing)
+    assert.equal(written.meta.outcome, 'review')
+    tiers.releaseIdleWriters(state)
+    assert.equal(delegate(state, routing, 'reviewer', reviewPrompt).deny, '')
+    return tiers.applyEvent(state, event('a2', 'reviewer', report('login', 'reviewer', 'opus', 'pass'), reviewPrompt), routing)
+  }
+  const approved = finish('CC_TIERS_APPROVED: user - option 1\n')
+  assert.equal(approved.meta.completion.confidence, 'high')
+  assert.doesNotMatch(approved.message, /criteria not approved by the user/)
+  const none = finish('CC_TIERS_APPROVED: none - no human in this run\n')
+  assert.equal(none.meta.outcome, 'pass')
+  assert.equal(none.meta.completion.status, approved.meta.completion.status, 'the cap changes the confidence, not the status')
+  assert.equal(none.meta.completion.confidence, 'moderate')
+  assert.match(none.message, /confidence moderate \([^)]*criteria not approved by the user\)/)
+})
+
+test('pre-existing failure: not counted once, reviewed on Opus, and the task never completes as verified', () => {
+  const routing = routingWith()
+  const prompt = writer('paging')
+  const failing = { status: 'fail', verified: [], flaky: [], unverified: [], failure: null, preexisting: { raw: 'npm test', code: 1, timedOut: false, tail: 'AssertionError: boom', seconds: 3 }, cached: [] }
+  const declared = report('paging', 'implementer', 'sonnet', 'pass', ['CC_TIERS_VERIFY: npm test', 'CC_TIERS_CRITERION: C1 pass - checked by hand', 'CC_TIERS_PREEXISTING: npm test - the same test fails on main'])
+  const state = tiers.emptyState('s')
+  delegate(state, routing, 'implementer', prompt)
+  const first = tiers.applyEvent(state, event('b1', 'implementer', declared, prompt, { gate: failing }), routing)
+  assert.equal(first.meta.outcome, 'review')
+  assert.equal(state.tasks.paging.preexisting, 1)
+  assert.deepEqual(state.tasks.paging.failures, [])
+  assert.match(first.message, /`npm test` failed, and the writer declares it fails without this change too \(the same test fails on main\)\. Not counted as a failure \(1 of 1\)\. Send it to cc-tiers:reviewer \(Opus\)/)
+  assert.equal(first.meta.floor, 'its failing check was declared pre-existing and a review must confirm it')
+
+  tiers.releaseIdleWriters(state)
+  const reviewPrompt = `${header('paging', 'sonnet', 'reviewer')}CC_TIERS_SPEC_BEGIN\nCriteria:\n- The list is paginated (request)\n- Page size defaults to 20 (decided: legacy)\nCC_TIERS_SPEC_END\ndiff --git a/src/users.js`
+  assert.equal(delegate(state, routing, 'reviewer', reviewPrompt).deny, '')
+  const reviewed = tiers.applyEvent(state, event('b2', 'reviewer', report('paging', 'reviewer', 'opus', 'pass', ['CC_TIERS_REVIEW: pass']), reviewPrompt), routing)
+  assert.equal(reviewed.meta.outcome, 'pass')
+  assert.ok(reviewed.meta.completion, 'the review finishes the task with a completion')
+  assert.ok(['partial', 'unverified'].includes(reviewed.meta.completion.status), `status is ${reviewed.meta.completion.status}`)
+  assert.match(reviewed.message, /`npm test` failed and was declared pre-existing/)
+  assert.match(reviewed.message, /Checks run 1, passed 0, failed 1/)
+
+  const rejected = tiers.emptyState('s')
+  delegate(rejected, routing, 'implementer', prompt)
+  tiers.applyEvent(rejected, event('c1', 'implementer', declared, prompt, { gate: failing }), routing)
+  tiers.releaseIdleWriters(rejected)
+  delegate(rejected, routing, 'reviewer', reviewPrompt)
+  const no = tiers.applyEvent(rejected, event('c2', 'reviewer', report('paging', 'reviewer', 'opus', 'fail', ['CC_TIERS_REVIEW: fail']), reviewPrompt), routing)
+  assert.equal(no.meta.outcome, 'retry', 'a review that cannot confirm the failure rejects')
+  assert.equal(rejected.tasks.paging.failures.length, 1)
+  assert.equal(rejected.tasks.paging.preexisting, 1, 'the one skip is spent')
+})
+
+test('approval: a dispatcher call cannot store the spec around the rule, and a critical call after a lower one asks', () => {
+  const routing = routingWith()
+  const state = tiers.emptyState('s')
+  const stored = `${header('login', 'sonnet', 'dispatcher')}CC_TIERS_RESEARCH: none - x\n${SPEC}\nFix src/auth/session.js`
+  assert.equal(delegate(state, routing, 'dispatcher', stored).deny, '')
+  assert.equal(state.contracts.login.approved, undefined, 'a dispatcher call stores the spec without an approval')
+  assert.equal(delegate(state, routing, 'implementer', critical('login')).deny, REFUSAL('login', 'critical'))
+  assert.equal(delegate(state, routing, 'implementer', critical('login', 'CC_TIERS_APPROVED: user - option 1\n')).deny, '')
+  assert.equal(state.contracts.login.approved, 'user')
+
+  const lower = tiers.emptyState('s')
+  assert.equal(delegate(lower, routing, 'implementer', writer('paging')).deny, '', 'a first call below the threshold needs nothing')
+  assert.equal(lower.contracts.paging.approved, undefined)
+  tiers.releaseIdleWriters(lower)
+  assert.equal(delegate(lower, routing, 'implementer', critical('paging')).deny, REFUSAL('paging', 'critical'), 'the same task rated critical later asks')
+  assert.equal(delegate(lower, routing, 'implementer', critical('paging', 'CC_TIERS_APPROVED: none - no human in this run\n')).deny, '')
+  assert.equal(lower.contracts.paging.approved, 'none')
+})
+
+test('approval: a RESPEC that changes criteria clears the approval, and one that keeps them does not', () => {
+  const routing = routingWith()
+  const state = tiers.emptyState('s')
+  assert.equal(delegate(state, routing, 'implementer', critical('login', 'CC_TIERS_APPROVED: user - option 1\n')).deny, '')
+  const respec = (spec, extra = '') => critical('login', `CC_TIERS_RESPEC: the notes showed a criterion was wrong\n${extra}`, spec)
+  const reworded = SPEC.replace('defaults to 20', 'defaults to 25')
+  const added = SPEC.replace('CC_TIERS_SPEC_END', '- Out of range pages are empty (user)\nCC_TIERS_SPEC_END')
+  const retry = (prompt) => {
+    tiers.releaseIdleWriters(state)
+    return delegate(state, routing, 'implementer', prompt)
+  }
+  assert.equal(retry(respec(SPEC)).deny, '', 'the same criteria keep the approval')
+  assert.equal(state.contracts.login.approved, 'user')
+  for (const changed of [reworded, added]) {
+    assert.equal(retry(respec(changed)).deny, REFUSAL('login', 'critical'))
+    assert.equal(state.contracts.login.criteria.length, 2, 'a refused respec stores nothing')
+    assert.equal(state.contracts.login.criteria[1].text, 'Page size defaults to 20')
+    assert.equal(state.contracts.login.approved, 'user')
+  }
+  assert.equal(retry(respec(reworded, 'CC_TIERS_APPROVED: none - no human in this run\n')).deny, '')
+  assert.equal(state.contracts.login.criteria[1].text, 'Page size defaults to 25')
+  assert.equal(state.contracts.login.approved, 'none')
+  assert.equal(retry(critical('login', '', reworded)).deny, '', 'a plain retry of the new criteria needs no new line')
+})
+
+test('pre-existing failure: a declared command first never hides a later failure, and a checker never confirms it', () => {
+  const routing = routingWith()
+  const spec = 'CC_TIERS_SPEC_BEGIN\nCriteria:\n- The list is paginated (request)\nCC_TIERS_SPEC_END'
+  const prompt = `${header('paging', 'haiku', 'worker')}${spec}\nAdd pagination to src/users.js`
+  const text = report('paging', 'worker', 'haiku', 'pass', ['CC_TIERS_VERIFY: npm run lint', 'CC_TIERS_VERIFY: npm test', 'CC_TIERS_CRITERION: C1 pass - npm test', 'CC_TIERS_PREEXISTING: npm run lint - fails on main'])
+  const gateOf = (codes) =>
+    verify.runGate(text, { projectDir: ROOT, allow: [['npm']], timeoutS: 30, budgetS: 600, preexisting: 'npm run lint', run: (cmd) => ({ code: codes[cmd.raw], tail: 'AssertionError: x', ms: 10 }) })
+
+  const hidden = tiers.emptyState('s')
+  assert.equal(delegate(hidden, routing, 'worker', prompt).deny, '')
+  const counted = tiers.applyEvent(hidden, event('a1', 'worker', text, prompt, { gate: gateOf({ 'npm run lint': 1, 'npm test': 1 }) }), routing)
+  assert.equal(counted.meta.outcome, 'retry', 'npm test failed too, so the failure counts')
+  assert.match(hidden.tasks.paging.failures[0], /npm test exit 1/)
+  assert.equal(hidden.tasks.paging.preexisting, undefined)
+
+  const state = tiers.emptyState('s')
+  assert.equal(delegate(state, routing, 'worker', prompt).deny, '')
+  const written = tiers.applyEvent(state, event('b1', 'worker', text, prompt, { gate: gateOf({ 'npm run lint': 1, 'npm test': 0 }) }), routing)
+  assert.equal(written.meta.outcome, 'review')
+  tiers.releaseIdleWriters(state)
+  const reviewPrompt = (role, tier) => `${header('paging', tier, role)}${spec}\ndiff --git a/src/users.js`
+  assert.match(delegate(state, routing, 'checker', reviewPrompt('checker', 'haiku')).deny, /only cc-tiers:reviewer \(Opus\) can confirm it/)
+  const early = tiers.applyEvent(state, event('b2', 'checker', report('paging', 'checker', 'sonnet', 'pass'), reviewPrompt('checker', 'haiku')), routing)
+  assert.equal(early.meta.outcome, 'review')
+  assert.equal(early.meta.completion, undefined)
+  assert.equal(delegate(state, routing, 'reviewer', reviewPrompt('reviewer', 'sonnet')).deny, '')
+  const done = tiers.applyEvent(state, event('b3', 'reviewer', report('paging', 'reviewer', 'opus', 'pass'), reviewPrompt('reviewer', 'sonnet')), routing)
+  assert.equal(done.meta.outcome, 'pass')
+  assert.equal(done.meta.completion.status, 'partial')
+  assert.match(done.message, /Checks run 2, passed 1, failed 1, not run 0\./)
+  assert.match(done.message, /`npm run lint` failed and was declared pre-existing/)
+})
