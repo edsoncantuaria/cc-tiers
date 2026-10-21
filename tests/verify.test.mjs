@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, symlinkSync } from 'node:fs'
-import { mkdtemp, mkdir, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
@@ -8,6 +9,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const verify = await import(pathToFileURL(path.join(ROOT, 'hooks', 'verify.mjs')).href)
+const workspace = await import(pathToFileURL(path.join(ROOT, 'hooks', 'workspace.mjs')).href)
 
 const ALLOW = verify.parseAllow('npm test, npm run test, node --test, npx tsc, vendor/bin/phpunit')
 const PROJECT = path.join(os.tmpdir(), 'cc-tiers-verify-project')
@@ -191,6 +193,95 @@ test('only the report text counts', () => {
   assert.equal(result.status, 'missing')
   assert.equal(calls.length, 0)
   assert.equal(verify.runGate.length, 2, 'runGate takes the report text and options only')
+})
+
+/** Fake snapshots in order, one per call; a function entry runs as the call. */
+function snapshots(...states) {
+  return () => states.shift()
+}
+
+function snap(hashes) {
+  return { files: Object.keys(hashes), hashes, truncated: false }
+}
+
+test('a command that changes the tree is not verified', () => {
+  const { run } = scripted()
+  const result = gate('CC_TIERS_VERIFY: npm test', run, { snapshot: snapshots(snap({}), snap({ 'a.txt': 'h1' })) })
+  assert.equal(result.status, 'unverified')
+  assert.deepEqual(result.verified, [])
+  assert.deepEqual(result.unverified, [{ raw: 'npm test', reason: 'changed the tree: a.txt' }])
+  assert.equal(verify.gateMessage('booking', result), 'cc-tiers gate: booking not validated: changed the tree: a.txt')
+})
+
+test('gateMessage names the writers whose edits made the tree check skip', () => {
+  const { run } = scripted()
+  const result = { ...gate('CC_TIERS_VERIFY: npm test', run), treeCheck: 'skipped: a, b still writing' }
+  assert.equal(verify.gateMessage('booking', result), 'cc-tiers gate: booking verified: npm test\ncc-tiers gate: booking tree check skipped: a, b still writing in this tree')
+})
+
+test('a file already dirty and changed again by the command is caught, and only 5 paths are named', () => {
+  const { run } = scripted()
+  const edited = gate('CC_TIERS_VERIFY: npm test', run, { snapshot: snapshots(snap({ 'a.txt': 'h1' }), snap({ 'a.txt': 'h2' })) })
+  assert.equal(edited.unverified[0].reason, 'changed the tree: a.txt')
+  const many = Object.fromEntries(Array.from({ length: 8 }, (_, i) => [`f${i}`, 'h']))
+  const wide = gate('CC_TIERS_VERIFY: npm test', run, { snapshot: snapshots(snap({}), snap(many)) })
+  assert.equal(wide.unverified[0].reason, 'changed the tree: f0, f1, f2, f3, f4')
+})
+
+test('a command that leaves the tree as it was is verified', () => {
+  const { run } = scripted()
+  const tree = snap({ 'a.txt': 'h1' })
+  const result = gate('CC_TIERS_VERIFY: npm test', run, { snapshot: snapshots(tree, snap({ 'a.txt': 'h1' })) })
+  assert.equal(result.status, 'pass')
+  assert.deepEqual(result.verified, ['npm test'])
+  assert.deepEqual(result.unverified, [])
+})
+
+test('a failing command stays a failure even when it changed the tree', () => {
+  const { run } = scripted({ code: 1 }, { code: 1 })
+  const result = gate('CC_TIERS_VERIFY: npm test', run, { snapshot: snapshots(snap({}), snap({ 'a.txt': 'h1' })) })
+  assert.equal(result.status, 'fail')
+  assert.deepEqual(result.unverified, [])
+})
+
+test('the snapshot spans both runs of a flaky retry', () => {
+  const { run, calls } = scripted({ code: 1 }, { code: 0 })
+  const result = gate('CC_TIERS_VERIFY: npm test', run, { snapshot: snapshots(snap({}), snap({ 'made.txt': 'h1' })) })
+  assert.equal(calls.length, 2)
+  assert.deepEqual(result.flaky, [])
+  assert.equal(result.unverified[0].reason, 'changed the tree: made.txt')
+})
+
+test('no snapshot (outside git) or a cached pass behaves as before', () => {
+  const { run } = scripted()
+  const outside = gate('CC_TIERS_VERIFY: npm test', run, { snapshot: () => null })
+  assert.equal(outside.status, 'pass')
+  const taken = []
+  const reused = gate('CC_TIERS_VERIFY: npm test', run, { cached: () => true, snapshot: () => taken.push(1) })
+  assert.deepEqual(reused.cached, ['npm test'])
+  assert.deepEqual(taken, [], 'a cached pass takes no snapshot')
+})
+
+test('a real command that writes a file into a git repo is not verified', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-verify-git-'))
+  try {
+    const git = (...args) => spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd: dir, encoding: 'utf8' })
+    git('init', '-q')
+    await writeFile(path.join(dir, 'clean.mjs'), 'process.exit(0)\n')
+    await writeFile(path.join(dir, 'writes.mjs'), "import { writeFileSync } from 'node:fs'\nwriteFileSync('made.txt', 'x')\n")
+    git('add', '.')
+    git('commit', '-q', '-m', 'init')
+    // Plain node: a child node --test inside this test run would skip running its files.
+    const snapshot = () => workspace.workspaceSnapshot(dir)
+    const options = { projectDir: dir, allow: verify.parseAllow('node'), timeoutS: 60, budgetS: 120, snapshot }
+    const clean = verify.runGate('CC_TIERS_VERIFY: node clean.mjs', options)
+    assert.equal(clean.status, 'pass')
+    const writes = verify.runGate('CC_TIERS_VERIFY: node writes.mjs', options)
+    assert.equal(writes.status, 'unverified')
+    assert.equal(writes.unverified[0].reason, 'changed the tree: made.txt')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 })
 
 test('runCommand runs a real node command', async () => {

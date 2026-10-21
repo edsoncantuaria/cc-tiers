@@ -2783,8 +2783,14 @@ export function prepareReport(ctx, event, payload = {}, { budgetS = ctx.routing.
   if (!routing.verify) return event
   const tree = projectDir ? treeFingerprint(projectDir) : ''
   const cached = tree && peek?.cache ? (raw) => peek.cache[raw] === tree : null
-  const options = { projectDir, allow: routing.verifyAllow, timeoutS: routing.verifyTimeout, budgetS, cached }
-  if (projectDir) return { ...event, gate: { ...runGate(event.text, options), tree } }
+  // Another writer sharing the tree may save files while the command runs; its edits are not this command's.
+  const writing = peek?.writing || []
+  const snapshot = projectDir && !writing.length ? () => workspaceSnapshot(projectDir) : null
+  const options = { projectDir, allow: routing.verifyAllow, timeoutS: routing.verifyTimeout, budgetS, cached, snapshot }
+  if (projectDir) {
+    const treeCheck = writing.length ? { treeCheck: `skipped: ${writing.join(', ')} still writing` } : {}
+    return { ...event, gate: { ...runGate(event.text, options), tree, ...treeCheck } }
+  }
   // Nothing may run without a project dir; a declaration still tells missing from not validated.
   const gate = parseVerify(event.text).length ? 'unverified' : 'missing'
   return { ...event, gate: { status: gate, verified: [], flaky: [], unverified: gate === 'missing' ? [] : [{ raw: '', reason: 'no project dir' }], failure: null } }
@@ -2801,10 +2807,12 @@ function inspectWorkspace(projectDir, before, event, headers) {
   return { changed: changed.slice(0, 50), sensitive, outOfScope: declared.length ? outOfScope(changed, declared) : [] }
 }
 
-/** What prepareReport needs from the state, read before the gate runs outside the lock. */
+/** What prepareReport needs from the state, read before the gate runs outside the lock; writing names the other writers on the shared tree. */
 export function peekFor(state, event) {
   const task = slug(parseHeaders(event?.prompt || '').TASK || parseHeaders(event?.text || '').TASK || '')
-  return { snapshot: task ? own(state.snapshots, task) || null : null, cache: { ...(state.verifyCache || {}) } }
+  pruneActive(state)
+  const writing = Object.entries(state.active).filter(([name, entry]) => name !== task && !entry.isolated).map(([name]) => name)
+  return { snapshot: task ? own(state.snapshots, task) || null : null, cache: { ...(state.verifyCache || {}) }, writing }
 }
 
 /** At Stop no foreground agent can still run: only background writers stay registered. */
@@ -2841,12 +2849,17 @@ export function dropAwaiting(state, ids) {
 }
 
 /** Gates the parked passes of one Stop on one shared verify_budget, so together they fit the hook timeout. */
-export function prepareParked(ctx, parked, payload = {}, { now = Date.now } = {}) {
+export function prepareParked(ctx, parked, payload = {}, { now = Date.now, peeks = new Map() } = {}) {
   const started = now()
   return parked.map((report) => {
     const budgetS = Math.max(0, ctx.routing.verifyBudget - (now() - started) / 1000)
-    return prepareReport(ctx, { kind: 'report', id: report.id, role: report.role, prompt: '', text: report.text }, payload, { budgetS })
+    return prepareReport(ctx, { kind: 'report', id: report.id, role: report.role, prompt: '', text: report.text }, payload, { budgetS, peek: peeks.get(report.id) })
   })
+}
+
+/** The other writers on the shared tree for each parked report (read under the lock), so its gate skips the tree check like a foreground one. */
+export function peekParked(state, parked) {
+  return new Map(parked.map((report) => [report.id, { writing: peekFor(state, report).writing }]))
 }
 
 export function queueMessage(state, message) {

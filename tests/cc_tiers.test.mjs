@@ -2665,6 +2665,54 @@ test('prepareReport gates only a writer pass with a slug', () => {
   assert.deepEqual(copy.gate.unverified, [{ raw: 'none - docs only', reason: 'docs only' }])
 })
 
+test('the tree check is skipped while another non-isolated writer shares the tree', async () => {
+  const { registerActive } = await import(pathToFileURL(path.join(ROOT, 'hooks', 'parallel.mjs')).href)
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-tree-'))
+  try {
+    const git = (...args) => spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd: dir, encoding: 'utf8' })
+    git('init', '-q')
+    writeFileSync(path.join(dir, 'writes.mjs'), "import { writeFileSync } from 'node:fs'\nwriteFileSync('made.txt', 'x')\n")
+    git('add', '.')
+    git('commit', '-q', '-m', 'init')
+    const routing = { ...defaultRouting({ specify: 'off' }), verifyAllow: [['node', 'writes.mjs']] }
+    const ctx = { routing, projectDir: dir }
+    const text = `${report('implementer', 'sonnet', 'pass', 'skip')}\nCC_TIERS_VERIFY: node writes.mjs`
+    const run = (others) => {
+      rmSync(path.join(dir, 'made.txt'), { force: true })
+      const state = tiers.emptyState('s')
+      registerActive(state, { task: 'users-pagination', role: 'implementer', files: [] })
+      for (const [task, isolated] of Object.entries(others)) registerActive(state, { task, role: 'implementer', files: [], isolated })
+      const normalized = tiers.normalizeEvent(event('w', 'implementer', text))
+      const peek = tiers.peekFor(state, normalized)
+      const prepared = tiers.prepareReport(ctx, normalized, {}, { peek })
+      return { peek, gate: prepared.gate, message: tiers.applyEvent(state, prepared, routing).message }
+    }
+
+    const alone = run({})
+    assert.deepEqual(alone.peek.writing, [], 'the reporting task itself is not another writer')
+    assert.equal(alone.gate.status, 'unverified')
+    assert.equal(alone.gate.unverified[0].reason, 'changed the tree: made.txt')
+    assert.equal(alone.gate.treeCheck, undefined)
+
+    const isolated = run({ 'in-worktree': true })
+    assert.deepEqual(isolated.peek.writing, [])
+    assert.equal(isolated.gate.unverified[0].reason, 'changed the tree: made.txt')
+
+    const shared = run({ 'in-worktree': true, 'other-writer': false, 'third-writer': false })
+    assert.deepEqual(shared.peek.writing, ['other-writer', 'third-writer'])
+    assert.equal(shared.gate.status, 'pass')
+    assert.deepEqual(shared.gate.verified, ['node writes.mjs'])
+    assert.equal(shared.gate.treeCheck, 'skipped: other-writer, third-writer still writing')
+    assert.match(shared.message, /cc-tiers gate: users-pagination tree check skipped: other-writer, third-writer still writing in this tree/)
+
+    const stale = tiers.emptyState('s')
+    registerActive(stale, { task: 'gone', role: 'implementer', files: [], now: Date.now() - 3 * 60 * 60 * 1000 })
+    assert.deepEqual(tiers.peekFor(stale, tiers.normalizeEvent(event('w', 'implementer', text))).writing, [], 'a stale entry is not a writer')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('prepareReport runs outside the lock', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-'))
   try {
@@ -2821,6 +2869,43 @@ test('Stop verifies the ceiling and blocks once on failure', async () => {
     assert.equal(state.log['users-pagination'].attempts, 1)
     assert.equal(state.tasks['users-pagination'].failures.length, 1)
     assert.equal(runHook('stop.mjs', { ...payload, stop_hook_active: true }, env).stdout, '')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('Stop skips the tree check while a background writer still runs', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const project = ceilingProject(dir)
+    writeFileSync(path.join(project, 'writes.mjs'), "import { writeFileSync } from 'node:fs'\nwriteFileSync('made.txt', 'x')\n")
+    const git = (...args) => spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd: project, encoding: 'utf8' })
+    git('init', '-q')
+    git('add', '.')
+    git('commit', '-q', '-m', 'init')
+    const env = hookEnv(dir, { CC_TIERS_CC_COST: '0', CLAUDE_PLUGIN_OPTION_VERIFY_ALLOW: 'node writes.mjs' })
+    const transcript = path.join(dir, 'main.jsonl')
+    const row = assistantRow('claude-opus-4-5', { input_tokens: 5 }, [{ type: 'text', text: CEILING('pass', '\nCC_TIERS_VERIFY: node writes.mjs') }], { id: 'm1', uuid: 'u1' })
+    writeFileSync(transcript, `${row}\n`)
+    const stop = (session, background) => {
+      rmSync(path.join(project, 'made.txt'), { force: true })
+      const state = tiers.emptyState(session)
+      if (background) {
+        state.active = { 'bg-writer': { role: 'implementer', files: ['src/x.js'], isolated: false, since: Date.now() } }
+        state.background = { 'agent-7': { role: 'implementer', prompt: 'CC_TIERS_TASK: bg-writer\nCC_TIERS_ROLE: implementer\nEdit src/x.js.', tool_use_id: 'bg7' } }
+      }
+      mkdirSync(path.join(dir, 'data'), { recursive: true })
+      writeFileSync(path.join(dir, 'data', `session-${session}.json`), JSON.stringify(state))
+      const proc = runHook('stop.mjs', { session_id: session, hook_event_name: 'Stop', transcript_path: transcript, cwd: project, stop_hook_active: true }, env)
+      assert.equal(proc.status, 0, proc.stderr)
+      return JSON.parse(proc.stdout).systemMessage
+    }
+
+    const idle = stop('idle', false)
+    assert.ok(idle.includes('cc-tiers gate: users-pagination not validated: changed the tree: made.txt'), idle)
+    const busy = stop('busy', true)
+    assert.ok(busy.includes('cc-tiers gate: users-pagination verified: node writes.mjs'), busy)
+    assert.ok(busy.includes('cc-tiers gate: users-pagination tree check skipped: bg-writer still writing in this tree'), busy)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

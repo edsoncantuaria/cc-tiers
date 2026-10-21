@@ -6,6 +6,7 @@
 import { spawnSync } from 'node:child_process'
 import { existsSync, realpathSync } from 'node:fs'
 import path from 'node:path'
+import { attemptChanges } from './workspace.mjs'
 
 const VERIFY_RE = /^CC_TIERS_VERIFY:\s*(.*?)\s*$/
 const NONE_RE = /^none\s*-\s*(\S.*)$/
@@ -25,6 +26,7 @@ const CODE_FLAGS = ['--import', '--require', '--loader', '--experimental-loader'
 const CODE_SHORT_FLAGS = ['-r', '-e', '-p', '-pe']
 const TAIL_LINES = 40
 const MAX_BUFFER = 32 * 1024 * 1024
+const MAX_CHANGED = 5
 
 /** Splits on whitespace, honoring '...' and "..." with no escapes; null on an unclosed quote. */
 function tokenize(text) {
@@ -157,8 +159,9 @@ export function runCommand(cmd, { projectDir, timeoutS }) {
 /**
  * cached(raw) is true when the same command already passed on this exact tree
  * (same HEAD and dirty files): the result is reused instead of run again.
+ * snapshot() returns the tree state (null outside git): a command that changes it, retry included, is not evidence.
  */
-export function runGate(text, { projectDir, allow, timeoutS, budgetS, run = runCommand, cached = null }) {
+export function runGate(text, { projectDir, allow, timeoutS, budgetS, run = runCommand, cached = null, snapshot = null }) {
   const gate = { status: 'unverified', verified: [], flaky: [], unverified: [], failure: null, cached: [] }
   const lines = parseVerify(text)
   if (!lines.length) return { ...gate, status: 'missing' }
@@ -194,6 +197,7 @@ export function runGate(text, { projectDir, allow, timeoutS, budgetS, run = runC
       exhausted(line.raw)
       continue
     }
+    const before = snapshot?.() ?? null
     let result = attempt(line)
     if (result.spawnError) {
       skip(line.raw, `could not start: ${line.raw} (${String(result.tail || '').trim().split(/\r?\n/).pop() || 'not found'})`)
@@ -210,8 +214,13 @@ export function runGate(text, { projectDir, allow, timeoutS, budgetS, run = runC
     } else if (result.timedOut || result.code !== 0) {
       gate.failure = { raw: line.raw, code: result.code, timedOut: result.timedOut, tail: result.tail, seconds: result.seconds }
     } else {
-      gate.verified.push(line.raw)
-      if (retried) gate.flaky.push(line.raw)
+      const changed = before ? attemptChanges(before, snapshot()) : []
+      if (changed.length) {
+        skip(line.raw, `changed the tree: ${changed.slice(0, MAX_CHANGED).join(', ')}`)
+      } else {
+        gate.verified.push(line.raw)
+        if (retried) gate.flaky.push(line.raw)
+      }
     }
   }
   if (gate.failure) gate.status = 'fail'
@@ -228,6 +237,7 @@ export function gateMessage(task, gate) {
   if (gate.cached?.length) lines.push(`${prefix} reused for the same tree: ${gate.cached.join('; ')}`)
   for (const raw of gate.flaky) lines.push(`${prefix} flaky: ${raw}`)
   for (const item of gate.unverified) lines.push(`${prefix} not validated: ${item.reason}`)
+  if (gate.treeCheck) lines.push(`${prefix} tree check ${gate.treeCheck} in this tree`)
   const failure = gate.failure
   if (failure?.timedOut) lines.push(`${prefix} timed out: ${failure.raw} after ${failure.seconds} s`)
   else if (failure) lines.push(`${prefix} failed: ${failure.raw} (exit ${failure.code ?? 'none'})`)

@@ -18,6 +18,7 @@ import {
   dropAwaiting,
   parsePayload,
   peekAwaiting,
+  peekParked,
   prepareParked,
   processReport,
   readStdin,
@@ -42,11 +43,12 @@ function main() {
     if (message) process.stdout.write(`${JSON.stringify(hookOutput('UserPromptSubmit', message))}\n`)
     return
   }
-  const { awaiting, pending } = withSession(ctx, payload, (state) => {
+  const { awaiting, peeks, pending } = withSession(ctx, payload, (state) => {
     releaseIdleWriters(state)
-    return { awaiting: peekAwaiting(state), pending: takePending(state) }
+    const parked = peekAwaiting(state)
+    return { awaiting: parked, peeks: peekParked(state, parked), pending: takePending(state) }
   })
-  const prepared = prepareParked(ctx, awaiting, payload)
+  const prepared = prepareParked(ctx, awaiting, payload, { peeks })
   // The second scan may count a new trailer; its message goes out with the gated ones. Only the counted ids leave the parked list.
   const gated = prepared.length
     ? withSession(ctx, payload, (state) => {
