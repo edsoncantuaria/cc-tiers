@@ -9,6 +9,7 @@ import { extractFiles, normalizeFile } from './base.mjs'
 export const STALE_MS = 2 * 60 * 60 * 1000
 export const DEFAULT_MAX_PARALLEL = 4
 const MAX_FILES = 40
+const MAX_DEPENDS = 200
 
 /**
  * Files a delegation touches: the CC_TIERS_FILES header when present, else the paths named in the prompt.
@@ -65,13 +66,55 @@ export function pruneActive(state, now = Date.now()) {
 }
 
 /**
+ * Keeps the dependencies each task declared (state.depends), the latest declaration per task, so a later
+ * call can see a cycle. Entries of finished tasks are dropped and the oldest go past MAX_DEPENDS.
+ */
+function rememberDepends(state, task, deps, done) {
+  const kept = state.depends && typeof state.depends === 'object' && !Array.isArray(state.depends) ? state.depends : {}
+  delete kept[task]
+  if (deps.length) kept[task] = deps
+  for (const [name, list] of Object.entries(kept)) {
+    if (!Array.isArray(list) || done(name)) delete kept[name]
+  }
+  for (const name of Object.keys(kept).slice(0, Math.max(0, Object.keys(kept).length - MAX_DEPENDS))) delete kept[name]
+  state.depends = kept
+}
+
+/** The path task -> ... -> task that follows the declared dependencies from `from`, or null when none leads back. */
+function cyclePath(depends, task, from) {
+  const seen = new Set()
+  const walk = (name, trail) => {
+    if (name === task) return [...trail, task]
+    if (seen.has(name)) return null
+    seen.add(name)
+    for (const next of Array.isArray(depends[name]) ? depends[name] : []) {
+      const found = walk(next, [...trail, name])
+      if (found) return found
+    }
+    return null
+  }
+  return walk(from, [task])
+}
+
+/**
  * Whether a writer may start now. Returns { ok, reason, conflicts }.
  * isolated writers (isolation: worktree) never conflict on files, but still count toward the cap.
+ * known(name) tells whether a slug was ever delegated or logged; a dependency it rejects can never pass.
  */
-export function checkParallel(state, { task, files, isolated = false, depends = [], maxParallel = DEFAULT_MAX_PARALLEL, done = () => false, now = Date.now() }) {
+export function checkParallel(state, { task, files, isolated = false, depends = [], maxParallel = DEFAULT_MAX_PARALLEL, done = () => false, known = () => true, now = Date.now() }) {
   pruneActive(state, now)
   const others = Object.entries(state.active).filter(([name]) => name !== task)
-  const waiting = depends.filter((name) => name !== task && !done(name))
+  const deps = depends.filter((name) => name !== task)
+  rememberDepends(state, task, deps, done)
+  const unknown = deps.find((name) => !known(name))
+  if (unknown) {
+    return { ok: false, conflicts: [], reason: `${task} depends on ${unknown}, which no delegation in this session has. Check the slug, or drop it from CC_TIERS_DEPENDS.` }
+  }
+  const waiting = deps.filter((name) => !done(name))
+  for (const name of waiting) {
+    const loop = cyclePath(state.depends, task, name)
+    if (loop) return { ok: false, conflicts: [], reason: `${task} and ${name} depend on each other (${loop.join(' -> ')}). Remove one of the CC_TIERS_DEPENDS lines.` }
+  }
   if (waiting.length) {
     return { ok: false, conflicts: [], reason: `${task} depends on ${waiting.join(', ')}, which has not passed yet. Finish it first, or drop it from CC_TIERS_DEPENDS.` }
   }

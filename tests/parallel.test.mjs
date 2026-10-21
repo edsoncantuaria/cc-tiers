@@ -56,6 +56,42 @@ test('the concurrency cap and dependencies hold a writer back', () => {
   assert.match(blocked.reason, /depends on b/)
 })
 
+test('a dependency nobody delegated is refused as unknown', () => {
+  const state = {}
+  const result = par.checkParallel(state, { task: 'c', files: [], depends: ['ghost'], known: (name) => name !== 'ghost', now: NOW })
+  assert.equal(result.ok, false)
+  assert.match(result.reason, /c depends on ghost, which no delegation in this session has/)
+  assert.match(par.checkParallel({}, { task: 'c', files: [], depends: ['a'], now: NOW }).reason, /has not passed yet/, 'without known, a dependency just waits')
+  assert.equal(par.checkParallel({}, { task: 'c', files: [], depends: ['c'], known: () => false, now: NOW }).ok, true, 'a task naming itself is ignored')
+})
+
+test('a dependency cycle is refused with its path', () => {
+  const state = {}
+  assert.match(par.checkParallel(state, { task: 'a', files: [], depends: ['b'], now: NOW }).reason, /has not passed yet/)
+  assert.deepEqual(state.depends, { a: ['b'] }, 'a refused call still records its dependencies')
+  const direct = par.checkParallel(state, { task: 'b', files: [], depends: ['a'], now: NOW })
+  assert.equal(direct.ok, false)
+  assert.match(direct.reason, /b and a depend on each other \(b -> a -> b\)/)
+  par.checkParallel(state, { task: 'b', files: [], depends: ['c'], now: NOW })
+  const third = par.checkParallel(state, { task: 'c', files: [], depends: ['a'], now: NOW })
+  assert.match(third.reason, /c and a depend on each other \(c -> a -> b -> c\)/)
+  assert.equal(par.checkParallel(state, { task: 'b', files: [], depends: [], now: NOW }).ok, true)
+  assert.deepEqual(state.depends, { a: ['b'], c: ['a'] }, 'a call without dependencies clears its own')
+})
+
+test('recorded dependencies are bounded and tolerate a malformed old state', () => {
+  const old = { depends: 'broken' }
+  assert.equal(par.checkParallel(old, { task: 'a', files: [], depends: ['b'], now: NOW }).ok, false)
+  assert.deepEqual(old.depends, { a: ['b'] })
+  const listed = { depends: { x: 'oops', y: ['z'] } }
+  par.checkParallel(listed, { task: 'a', files: [], depends: ['b'], done: (name) => name === 'y', now: NOW })
+  assert.deepEqual(listed.depends, { a: ['b'] }, 'a malformed or finished entry is dropped')
+  const many = {}
+  for (let i = 0; i < 250; i++) par.checkParallel(many, { task: `t${i}`, files: [], depends: ['x'], now: NOW })
+  assert.equal(Object.keys(many.depends).length, 200)
+  assert.ok(many.depends.t249 && !many.depends.t0, 'the oldest entries go first')
+})
+
 test('release frees the slot and stale entries are pruned', () => {
   const state = {}
   par.registerActive(state, { task: 'a', role: 'implementer', files: ['a.js'], now: NOW })
