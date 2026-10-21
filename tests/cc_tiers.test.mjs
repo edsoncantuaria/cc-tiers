@@ -459,6 +459,32 @@ test('the Opus ceiling stops', () => {
   assert.ok(second.message.includes('Opus is the last tier'))
 })
 
+test('an unverifiable failure at the attempt limit stops with a partial report instead of escalating', () => {
+  const routing = riskyRouting()
+  const reason = 'unverifiable: the repo has no test setup for the invoice export'
+  const first = apply(tiers.emptyState('sess-1'), routing, 'u1', 'implementer', report('implementer', 'sonnet', 'fail', '', reason))
+  assert.equal(first.meta.outcome, 'retry')
+  const second = apply(first.state, routing, 'u2', 'implementer', report('implementer', 'sonnet', 'fail', '', reason))
+  assert.equal(second.meta.outcome, 'stop')
+  assert.equal(second.meta.diagnosis.category, 'unverifiable')
+  assert.match(second.message, /The repo cannot exercise this failure, so a stronger tier would not help/)
+  assert.match(second.message, /report the task as partial, and name the test setup that is missing/)
+  assert.ok(!second.message.includes('next tier is opus'))
+  assert.equal(second.state.tasks['users-pagination'].tier, 'sonnet')
+  const other = apply(apply(tiers.emptyState('sess-1'), routing, 'c1', 'implementer', report('implementer', 'sonnet', 'fail', '', 'tests fail on the new route')).state, routing, 'c2', 'implementer', report('implementer', 'sonnet', 'fail', '', 'tests fail on the new route'))
+  assert.equal(other.meta.outcome, 'escalate', 'any other category still escalates')
+})
+
+test('a task moved to a new tier inside a failure keeps its infra skip count', () => {
+  const routing = riskyRouting()
+  const state = tiers.emptyState('sess-1')
+  state.tasks['users-pagination'] = { tier: 'sonnet', failures: ['sonnet/implementer: broke'], carried: [], infra: 2 }
+  const moved = apply(state, routing, 'k1', 'reviewer', report('reviewer', 'opus', 'fail', '', 'still wrong'))
+  assert.equal(moved.meta.outcome, 'retry')
+  assert.equal(moved.state.tasks['users-pagination'].tier, 'opus')
+  assert.equal(moved.state.tasks['users-pagination'].infra, 2)
+})
+
 test('a duplicate tool use is ignored', () => {
   const routing = riskyRouting()
   const text = report('implementer', 'sonnet', 'fail', '', 'once')
@@ -1475,6 +1501,53 @@ test('the light path flags a one-task trivial request only', () => {
   const context = (user) => tiers.formatSessionContext(defaultRouting(user), 'not present', { ccCost: { installed: false } })
   assert.ok(context({}).includes('When a request is one small change, cc-tiers says so too'))
   assert.ok(context({ light_path: 'delegate' }).includes('When a request is one small change: one cc-tiers:implementer call'))
+})
+
+test('every light-path note tells the session to answer a request that only asks for an answer', () => {
+  const routing = defaultRouting()
+  const delegate = defaultRouting({ light_path: 'delegate' })
+  const answer = 'If it only asks for an answer, an explanation, a study or an opinion and changes nothing, answer it in this session: no slug, no spec, no implementer.'
+  for (const ask of ['e o Muster', 'estude o CodeShell e veja se tem algo que podemos consumir', 'how does the verify gate work?', 'fix a typo in README', 'where is fetchUser defined?', 'Add pagination to GET /users']) {
+    for (const note of [tiers.lightHint(ask, routing), tiers.lightHint(ask, delegate), tiers.lightHint(ask, routing, { conserve: true })]) {
+      if (note) assert.ok(note.endsWith(answer), ask)
+      assert.ok(!note.includes('direct path'), 'no keyword list decides that a request is a question')
+    }
+  }
+})
+
+test('the light path keeps the small and trivial notes for a change request, however it is phrased', () => {
+  const routing = defaultRouting()
+  const delegate = defaultRouting({ light_path: 'delegate' })
+  const small = (note) => note.startsWith('cc-tiers small path: this request looks like one small change.')
+  assert.ok(tiers.lightHint('Vamos fazer a Prioridade 1', routing).includes('cc-tiers small path'))
+  assert.ok(tiers.lightHint('Add pagination to GET /users', routing).includes('cc-tiers small path'))
+  assert.ok(tiers.lightHint('fix a typo in README', routing).includes('cc-tiers light path'))
+  // A question mark or a study word never changes the routing note of a change request.
+  for (const change of [
+    'corrige isso?',
+    'arruma o teste que quebrou?',
+    'ajusta o layout do header?',
+    'muda a cor do botão?',
+    'commita isso?',
+    'pode subir a versão?',
+    'pode commitar, pushar e montar a release?',
+    'analise o erro e ajuste o código',
+    'revise o PR e mescle',
+    'veja se o teste passa e conserta',
+    'can you make the button blue?',
+    'can you bump the version to 1.2?',
+    'make the tests pass?',
+    'should we move the helper to utils? do it',
+  ]) {
+    for (const note of [tiers.lightHint(change, routing), tiers.lightHint(change, delegate), tiers.lightHint(change, routing, { conserve: true })]) {
+      assert.ok(small(note), change)
+    }
+  }
+  assert.equal(tiers.lightHint('coloca um log no login?', routing), '', 'a request the small path never took stays empty')
+  for (const change of ['Estude a lib zod e migre a validação do formulário de cadastro para ela', 'Which file has the bug? Clean it up.', 'por que esse teste falha? deixa ele verde', 'when you get a chance, convert the config to yaml']) {
+    const note = tiers.lightHint(change, routing)
+    assert.ok(note === '' || note.startsWith('cc-tiers small path') || note.startsWith('cc-tiers light path'), change)
+  }
 })
 
 test('the hooks set effort on the call and add the light path on prompt submit', async () => {
