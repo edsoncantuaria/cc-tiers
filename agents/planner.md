@@ -20,5 +20,6 @@ For each task give:
 - Acceptance: the command or check that proves it
 - Review: `checker`, `reviewer`, or `no`. Use `reviewer` for auth, payments, migrations, schemas, public APIs, security, concurrency, or a change across packages.
 - Order: which tasks depend on which
+- Files: the files each task may edit, as `CC_TIERS_FILES: a, b`, and its prerequisites as `CC_TIERS_DEPENDS: <slug>, <slug>`; the dispatcher uses them to run independent writers in parallel
 
 Settle design questions in the brief, so the implementer does not have to invent them. Keep the plan short. If the request is really one ordinary task, say so in one line and give that single task.
