@@ -104,6 +104,8 @@ When a task needs no criteria (a mechanical edit, a lookup), add `CC_TIERS_SPEC:
 
 The block also accepts `Preserve:`, `Checks:`, `Security:`, `Evidence:`, and `Ambiguous:`. A `Checks:` line holds a backticked command: ``- `npm test` passes (repo: package.json)``. cc-tiers stores the block at the first delegation, so a retry or an escalation keeps it, and dropping or weakening a criterion is refused unless the prompt carries `CC_TIERS_RESPEC: <reason>`.
 
+Bug flow: failure, reproduce, research when useful, fix, rerun the test, run the regression checks, review. A new test is required only when it is viable and relevant. For a bug that can be reproduced in code, add a `Repro:` section to the block with the command that reproduces it: ``- `node --test tests/x.test.mjs` fails before the fix with <message> (request)``. Skip it for an infrastructure, environment or flaky failure or a bug that cannot be reproduced; validate that fix by other means, in proportion to the risk. Paste the same block, `Repro:` included, into the review prompt.
+
 ## Delegation prompt
 
 Start every delegation with this header, then the task, the acceptance check, and any failure notes:
@@ -143,6 +145,8 @@ CC_TIERS_ROLE: orchestrator
 and close it, after you ran the focused tests, with the same three lines plus one `CC_TIERS_VERIFY: <command>` line per command you ran (or `CC_TIERS_VERIFY: none - <reason>` when no command can check the change), then `CC_TIERS_STATUS: pass|fail` and `CC_TIERS_REASON: <one line>`. cc-tiers counts that trailer and charges the tokens in between to the task. The hook re-runs the commands without a shell: no `;`, `|`, `&`, `>`, `<`, backtick, `$`, `(` or `)`; only a leading `cd <relative dir> && ` and leading `KEY=value` are allowed. A pass with no line counts as a failure.
 
 Before that trailer, report each spec criterion as `CC_TIERS_CRITERION: <id> pass|fail|unverifiable|na - <evidence>`, with ids `C1`, `C2` in spec order. A mandatory criterion reported `fail` turns a pass into a fail. A check criterion counts as evidenced only when its own command ran in `CC_TIERS_VERIFY`, and a pass that is only declared lowers confidence.
+
+When the spec has a `Repro:` criterion, your own Opus attempt follows the writer rule: write or find that test first and run it before you change code, and report how it failed as ``CC_TIERS_REPRO: `<command>` - <failure before the fix>`` before the criterion lines. Then make the smallest fix, run the same command again, and list it in `CC_TIERS_VERIFY`. Never weaken, skip or delete the reproducing test to make it pass. When the bug cannot be reproduced, report `CC_TIERS_REPRO: none - <reason>`.
 
 On Opus, follow the same rules as `cc-tiers:architect`: reuse before you write (never fork a copy), the API of the version in use, the file's conventions, only the lines the task needs, no hypothetical protection, one-line comments, stop when the verification passes.
 

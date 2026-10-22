@@ -95,3 +95,34 @@ test('session prompts run failure research before a retry and keep the old rule'
     assert.ok(text.includes('do not research again unless the failure notes show the brief was wrong'), `${file} keeps the old research rule`)
   }
 })
+
+test('session prompts state the bug flow and the Repro: section', () => {
+  for (const file of ['agents/orchestrator.md', 'agents/dispatcher.md', 'skills/tiers/SKILL.md']) {
+    const text = read(file)
+    for (const needle of ['failure, reproduce, research when useful, fix, rerun the test, run the regression checks, review', 'only when it is viable and relevant', 'add a `Repro:` section', 'fails before the fix with', 'infrastructure, environment or flaky failure', '`Repro:` included, into the review prompt', 'CC_TIERS_REPRO: none - <reason>']) {
+      assert.ok(text.includes(needle), `${file} mentions ${needle}`)
+    }
+    assert.ok(/never weaken, skip or delete the reproducing test/i.test(text), `${file} never weakens the reproducing test`)
+    assert.ok(text.includes('A bug fix adds or extends the reproducing test'), `${file} keeps the small path test rule`)
+  }
+  for (const file of ['agents/orchestrator.md', 'skills/tiers/SKILL.md']) assert.ok(read(file).includes('your own Opus attempt follows the writer rule'), `${file} applies the rule to the Opus attempt`)
+})
+
+test('writers reproduce a bug before the fix and never weaken the test', () => {
+  for (const file of ['agents/implementer.md', 'agents/architect.md', 'agents/worker.md']) {
+    const text = read(file)
+    for (const needle of ['`Repro:` criterion', 'write or find that test first', 'before you change any code', 'CC_TIERS_REPRO: `<command>` - <failure before the fix>', 'run the same command again', 'list it in `CC_TIERS_VERIFY`', 'Never weaken, skip or delete the reproducing test', 'CC_TIERS_REPRO: none - <reason>']) {
+      assert.ok(text.includes(needle), `${file} mentions ${needle}`)
+    }
+  }
+})
+
+test('review prompts run the mutant check with the Repro command', () => {
+  for (const file of ['agents/reviewer.md', 'agents/checker.md']) {
+    const text = read(file)
+    assert.ok(text.includes('Mutant check: when the change adds or edits a test meant to cover the fix'), `${file} keeps the mutant check`)
+    for (const needle of ['`Repro:` criterion, the mutant check uses its command', 'where it must fail', 'where it must pass', 'weakened, skipped or deleted', 'a reason other than the bug', 'blocking `correctness` finding']) {
+      assert.ok(text.includes(needle), `${file} mentions ${needle}`)
+    }
+  }
+})
