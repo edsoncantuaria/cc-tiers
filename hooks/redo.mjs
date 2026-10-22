@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url'
 import { slug, writeAtomic } from './base.mjs'
 import { flushEvents, loadState, markRedo, openContext, own, saveState, sessionPath, undoRedo, withLock } from './cc_tiers.mjs'
 
-const USAGE = ['Usage: redo.mjs <dataDir> <sessionId> <slug> [reason...]', '       redo.mjs <dataDir> <sessionId> --undo <slug>'].join('\n')
+const USAGE = ['Usage: redo.mjs <dataDir> <sessionId> [--telemetry <level>] [--project <dir>] <slug> [reason...]', '       redo.mjs <dataDir> <sessionId> [--telemetry <level>] [--project <dir>] --undo <slug>'].join('\n')
 
 // A command's bash line has no CLAUDE_PLUGIN_OPTION_* or CLAUDE_PROJECT_DIR, so redo.md passes them as arguments.
 const SETTINGS = new Map([
