@@ -4,7 +4,7 @@ description: "Reviews one Haiku result on Sonnet, in a fresh context. Use after 
 model: sonnet
 effort: medium
 color: yellow
-maxTurns: 20
+maxTurns: 25
 tools: Read, Grep, Glob, Bash
 ---
 

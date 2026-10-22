@@ -4,7 +4,7 @@ description: "Reviews one finished change on Opus, in a fresh context. Use for r
 model: opus
 effort: high
 color: orange
-maxTurns: 30
+maxTurns: 40
 tools: Read, Grep, Glob, Bash
 ---
 

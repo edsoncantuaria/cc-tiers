@@ -457,7 +457,9 @@ test('the Opus ceiling stops', () => {
   state.tasks['users-pagination'].failures = []
   const first = apply(state, routing, 'r1', 'reviewer', report('reviewer', 'opus', 'fail', '', 'still wrong'))
   assert.ok(first.message.includes('Retry on opus'))
-  const second = apply(first.state, routing, 'r2', 'reviewer', report('reviewer', 'opus', 'fail', '', 'still wrong again'))
+  // One writer attempt fails once: the second rejection judges a new Opus attempt.
+  const retried = apply(first.state, routing, 'a1', 'architect', report('architect', 'opus', 'pass'))
+  const second = apply(retried.state, routing, 'r2', 'reviewer', report('reviewer', 'opus', 'fail', '', 'still wrong again'))
   assert.ok(second.message.includes('Opus is the last tier'))
 })
 

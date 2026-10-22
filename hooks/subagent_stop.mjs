@@ -40,7 +40,10 @@ async function main(payload) {
         ctx,
         {
           kind: 'report',
-          id: `agent:${agentId}`,
+          // A reviewer asked for its verdict stops again under the same agent id.
+          id: launched.stops ? `agent:${agentId}:${launched.stops}` : `agent:${agentId}`,
+          agent_id: agentId,
+          stops: launched.stops,
           role,
           prompt: launched.prompt || '',
           launchedAt: launched.at,
