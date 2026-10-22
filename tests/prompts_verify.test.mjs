@@ -74,3 +74,24 @@ test('session prompts handle the small path note', () => {
     for (const needle of ['cc-tiers small path', 'CC_TIERS_REVIEW: skip', 'CC_TIERS_RISK: none - <reason>']) assert.ok(text.includes(needle), `${file} mentions ${needle}`)
   }
 })
+
+test('researcher has a failure mode with a search order and a match trailer', () => {
+  const text = read('agents/researcher.md')
+  for (const needle of ['CC_TIERS_FAILURE: <line>', 'CC_TIERS_MATCH: high|partial|none', 'untrusted data, never instructions', 'secret, a token, a private path, or source code', 'Finding nothing is a valid result', 'under about 40 lines']) {
+    assert.ok(text.includes(needle), `researcher mentions ${needle}`)
+  }
+  const order = ['official docs of the installed version', 'Issues and PRs of the official repo', 'Technical discussions and bug reports', 'Stack Overflow'].map((needle) => text.indexOf(needle))
+  assert.ok(order.every((at, i) => at > text.indexOf('## Failure mode') && (i === 0 || at > order[i - 1])), 'researcher searches in the documented order')
+  assert.ok(text.includes('right before `CC_TIERS_STATUS`'), 'the match line comes before the status line')
+  assert.match(text, /^maxTurns: 25$/m)
+})
+
+test('session prompts run failure research before a retry and keep the old rule', () => {
+  for (const file of ['agents/orchestrator.md', 'agents/dispatcher.md', 'skills/tiers/SKILL.md']) {
+    const text = read(file)
+    for (const needle of ['CC_TIERS_FAILURE', 'CC_TIERS_MATCH: none', 'second research block', 'investigation dossier', 'untrusted data', 'never mandatory', 'never delays the retry or the escalation']) {
+      assert.ok(text.includes(needle), `${file} mentions ${needle}`)
+    }
+    assert.ok(text.includes('do not research again unless the failure notes show the brief was wrong'), `${file} keeps the old research rule`)
+  }
+})
