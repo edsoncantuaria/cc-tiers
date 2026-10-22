@@ -256,6 +256,148 @@ test('failures carry a diagnosis; a confirmed environment failure is not counted
   assert.match(code.message, /counted a failure/, 'an assertion that quotes an environment error is a code failure')
 })
 
+const failedGate = (tail, extra = {}) => ({ status: 'fail', verified: [], flaky: [], unverified: [], cached: [], failure: { raw: 'npm test', code: 1, timedOut: false, seconds: 3, tail }, ...extra })
+const CANNOT_FIND = "Error: Cannot find module 'left-pad'\n    at Module._resolveFilename (node:internal/modules/cjs/loader:1:1)"
+
+test('a declared package absent from the tree is an environment failure: not counted, same cap and counter as infra', () => {
+  const routing = routingWith()
+  const prompt = writer('paging')
+  const text = report('paging', 'implementer', 'sonnet', 'pass', ['CC_TIERS_VERIFY: npm test'])
+  let id = 0
+  const apply = (state, gate) => tiers.applyEvent(state, event(`d${(id += 1)}`, 'implementer', text, prompt, { gate }), routing)
+  const declared = failedGate(CANNOT_FIND, { missing: { name: 'left-pad', uninstalled: true } })
+
+  const state = tiers.emptyState('s')
+  for (const count of [1, 2]) {
+    const out = apply(state, declared)
+    assert.equal(out.meta.outcome, 'infra')
+    assert.match(out.message, /failed because left-pad is declared in the project manifest but not installed/)
+    assert.match(out.message, new RegExp(`not counted as a failure \\(${count} of 2\\)\\. Install left-pad and run the same tier again`))
+    assert.equal(state.tasks.paging.infra, count)
+    assert.equal(state.tasks.paging.failures.length, 0)
+  }
+  assert.match(apply(state, declared).message, /counted a failure/, 'the cap is MAX_INFRA_SKIPS, as for infra')
+
+  const shared = tiers.emptyState('s')
+  assert.match(apply(shared, failedGate("error: 'connect ECONNREFUSED 127.0.0.1:5432'")).message, /failed on the environment, not the code/)
+  assert.match(apply(shared, declared).message, /declared in the project manifest but not installed/)
+  assert.equal(shared.tasks.paging.infra, 2)
+  assert.match(apply(shared, declared).message, /counted a failure/, 'an infra skip and a dependency skip draw from one counter')
+})
+
+test('a missing package that is not declared and absent, a missing command, or an assertion still counts', () => {
+  const routing = routingWith()
+  const prompt = writer('paging')
+  const text = report('paging', 'implementer', 'sonnet', 'pass', ['CC_TIERS_VERIFY: npm test'])
+  const counted = (gate) => {
+    const state = tiers.emptyState('s')
+    const out = tiers.applyEvent(state, event('c', 'implementer', text, prompt, { gate }), routing)
+    assert.match(out.message, /counted a failure/)
+    assert.equal(state.tasks.paging.infra, undefined)
+  }
+  counted(failedGate(CANNOT_FIND, { missing: { name: 'left-pad', uninstalled: false } }))
+  counted(failedGate(CANNOT_FIND))
+  counted(failedGate("Error: Cannot find module './left-pad'", { missing: { name: './left-pad', uninstalled: false } }))
+  counted(failedGate('zsh: command not found: phpunit'))
+  counted(failedGate(`AssertionError [ERR_ASSERTION]: expected the build to pass\n${CANNOT_FIND}`, { missing: { name: 'left-pad', uninstalled: true } }))
+})
+
+test('a failed gate command that cannot import a package is classified against the project manifest and node_modules', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-missing-'))
+  try {
+    const project = path.join(dir, 'project')
+    mkdirSync(project)
+    const write = (file, text) => writeFileSync(path.join(project, file), text)
+    // A script that prints what a runner prints on stderr, so a line does not depend on the node version.
+    const prints = (file, ...lines) => write(file, `console.error(${JSON.stringify(lines.join('\n'))})\nprocess.exit(1)\n`)
+    write('package.json', JSON.stringify({ devDependencies: { zzdeclared: '^1.0.0' } }))
+    write('declared.mjs', "import 'zzdeclared/sub'\n")
+    write('undeclared.mjs', "import 'zzundeclared'\n")
+    write('local.mjs', "import './nope.mjs'\n")
+    write('subpath.cjs', "require('zzdeclared/nope')\n")
+    prints('bare.mjs', "Error: Cannot find module 'zzdeclared'")
+    prints('assertion.mjs', 'AssertionError [ERR_ASSERTION]: expected', "Error: Cannot find module 'zzdeclared'")
+    prints('mixed.mjs', 'zsh: command not found: phpunit', "Error: Cannot find module 'zzdeclared'")
+    prints('python.mjs', "ModuleNotFoundError: No module named 'zzpydeclared'")
+    prints('dotted.mjs', "ModuleNotFoundError: No module named 'zzpydeclared.sub'")
+    write('hang.mjs', "console.error(\"Error: Cannot find module 'zzdeclared'\")\nsetTimeout(() => {}, 60000)\n")
+    write('requirements-dev.txt', 'zzpydeclared==1.0\n')
+    const names = ['declared.mjs', 'undeclared.mjs', 'local.mjs', 'subpath.cjs', 'bare.mjs', 'assertion.mjs', 'mixed.mjs', 'python.mjs', 'dotted.mjs', 'hang.mjs']
+    const routing = { ...routingWith({ verify_allow: names.map((name) => `node ${name}`).join(', ') }), verifyTimeout: 1 }
+    const run = (name) => {
+      const text = report('paging', 'implementer', 'sonnet', 'pass', [`CC_TIERS_VERIFY: node ${name}`])
+      const prepared = tiers.prepareReport({ routing, ccCost: false, projectDir: project, dataDir: '' }, event('m', 'implementer', text, writer('paging')))
+      const state = tiers.emptyState('s')
+      return { gate: prepared.gate, state, applied: tiers.applyEvent(state, prepared, routing) }
+    }
+    const skipped = (name, missing) => {
+      const out = run(name)
+      assert.deepEqual(out.gate.missing, missing, name)
+      assert.equal(out.applied.meta.outcome, 'infra', name)
+      assert.match(out.applied.message, new RegExp(`Install ${missing.name} and run`), name)
+      assert.equal(out.state.tasks.paging.failures.length, 0, name)
+    }
+    const counts = (name, missing) => {
+      const out = run(name)
+      assert.deepEqual(out.gate.missing, missing, name)
+      assert.equal(out.applied.meta.outcome, 'retry', name)
+      assert.equal(out.state.tasks.paging.infra, undefined, name)
+    }
+
+    skipped('declared.mjs', { name: 'zzdeclared', uninstalled: true })
+    skipped('bare.mjs', { name: 'zzdeclared', uninstalled: true })
+    skipped('python.mjs', { name: 'zzpydeclared', uninstalled: true })
+    counts('undeclared.mjs', { name: 'zzundeclared', uninstalled: false })
+    counts('dotted.mjs', { name: 'zzpydeclared', uninstalled: false })
+    counts('subpath.cjs', { name: 'zzdeclared', uninstalled: false })
+    const local = run('local.mjs')
+    assert.match(local.gate.missing.name, /nope\.mjs$/, 'the ESM error names the resolved path of the file')
+    assert.equal(local.gate.missing.uninstalled, false)
+    assert.equal(local.applied.meta.outcome, 'retry')
+    counts('assertion.mjs', undefined)
+    counts('mixed.mjs', undefined)
+    const hang = run('hang.mjs')
+    assert.equal(hang.gate.failure.timedOut, true)
+    assert.match(hang.gate.failure.tail, /Cannot find module 'zzdeclared'/, 'the timed-out tail names a declared package, and a timeout still counts')
+    assert.equal(hang.gate.missing, undefined)
+    assert.equal(hang.applied.meta.outcome, 'retry')
+
+    // The package is installed: a miss inside it (CJS names the subpath) or a bare miss with its directory present is the code's.
+    mkdirSync(path.join(project, 'node_modules', 'zzdeclared'), { recursive: true })
+    write('node_modules/zzdeclared/package.json', JSON.stringify({ name: 'zzdeclared', version: '1.0.0', main: 'index.js' }))
+    write('node_modules/zzdeclared/index.js', '')
+    const real = run('subpath.cjs')
+    assert.match(real.gate.failure.tail, /Cannot find module 'zzdeclared\/nope'/, 'the real require error names the subpath')
+    assert.deepEqual(real.gate.missing, { name: 'zzdeclared', uninstalled: false })
+    assert.equal(real.applied.meta.outcome, 'retry')
+    counts('bare.mjs', { name: 'zzdeclared', uninstalled: false })
+    const esm = run('declared.mjs')
+    assert.match(esm.gate.missing.name, /node_modules\/zzdeclared\/sub$/, 'the ESM error names the resolved path of the missing file')
+    assert.equal(esm.gate.missing.uninstalled, false)
+    assert.equal(esm.applied.meta.outcome, 'retry')
+    rmSync(path.join(project, 'node_modules'), { recursive: true })
+    skipped('declared.mjs', { name: 'zzdeclared', uninstalled: true })
+
+    write('package.json', JSON.stringify({ name: 'zzdeclared' }))
+    counts('declared.mjs', { name: 'zzdeclared', uninstalled: false })
+    rmSync(path.join(project, 'package.json'))
+    counts('declared.mjs', { name: 'zzdeclared', uninstalled: false })
+
+    // Past the size cap the manifest is cut, so it cannot be read and nothing is declared.
+    write('package.json', JSON.stringify({ padding: 'x'.repeat(70000), dependencies: { zzdeclared: '^1.0.0' } }))
+    counts('declared.mjs', { name: 'zzdeclared', uninstalled: false })
+
+    // A manifest that is a symlink to a file outside the project is not read.
+    const outside = path.join(dir, 'outside.json')
+    writeFileSync(outside, JSON.stringify({ dependencies: { zzdeclared: '^1.0.0' } }))
+    rmSync(path.join(project, 'package.json'))
+    symlinkSync(outside, path.join(project, 'package.json'))
+    counts('declared.mjs', { name: 'zzdeclared', uninstalled: false })
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('completion: a pass reports criteria, checks and a qualitative confidence; a failed criterion fails the pass', () => {
   const routing = routingWith({ review_policy: 'never' })
   const state = tiers.emptyState('s')

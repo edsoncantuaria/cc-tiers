@@ -4,7 +4,7 @@ import { test } from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const { FAILURE_CATEGORIES, diagnoseFailure, nextAction } = await import(pathToFileURL(path.join(ROOT, 'hooks', 'diagnose.mjs')).href)
+const { FAILURE_CATEGORIES, declaresPackage, diagnoseFailure, missingPackage, nextAction } = await import(pathToFileURL(path.join(ROOT, 'hooks', 'diagnose.mjs')).href)
 
 const fromDetail = (detail) => diagnoseFailure({ detail })
 const fromReason = (reason) => diagnoseFailure({ reason })
@@ -554,4 +554,115 @@ test('the symptom of an unverifiable diagnosis comes from the reason, never from
   assert.equal(diagnosis.category, 'unverifiable')
   assert.match(diagnosis.symptom, /payment gateway/)
   assert.equal(diagnosis.evidence, '')
+})
+
+test('missingPackage names the package a machine line says is missing, cut to what a manifest lists', () => {
+  const node = (name, bare = true) => ({ name, local: false, python: false, bare })
+  assert.deepEqual(missingPackage("Error: Cannot find module 'left-pad'"), node('left-pad'))
+  assert.deepEqual(missingPackage("Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'zz' imported from /x/a.mjs"), node('zz'))
+  assert.deepEqual(missingPackage("Error: Cannot find package 'zz'"), node('zz'))
+  assert.deepEqual(missingPackage("Error: Cannot find module 'lodash/fp'"), node('lodash', false))
+  assert.deepEqual(missingPackage("Error: Cannot find module '@scope/pkg/sub/file'"), node('@scope/pkg', false))
+  assert.deepEqual(missingPackage("Error: Cannot find module '@scope/pkg'"), node('@scope/pkg'))
+  assert.deepEqual(missingPackage("Error: Cannot find module 'socket.io'"), node('socket.io'), 'a dot is part of an npm name')
+  const python = (name, bare = true) => ({ name, local: false, python: true, bare })
+  assert.deepEqual(missingPackage("ModuleNotFoundError: No module named 'requests.adapters'"), python('requests', false))
+  assert.deepEqual(missingPackage("ModuleNotFoundError: No module named 'yaml'"), python('yaml'))
+  assert.deepEqual(missingPackage('ImportError: No module named yaml'), python('yaml'))
+})
+
+test('missingPackage marks a path, alias or subpath specifier as the project\'s own file', () => {
+  for (const specifier of ['./x', '../x', './', '..', '/abs/x.js', '~/x', '@/x', '#x', 'C:\\abs\\x.js']) {
+    assert.deepEqual(missingPackage(`Error: Cannot find module '${specifier}'`), { name: specifier, local: true, python: false, bare: false }, specifier)
+  }
+  const esm = "Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/p/nope.mjs' imported from /p/c.mjs"
+  assert.equal(missingPackage(esm).local, true)
+  assert.equal(missingPackage("Error: Cannot find module '.hidden'").local, false, 'only ./ and ../ start a relative path')
+})
+
+test('missingPackage reads only machine lines of a dependency failure', () => {
+  for (const text of ['zsh: command not found: phpunit', 'Error: spawn phpunit ENOENT', 'Error [ERR_MODULE_NOT_FOUND]', '', undefined, null, 'ok 1 - passes']) {
+    assert.equal(missingPackage(text), null, String(text))
+  }
+  // A test name or an assertion that quotes the error is not the failure.
+  assert.equal(missingPackage("not ok 1 - reports Cannot find module 'x'"), null)
+  assert.equal(missingPackage("AssertionError: expected the error\nError: Cannot find module 'x'"), null)
+  assert.equal(missingPackage("- Error: Cannot find module 'x'\n+ Error: Cannot find module 'y'"), null)
+  assert.equal(missingPackage("not ok 1 - names x\nError: Cannot find module 'left-pad'\n    at a.js:1")?.name, 'left-pad')
+})
+
+test('missingPackage is null when the output also reports a missing command', () => {
+  const module = "Error: Cannot find module 'left-pad'"
+  for (const command of ['zsh: command not found: phpunit', 'Error: spawn phpunit ENOENT']) {
+    assert.equal(missingPackage(`${command}\n${module}`), null, command)
+    assert.equal(missingPackage(`${module}\n${command}`), null, command)
+  }
+  assert.equal(missingPackage("ModuleNotFoundError: No module named 'yaml'\nsh: 1: ruff: command not found"), null)
+})
+
+test('declaresPackage finds an npm package in any dependency map of package.json and nothing else', () => {
+  const manifest = JSON.stringify({ name: 'self', dependencies: { a: '1' }, devDependencies: { b: '1' }, peerDependencies: { c: '1' }, optionalDependencies: { '@s/d': '1' }, scripts: { e: 'x' } })
+  const declared = (name) => declaresPackage({ name, local: false, python: false }, [{ file: 'package.json', text: manifest }])
+  for (const name of ['a', 'b', 'c', '@s/d']) assert.equal(declared(name), true, name)
+  for (const name of ['e', 'self', 'A', 'x']) assert.equal(declared(name), false, name)
+  for (const text of ['', '{', '[]', 'null', '{"dependencies":"a"}']) assert.equal(declaresPackage({ name: 'a', local: false, python: false }, [{ file: 'package.json', text }]), false, text)
+  assert.equal(declaresPackage({ name: 'a', local: true, python: false }, [{ file: 'package.json', text: manifest }]), false, 'a local file is never a package')
+  assert.equal(declaresPackage({ name: 'a', local: false, python: false }, []), false, 'no manifest declares nothing')
+})
+
+test('declaresPackage reads requirements lines, PEP 621 and Poetry tables for a Python import', () => {
+  const requirements = [
+    '# pins',
+    'requests>=2.0  # http',
+    'Flask[async]==2.0',
+    'numpy ; python_version < "3.9"',
+    'typing_extensions',
+    'tool @ https://example.com/tool.whl',
+    '-r base.txt',
+    '--index-url https://example.com',
+    'git+https://example.com/zed.git#egg=zed',
+  ].join('\n')
+  const python = (name) => ({ name, local: false, python: true })
+  const inRequirements = (name) => declaresPackage(python(name), [{ file: 'requirements-dev.txt', text: requirements }])
+  for (const name of ['requests', 'flask', 'Flask', 'numpy', 'typing-extensions', 'tool']) assert.equal(inRequirements(name), true, name)
+  for (const name of ['base', 'git', 'zed', 'pins', 'yaml']) assert.equal(inRequirements(name), false, name)
+  assert.equal(declaresPackage(python('yaml'), [{ file: 'requirements.txt', text: 'PyYAML==6.0' }]), false, 'a pip name that differs from the import name is not matched')
+
+  const pyproject = [
+    '[build-system]',
+    'requires = ["setuptools>=61"]',
+    '',
+    '[project]',
+    'name = "myapp"',
+    'requires-python = ">=3.9"',
+    'classifiers = [',
+    '  "Programming Language :: Python",',
+    ']',
+    'dependencies = [',
+    '  "httpx>=0.2",  # client',
+    '  "rich[jupyter]",',
+    ']',
+    '',
+    '[project.optional-dependencies]',
+    'dev = ["pytest", "ruff"]',
+    '',
+    '[dependency-groups]',
+    'docs = [',
+    '  "sphinx",',
+    ']',
+    '',
+    '[tool.poetry.dependencies]',
+    'python = "^3.9"',
+    'django = { version = "^4", extras = ["bcrypt"] }',
+    '"ruamel.yaml" = "^0.17"',
+    '',
+    '[tool.poetry.group.test.dependencies]',
+    'hypothesis = "*"',
+    '',
+    '[[tool.poetry.source]]',
+    'name = "private"',
+  ].join('\n')
+  const inPyproject = (name) => declaresPackage(python(name), [{ file: 'pyproject.toml', text: pyproject }])
+  for (const name of ['httpx', 'rich', 'pytest', 'ruff', 'sphinx', 'django', 'ruamel.yaml', 'hypothesis']) assert.equal(inPyproject(name), true, name)
+  for (const name of ['setuptools', 'myapp', 'private', 'classifiers', 'Programming', 'bcrypt']) assert.equal(inPyproject(name), false, name)
 })

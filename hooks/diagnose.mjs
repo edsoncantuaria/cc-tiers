@@ -28,8 +28,14 @@ const MAX_EVIDENCE = 300
 const MAX_EVIDENCE_LINES = 3
 
 /** What a real environment failure prints; a test name or assertion message can carry the words but not these codes. */
-const DEPENDENCY_MACHINE = /cannot find module|modulenotfounderror|err_module_not_found|no module named|command not found|spawn \S+ enoent/
+const COMMAND_MISSING = /command not found|spawn \S+ enoent/
+const DEPENDENCY_MACHINE = new RegExp(`cannot find module|cannot find package|modulenotfounderror|err_module_not_found|no module named|${COMMAND_MISSING.source}`)
 const INFRA_MACHINE = /econnrefused|enotfound|eaddrinuse|etimedout|enospc|eai_again|javascript heap out of memory|cannot connect to the docker daemon/
+
+/** The module a Node or Python import error names; a specifier that starts like a path, alias or subpath import is the project's own file. */
+const MISSING_NODE_RE = /cannot find (?:module|package) ['"]([^'"]+)['"]/i
+const MISSING_PYTHON_RE = /no module named ['"]?([\w.]+)/i
+const LOCAL_SPECIFIER_RE = /^(?:\.{1,2}(?:[\\/]|$)|[\\/~#]|@\/|[a-z]:[\\/])/i
 
 /** Only an explicit inability to test, reproduce or verify: a missing test, credentials or production alone prove nothing. */
 const CANNOT = "(?:cannot|can['’]t|can not|unable to|no way to|impossible to) (?:be )?"
@@ -238,4 +244,87 @@ export function nextAction(diagnosis, { tier, attemptsLeft } = {}) {
   if (!stronger) return { action, note }
   if (tier === 'opus') return { action: 'stop', note: `${note} Already at the top tier: stop and report.` }
   return { action: 'escalate', note: exhausted ? `Same failure again or no attempts left: move up a tier. ${note}` : note }
+}
+
+/**
+ * The package a dependency failure could not import: {name, local, python, bare}, name cut to what a manifest lists; bare when the specifier names no subpath or submodule.
+ * Null when no machine line names one, and when the output also reports a missing command: the failure is then not about the import.
+ */
+export function missingPackage(text) {
+  const rule = RULES.find((item) => item.category === 'dependency')
+  const lines = matchingLines(rule, linesOf(asText(text)), true)
+  if (lines.some((line) => COMMAND_MISSING.test(fold(line)))) return null
+  for (const line of lines) {
+    const node = MISSING_NODE_RE.exec(line)
+    if (node) {
+      const local = LOCAL_SPECIFIER_RE.test(node[1])
+      const name = node[1].split('/').slice(0, node[1].startsWith('@') ? 2 : 1).join('/')
+      return { name: local ? node[1] : name, local, python: false, bare: !local && name === node[1] }
+    }
+    const python = MISSING_PYTHON_RE.exec(line)
+    if (python) {
+      const name = python[1].split('.')[0]
+      return { name, local: false, python: true, bare: name === python[1] }
+    }
+  }
+  return null
+}
+
+const NPM_DEPENDENCY_KEYS = ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']
+const REQUIREMENT_RE = /^([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*(?:$|[;=<>!~@(])/
+const POETRY_TABLE_RE = /^tool\.poetry\.(?:group\.[^.]+\.)?(?:dev-)?dependencies$/
+const REQUIREMENT_ARRAY_TABLES = ['project.optional-dependencies', 'dependency-groups']
+/** PEP 503: the pip name and the import name compare equal across case and -, _, . */
+const pipKey = (name) => name.toLowerCase().replace(/[-_.]+/g, '-')
+
+function packageJsonNames(text) {
+  try {
+    const data = JSON.parse(text)
+    return NPM_DEPENDENCY_KEYS.flatMap((key) => Object.keys(data?.[key] ?? {}))
+  } catch {
+    return []
+  }
+}
+
+const requirementName = (spec) => REQUIREMENT_RE.exec(spec.trim())?.[1] ?? ''
+
+function requirementsNames(text) {
+  return text.split(/\r?\n/).map((line) => requirementName(line.replace(/(^|\s)#.*$/, ''))).filter(Boolean)
+}
+
+/** PEP 621 requirement arrays and Poetry dependency tables, read line by line: this is not a TOML parser. */
+function pyprojectNames(text) {
+  const names = []
+  let table = ''
+  let depth = 0
+  for (const raw of text.split(/\r?\n/)) {
+    let value = raw.replace(/(^|\s)#.*$/, '').trim()
+    if (!depth) {
+      const header = /^\[+\s*([^[\]]+?)\s*\]+$/.exec(value)
+      if (header) {
+        table = header[1]
+        continue
+      }
+      const pair = /^("[^"]+"|[\w.-]+)\s*=\s*(.*)$/.exec(value)
+      if (!pair) continue
+      if (POETRY_TABLE_RE.test(table)) {
+        names.push(pair[1].replaceAll('"', ''))
+        continue
+      }
+      if (!(table === 'project' ? pair[1] === 'dependencies' : REQUIREMENT_ARRAY_TABLES.includes(table))) continue
+      value = pair[2]
+    }
+    for (const [, double, single] of value.matchAll(/"([^"]*)"|'([^']*)'/g)) names.push(requirementName(double ?? single))
+    const outside = value.replace(/"[^"]*"|'[^']*'/g, '')
+    depth = Math.max(0, depth + outside.split('[').length - outside.split(']').length)
+  }
+  return names.filter(Boolean)
+}
+
+/** Whether a root manifest ({file, text}) declares the missing package; a pip name that differs from its import name (PyYAML, yaml) does not match. */
+export function declaresPackage({ name, local, python }, manifests) {
+  if (local) return false
+  const listed = ({ file, text }) => (file === 'package.json' ? packageJsonNames(text) : file === 'pyproject.toml' ? pyprojectNames(text) : requirementsNames(text))
+  const same = (declared) => (python ? pipKey(declared) === pipKey(name) : declared === name)
+  return manifests.some((manifest) => listed(manifest).some(same))
 }

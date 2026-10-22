@@ -22,7 +22,7 @@ import { fileURLToPath } from 'node:url'
 import { TIERS, dollars, extractFiles, writeAtomic } from './base.mjs'
 import { BUDGET_OVERRIDE_RE, budgetMessage, budgetStatus, parseTaskBudget } from './budget.mjs'
 import { completion, evaluateCriteria, oneSpacing, parseContract, parseCriterionReports, plural, weakenedCriteria } from './contract.mjs'
-import { diagnoseFailure, nextAction } from './diagnose.mjs'
+import { declaresPackage, diagnoseFailure, missingPackage, nextAction } from './diagnose.mjs'
 import { MEMORY_BEGIN, MEMORY_END, MEMORY_IGNORE, addRecord, formatRecall, loadMemory, memoryPath, recall, sanitize, saveMemory } from './memory.mjs'
 import { checkParallel, declaredFiles, pruneActive, registerActive, releaseActive } from './parallel.mjs'
 import { availableChecks, parseProfile, profileSettings, reviewRequired, selectChecks } from './policy.mjs'
@@ -1439,16 +1439,19 @@ export function applyEvent(state, event, routing) {
   if (status === 'fail' && meta.gate?.status === 'fail' && !REVIEW_ROLES.has(role)) {
     const diagnosis = diagnoseFailure({ reason: gateReason, detail: gateDetail, source: 'gate', previous: current.diagnoses || [] })
     const skipped = Number(current.infra) || 0
-    if (diagnosis.category === 'infra' && diagnosis.confirmed && skipped < MAX_INFRA_SKIPS) {
+    // A package the manifest declares but the tree lacks is the environment's; one it does not declare is the writer's own import.
+    const uninstalled = diagnosis.category === 'dependency' && meta.gate.missing?.uninstalled ? meta.gate.missing.name : ''
+    if (diagnosis.confirmed && (diagnosis.category === 'infra' || uninstalled) && skipped < MAX_INFRA_SKIPS) {
       tasks[task] = { ...current, tier: current.tier || tier, failures: current.failures || [], infra: skipped + 1 }
       meta.outcome = 'infra'
       meta.diagnosis = diagnosis
+      const cause = uninstalled ? `failed because ${uninstalled} is declared in the project manifest but not installed` : `failed on the environment, not the code (${diagnosis.symptom})`
       return {
         state,
         meta,
         message:
-          `${gateNote}cc-tiers: the check for ${task} failed on the environment, not the code (${diagnosis.symptom}). ` +
-          `It was not counted as a failure (${skipped + 1} of ${MAX_INFRA_SKIPS}). Fix the environment and run the same tier again; the next environment failure after that counts.`,
+          `${gateNote}cc-tiers: the check for ${task} ${cause}. ` +
+          `It was not counted as a failure (${skipped + 1} of ${MAX_INFRA_SKIPS}). ${uninstalled ? `Install ${uninstalled}` : 'Fix the environment'} and run the same tier again; the next environment failure after that counts.`,
       }
     }
     // A failure the writer declares the base already had: not counted once per task, and only an Opus review that confirms it lets the task finish.
@@ -2044,18 +2047,23 @@ export function reviewFocus(text) {
 const RUBRIC_FILE = '.claude/cc-tiers-rubric.md'
 const MAX_RUBRIC = 4096
 
-/** The project's review rubric as one redacted line, cut at MAX_RUBRIC bytes; '' when the file is missing, not a regular file, outside the project or unreadable. */
-function readRubric(projectDir) {
+/** The first `max` bytes of a project file; '' when it is missing, not a regular file, outside the project (symlinks followed) or unreadable. */
+function readInsideProject(projectDir, rel, max) {
   if (!projectDir) return ''
   try {
     const root = realpathSync(path.resolve(projectDir))
-    const real = realpathSync(path.join(root, RUBRIC_FILE))
+    const real = realpathSync(path.join(root, rel))
     if (!real.startsWith(root + path.sep) || !statSync(real).isFile()) return ''
     // The byte cut can split a multi-byte character: the decoder turns the stub into U+FFFD, so drop it.
-    return sanitize(readRange(real, 0, MAX_RUBRIC).toString('utf8').replace(/\uFFFD$/, ''), MAX_RUBRIC)
+    return readRange(real, 0, max).toString('utf8').replace(/\uFFFD$/, '')
   } catch {
     return ''
   }
+}
+
+/** The project's review rubric as one redacted line, cut at MAX_RUBRIC bytes. */
+function readRubric(projectDir) {
+  return sanitize(readInsideProject(projectDir, RUBRIC_FILE, MAX_RUBRIC), MAX_RUBRIC)
 }
 
 /**
@@ -2938,11 +2946,39 @@ export function prepareReport(ctx, event, payload = {}, { budgetS = ctx.routing.
   const options = { projectDir, allow: routing.verifyAllow, timeoutS: routing.verifyTimeout, budgetS, cached, snapshot, preexisting }
   if (projectDir) {
     const treeCheck = writing.length ? { treeCheck: `skipped: ${writing.join(', ')} still writing` } : {}
-    return { ...event, gate: { ...runGate(event.text, options), tree, ...treeCheck } }
+    const gate = { ...runGate(event.text, options), tree, ...treeCheck }
+    const missing = missingFromGate(gate, projectDir)
+    return { ...event, gate: missing ? { ...gate, missing } : gate }
   }
   // Nothing may run without a project dir; a declaration still tells missing from not validated.
   const gate = parseVerify(event.text).length ? 'unverified' : 'missing'
   return { ...event, gate: { status: gate, verified: [], flaky: [], unverified: gate === 'missing' ? [] : [{ raw: '', reason: 'no project dir' }], failure: null } }
+}
+
+const MAX_MANIFEST = 64 * 1024
+
+function rootRequirements(projectDir) {
+  try {
+    return readdirSync(projectDir).filter((name) => /^requirements.*\.txt$/.test(name))
+  } catch {
+    return []
+  }
+}
+
+/**
+ * The package a failed check could not import and whether the environment is what lacks it: declared in the project root manifest and its top-level package absent from the tree.
+ * A subpath or submodule miss means the package itself resolved, and Python site-packages are out of sight, so only a bare Node specifier is checked against node_modules.
+ * Null for a timeout or when no machine line names a package.
+ */
+function missingFromGate(gate, projectDir) {
+  const failure = gateFailure(gate)
+  const missing = failure?.timedOut ? null : missingPackage(failure?.tail)
+  if (!missing) return null
+  const absent = missing.bare && (missing.python || !existsSync(path.join(projectDir, 'node_modules', missing.name)))
+  if (!absent) return { name: missing.name, uninstalled: false }
+  const files = missing.python ? ['pyproject.toml', ...rootRequirements(projectDir)] : ['package.json']
+  const manifests = files.map((file) => ({ file, text: readInsideProject(projectDir, file, MAX_MANIFEST) }))
+  return { name: missing.name, uninstalled: declaresPackage(missing, manifests) }
 }
 
 /** What one writer attempt changed in the tree: sensitive files it did not name, and files outside its CC_TIERS_FILES. */
