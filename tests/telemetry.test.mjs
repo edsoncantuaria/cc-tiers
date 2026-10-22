@@ -186,6 +186,142 @@ test('renderInsights sorts by count and marks cost as estimated', () => {
   assert.ok(!text.includes('Escalation reasons'))
 })
 
+function started(task, tier, risk = 'medium') {
+  return { type: 'model.selected', task, tier, role: 'implementer', effort: 'medium', risk }
+}
+
+test('summarize groups tasks by the tier they started on and what happened next', () => {
+  const summary = summarize([
+    started('a', 'sonnet'),
+    { type: 'task.passed', task: 'a', tier: 'sonnet' },
+    started('b', 'sonnet', 'high'),
+    { type: 'failure.diagnosed', task: 'b', category: 'test' },
+    { type: 'escalated', task: 'b', because: 'test' },
+    started('b', 'opus', 'high'),
+    { type: 'task.passed', task: 'b', tier: 'opus' },
+    started('c', 'sonnet'),
+    { type: 'review.done', task: 'c', outcome: 'fail', review: { blocking: 2, discarded: 0, notes: 0 } },
+    { type: 'task.passed', task: 'c', tier: 'sonnet' },
+    started('d', 'haiku', 'low'),
+    { type: 'escalated', task: 'd', because: 'attempts' },
+    { type: 'task.stopped', task: 'd', tier: 'sonnet' },
+    started('e', 'haiku', 'low'),
+    { type: 'escalated', task: 'e', because: 'attempts' },
+    { type: 'task.passed', task: 'no-start', tier: 'sonnet' },
+    { type: 'model.selected', tier: 'opus' },
+  ])
+  assert.deepEqual(summary.hindsight.byStart, {
+    haiku: { tasks: 2, passed: 0, escalated: 2, finishedOn: { sonnet: 1, open: 1 }, stopped: 1, afterBlocking: 0 },
+    sonnet: { tasks: 3, passed: 2, escalated: 1, finishedOn: { opus: 1 }, stopped: 0, afterBlocking: 1 },
+  })
+  assert.equal(summary.tasks, 6)
+  assert.equal(summary.hindsight.overRouted, 0)
+})
+
+test('summarize flags only calm low or medium risk passes that started on opus as possibly over-routed', () => {
+  const summary = summarize([
+    started('calm-low', 'opus', 'low'),
+    { type: 'task.passed', task: 'calm-low', tier: 'opus' },
+    started('calm-medium', 'opus', 'medium'),
+    { type: 'task.passed', task: 'calm-medium', tier: 'opus' },
+    started('high', 'opus', 'high'),
+    { type: 'task.passed', task: 'high', tier: 'opus' },
+    started('blocked', 'opus', 'low'),
+    { type: 'review.done', task: 'blocked', review: { blocking: 1 } },
+    { type: 'task.passed', task: 'blocked', tier: 'opus' },
+    started('clean-review', 'opus', 'low'),
+    { type: 'review.done', task: 'clean-review', review: { blocking: 0, discarded: 1 } },
+    { type: 'task.passed', task: 'clean-review', tier: 'opus' },
+    started('diagnosed', 'opus', 'low'),
+    { type: 'failure.diagnosed', task: 'diagnosed', category: 'test' },
+    { type: 'task.passed', task: 'diagnosed', tier: 'opus' },
+    started('stopped', 'opus', 'low'),
+    { type: 'task.stopped', task: 'stopped', tier: 'opus' },
+    started('sonnet', 'sonnet', 'low'),
+    { type: 'task.passed', task: 'sonnet', tier: 'sonnet' },
+    started('open', 'opus', 'low'),
+  ])
+  assert.equal(summary.hindsight.overRouted, 3)
+  assert.equal(summary.hindsight.byStart.opus.tasks, 8)
+  assert.equal(summary.hindsight.byStart.opus.afterBlocking, 1)
+})
+
+test('renderInsights prints the hindsight table in tier order and the over-routed hint only when above 0', () => {
+  const text = renderInsights(summarize([
+    started('a', 'opus', 'low'),
+    { type: 'task.passed', task: 'a', tier: 'opus' },
+    started('b', 'haiku', 'low'),
+    { type: 'escalated', task: 'b', because: 'attempts' },
+    { type: 'task.passed', task: 'b', tier: 'sonnet' },
+    started('c', 'sonnet'),
+    { type: 'task.passed', task: 'c', tier: 'sonnet' },
+  ]))
+  assert.match(text, /### Routing in hindsight/)
+  assert.match(text, /\| started on \| tasks \| passed there \| escalated \| escalated, finished on \| stopped \| passed after blocking review \|/)
+  assert.match(text, /\| haiku \| 1 \| 0 \| 1 \| sonnet 1 \| 0 \| 0 \|\n\| sonnet \| 1 \| 1 \| 0 \| - \| 0 \| 0 \|\n\| opus \| 1 \| 1 \| 0 \| - \| 0 \| 0 \|/)
+  assert.match(text, /Possibly over-routed: 1 task\(s\) started on opus at low or medium risk/)
+  assert.match(text, /A hint to look at, not a verdict\./)
+  const calm = renderInsights(summarize([started('a', 'opus', 'high'), { type: 'task.passed', task: 'a', tier: 'opus' }]))
+  assert.match(calm, /### Routing in hindsight/)
+  assert.ok(!calm.includes('over-routed'))
+})
+
+test('reduced telemetry has no start tier, so the table is omitted and the report is unchanged', () => {
+  const summary = summarize([
+    { type: 'task.passed', task: 'a', risk: 'low', costUsd: 0.01 },
+    { type: 'task.stopped', task: 'b', risk: 'high', costUsd: 0.02 },
+    { type: 'escalated', task: 'b', because: 'attempts' },
+  ])
+  assert.deepEqual(summary.hindsight, { byStart: {}, overRouted: 0 })
+  const text = renderInsights(summary)
+  assert.ok(!text.includes('hindsight'))
+  assert.ok(!text.includes('over-routed'))
+  assert.equal(
+    text,
+    [
+      '## cc-tiers insights',
+      '',
+      '2 tasks, 3 events: 1 passed, 1 stopped, 1 escalations.',
+      'Rework: 0 of 2 tasks had a diagnosed failure.',
+      'Sample: small.',
+      '',
+      '### Escalation reasons',
+      '',
+      '| reason | count |',
+      '| --- | --- |',
+      '| attempts | 1 |',
+      '',
+      '### Cost by risk (estimated)',
+      '',
+      '| risk | tasks | estimated USD | estimated USD per task |',
+      '| --- | --- | --- | --- |',
+      '| high | 1 | $0.0200 | $0.0200 |',
+      '| low | 1 | $0.0100 | $0.0100 |',
+      '',
+      '### Confidence on passed tasks',
+      '',
+      '| confidence | count |',
+      '| --- | --- |',
+      '| unknown | 1 |',
+      '',
+      '- Fewer than 10 tasks: the figures are descriptive only and must not change routing.',
+      '',
+    ].join('\n'),
+  )
+})
+
+test('the hindsight table survives a tier named __proto__ and the real event shape on disk', (t) => {
+  assert.equal(Object.keys(summarize([started('a', '__proto__')]).hindsight.byStart).length, 1)
+  const dir = tempDir(t)
+  const file = telemetryPath(dir)
+  recordEvent(file, started('a', 'opus', 'low'))
+  recordEvent(file, { type: 'review.done', task: 'a', tier: 'opus', role: 'reviewer', outcome: 'pass', review: { blocking: 0, discarded: 0, notes: 1, invalid: 0 } })
+  recordEvent(file, { type: 'task.passed', task: 'a', tier: 'opus', role: 'reviewer', risk: 'low', costUsd: 0.5 })
+  const result = spawnSync(process.execPath, [SCRIPT, dir], { encoding: 'utf8' })
+  assert.match(result.stdout, /\| opus \| 1 \| 1 \| 0 \| - \| 0 \| 0 \|/)
+  assert.match(result.stdout, /Possibly over-routed: 1 task\(s\)/)
+})
+
 test('the script prints the report for a data dir, or says there is no telemetry', (t) => {
   const dir = tempDir(t)
   const empty = spawnSync(process.execPath, [SCRIPT, dir], { encoding: 'utf8' })
