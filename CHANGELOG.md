@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Re-asks are measured. `/cc-tiers:redo <slug> [reason]` marks a done task as sent back by the user and `/cc-tiers:redo --undo <slug>` removes one mark; the slug is looked up in the session first, then in the newest other session that has it. A prompt that names a done task of the session by its slug as a whole word and holds a complaint word (English or Portuguese) counts a re-ask too, says so, and names the `--undo` command; the prompt text is never kept. Telemetry gets `task.redone` (tier, reason clipped to 200 characters and redacted, `source` of `command` or `prompt`) and `task.redo.undone`, both kept at `telemetry: reduced`; with `telemetry: off` no event is written and the mark stays in the session state. `/cc-tiers:insights` prints `Sent back by the user: N of M tasks` with a table by finishing tier, and Real use gets a sent-back line and column. The figure is a floor, and the "Not measured" line says so. New files: `commands/redo.md` and `hooks/redo.mjs`.
+- The `writer` option (`tiers` by default, `opus`, `alternate`; environment `CLAUDE_PLUGIN_OPTION_WRITER`; `/config` only, no project key). In `opus` every new task, trivial ones included, is the session's own Opus attempt (`because: writer`; `cc-tiers:architect` in light mode), and a new `cc-tiers:worker` or `cc-tiers:implementer` call for a new task is refused; research, spec, gate, and review stay as usual. `alternate` uses `opus` on even local days and `tiers` on odd ones. A task keeps the mode it recorded first, and budget routing that conserves still starts new work on Sonnet. Telemetry records the `mode`, the session context has a `Writer:` line, and `/cc-tiers:insights` and Real use print a By writer mode table to compare the modes on real work.
+- The verify gate runs a command that is exactly one of the checks cc-tiers detected in the project, without a `verify_allow` entry, and looks through `docker exec`, `docker compose exec`, and `docker-compose exec`: the line is judged by the command inside the container, so `docker exec app vendor/bin/phpunit` runs on the default list. Only `-i`, `-t`, `-w`, and `-u` (compose: `-T`, `-w`, `-u`, `--index`) are accepted before the container; any other option makes it a plain command again, and with a leading `KEY=value` the gate does not look inside the container, because `DOCKER_HOST` and the like choose what docker runs.
+- The hook adds `Criterion ids for CC_TIERS_CRITERION lines, in spec order: C1 <text>; ...` to the context block of writer, reviewer, and checker delegations when `specify` is on, so a prompt no longer numbers the criteria.
+- A task whose review keyword is only in the text, with every named file ordinary (an extension, not a sensitive path), starts on Sonnet one effort level up instead of Opus, at risk `high` (factor `risk keyword, no sensitive file named`), and its review cannot be skipped. With no file named, a directory, a name with no extension, or a sensitive path it stays a hard start.
+- When the last writer attempt changed more than 15 files, the review delegation gets a note to review in slices: one `cc-tiers:reviewer` per group of related files plus one integration review, each with the spec block.
+
+### Changed
+
+- Only `CC_TIERS_TASK` is required in a delegation. The agent type gives the role and the tier, so `CC_TIERS_TIER` and `CC_TIERS_ROLE` lines are optional, and a review is charged to the tier that wrote the diff (the attempt waiting for its gate, then the task's counter, then the log, then a `CC_TIERS_TIER` line). Writers close with `CC_TIERS_REVIEW: pending` unless the prompt says `skip`, and the hook overrides a `skip` that a floor forbids. `CC_TIERS_RISK: none - <reason>` still waives a keyword that is only text. The Opus attempt trailer is unchanged.
+- The refusal for a command outside `verify_allow` names the command inside a wrapper and says to keep the entries already there, and the context block no longer marks a check "not on verify_allow". A `verify_allow` value still replaces the default list.
+- The reviewer has 40 turns (it had 30) and the checker 25 (it had 20).
+- README and README.pt-BR: `docker exec` is no longer something to add by hand, and Real use no longer says re-asks are not measured.
+
+### Fixed
+
+- A reviewer or checker report with no `CC_TIERS_STATUS` line but a blocking finding that holds up is a failure of the writer's tier, instead of being lost. Without such a finding it counts nothing, the task stays in review, and the note says to ask the same reviewer for its verdict with `SendMessage`; the reviewer stays registered, so its next stop is counted, foreground or background. A review's status is read from its report only, so a status line in its prompt (a pasted earlier trailer) no longer stands for a verdict.
+- A rejection belongs to the writer attempt it judged: a pass from another review of that attempt no longer clears it or finishes the task, a further rejection adds findings but not a second failure, and a task that stopped at the Opus ceiling stays stopped. The next writer report clears the mark. Idle writers no longer release a reviewer that is waiting for a verdict.
+
 ## 0.11.3 - 2026-10-22
 
 ### Changed
