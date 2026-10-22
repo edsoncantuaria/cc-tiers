@@ -11,7 +11,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { OVERHEAD, TIERS, costSummary, costTotal, dollars, formatSpend, own } from './cc_tiers.mjs'
 
-function readState(file) {
+export function readState(file) {
   try {
     const data = JSON.parse(readFileSync(file, 'utf8'))
     return data && typeof data === 'object' ? data : null
@@ -28,7 +28,7 @@ export function sessionFiles(dataDir, all) {
     .map((name) => path.join(dataDir, name))
 }
 
-function verifyCell(verify) {
+export function verifyCell(verify) {
   if (!verify) return '—'
   if (verify.flaky?.length) return 'flaky'
   if (verify.unverified?.length) return 'not validated'

@@ -673,6 +673,26 @@ A ordem de escalonamento é fixa. As frases e palavras-chave de roteamento, o li
 
 ---
 
+## 📊 Medindo o uso real
+
+O `/cc-tiers:insights` termina com uma seção **Real use**, feita dos arquivos de estado de sessão que o cc-tiers guarda (`session-*.json`), só com agregados: tarefas, quantas terminaram, em que níveis começaram e terminaram, quantas terminaram sem falha ou depois de uma, quantas escalaram e terminaram, quantas foram revisadas, as contagens de verificação e de conclusão, e o custo estimado ao lado dos mesmos tokens a preços do Opus. Os projetos aparecem como `project 1`, `project 2`, ... ordenados pelo número de tarefas, então a saída não nomeia tarefa, sessão, caminho nem projeto. Para medir um arquivo das suas próprias sessões, aponte para uma pasta de dados do plugin desse arquivo (ele lê só essa pasta, sem subpastas): `/cc-tiers:insights --sessions <dir>`.
+
+Medido no trabalho do próprio autor, de 20 a 22 de outubro de 2026, cc-tiers 0.9.0 a 0.11.1: 84 tarefas em 19 sessões, em 3 projetos. Um usuário e uma amostra pequena, então leia como descrição, não como veredito.
+
+| Uso real | Tarefas |
+| --- | --: |
+| Terminaram no Sonnet / Opus / Haiku | 33 / 45 / 0 |
+| Concluídas, de 84 | 77 |
+| Concluídas sem nenhuma falha | 57 |
+| Concluídas depois de pelo menos uma falha, pega antes da entrega | 20 |
+| Escaladas (todas concluídas) | 7 |
+| Verificação não validada | 41 |
+| Custo estimado / mesmos tokens a preços do Opus | US$ 200,78 / US$ 214,25 |
+
+Dois limites: ele não mede quantas vezes você precisou pedir de novo, e não sabe o que o Opus puro teria gasto. A coluna a preços do Opus precifica os mesmos tokens, e o Opus puro não usaria exatamente esses.
+
+---
+
 ## 📋 Requisitos
 
 - Claude Code **2.1.295+** (os seletores do `/config` usam `userConfig.options`, o hook PreToolUse usa `onFailure`, e a escada de effort usa o `effort` por chamada da 2.1.292).

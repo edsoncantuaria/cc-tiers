@@ -673,6 +673,26 @@ The escalation order is fixed. Routing phrases and keywords, the retry limit, th
 
 ---
 
+## 📊 Measuring real use
+
+`/cc-tiers:insights` ends with a **Real use** section built from the session state files cc-tiers keeps (`session-*.json`), as aggregates only: tasks, how many are done, the tiers they started and finished on, how many were done with no failure or after one, how many escalated and finished, how many were reviewed, the verify and completion counts, and the estimated cost next to the same tokens at Opus rates. Projects appear as `project 1`, `project 2`, ... ordered by task count, so the output names no task, session, path, or project. To measure an archive of your own sessions, point it at one plugin data folder of that archive (it reads that folder only, no subfolders): `/cc-tiers:insights --sessions <dir>`.
+
+Measured on the author's own work, 20 to 22 October 2026, cc-tiers 0.9.0 to 0.11.1: 84 tasks in 19 sessions across 3 projects. One user and a small sample, so read it as a description, not a verdict.
+
+| Real use | Tasks |
+| --- | --: |
+| Finished on Sonnet / Opus / Haiku | 33 / 45 / 0 |
+| Done, out of 84 | 77 |
+| Done with no failure | 57 |
+| Done after at least one failure, caught before delivery | 20 |
+| Escalated (all of them done) | 7 |
+| Verify not validated | 41 |
+| Estimated cost / same tokens at Opus rates | $200.78 / $214.25 |
+
+Two limits: it does not measure how often you had to ask again, and it does not know what plain Opus would have spent. The Opus-rate column prices the same tokens, and plain Opus would not use exactly those.
+
+---
+
 ## 📋 Requirements
 
 - Claude Code **2.1.295+** (the `/config` pickers use `userConfig.options`, the PreToolUse hook sets `onFailure`, and the effort ladder uses the per-call `effort` from 2.1.292).

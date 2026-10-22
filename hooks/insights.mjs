@@ -3,12 +3,15 @@
  * `/cc-tiers:insights` helper. Reads the telemetry events cc-tiers keeps in the
  * plugin data directory and prints what they show: outcomes, failure categories,
  * escalation reasons, estimated cost by risk, unverified gates and how each start
- * tier fared. It only describes: it never proposes or applies a routing change.
+ * tier fared. A "Real use" section does the same for the session state files, as
+ * aggregates only. It only describes: it never proposes or applies a routing change.
  */
 
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { TIERS } from './base.mjs'
+import { OVERHEAD, costTotal, own } from './cc_tiers.mjs'
+import { readState, sessionFiles, verifyCell } from './report.mjs'
 import { readEvents, telemetryPath } from './telemetry.mjs'
 
 function bump(map, key) {
@@ -193,9 +196,155 @@ export function renderInsights(summary) {
   return `${lines.join('\n')}\n`
 }
 
+const COMPLETIONS = ['verified', 'partial', 'failed', 'unverified']
+const UNKNOWN_PROJECT = 'unknown project'
+
+function tierOf(value) {
+  return TIERS.includes(value) ? value : 'unknown'
+}
+
+function projectRow() {
+  return { tasks: 0, finishedOn: {}, clean: 0, usd: 0, opusUsd: 0 }
+}
+
+/** The project folder Claude Code names after the working directory; used to group, never printed. */
+function projectKey(state) {
+  const file = state.cursor?.file
+  if (typeof file !== 'string' || !file) return UNKNOWN_PROJECT
+  return path.basename(path.dirname(file)) || UNKNOWN_PROJECT
+}
+
+/** Aggregates over real session state files. A task is one (session, slug) pair; the orchestration pseudo-task only adds cost. */
+export function summarizeSessions(states, { minSample = 10 } = {}) {
+  const summary = {
+    sessions: 0,
+    tasks: 0,
+    done: 0,
+    startedOn: {},
+    finishedOn: {},
+    clean: 0,
+    afterFailure: 0,
+    escalated: 0,
+    escalatedDone: 0,
+    reviewed: 0,
+    verify: {},
+    completion: {},
+    usd: 0,
+    opusUsd: 0,
+    projects: [],
+    sample: 'small',
+    notes: [],
+  }
+  const seen = new Set()
+  const projects = new Map()
+  for (const state of states) {
+    if (!state || typeof state !== 'object') continue
+    summary.sessions += 1
+    const key = projectKey(state)
+    if (!projects.has(key)) projects.set(key, projectRow())
+    const project = projects.get(key)
+    const log = state.log && typeof state.log === 'object' && !Array.isArray(state.log) ? state.log : {}
+    for (const slug of Object.keys(log)) {
+      if (slug === OVERHEAD) continue
+      if (typeof state.session_id === 'string') {
+        const id = `${state.session_id}\0${slug}`
+        if (seen.has(id)) continue
+        seen.add(id)
+      }
+      const entry = own(log, slug)
+      const task = entry && typeof entry === 'object' ? entry : {}
+      const done = task.status === 'done'
+      const failures = Number(task.failures) || 0
+      summary.tasks += 1
+      project.tasks += 1
+      bump(summary.startedOn, tierOf(Array.isArray(task.tiers) ? task.tiers[0] : undefined))
+      if (task.finished) {
+        bump(summary.finishedOn, tierOf(task.finished))
+        bump(project.finishedOn, tierOf(task.finished))
+      }
+      if (done) {
+        summary.done += 1
+        if (failures === 0) {
+          summary.clean += 1
+          project.clean += 1
+        } else {
+          summary.afterFailure += 1
+        }
+      }
+      if ((Number(task.escalations) || 0) > 0) {
+        summary.escalated += 1
+        if (done) summary.escalatedDone += 1
+      }
+      if (Array.isArray(task.reviews) && task.reviews.length) summary.reviewed += 1
+      bump(summary.verify, verifyCell(task.verify))
+      if (task.completion) bump(summary.completion, COMPLETIONS.includes(task.completion) ? task.completion : 'other')
+    }
+    const cost = state.cost && typeof state.cost === 'object' ? state.cost : {}
+    for (const row of Object.values(cost)) {
+      const usd = costTotal(row)
+      const opusUsd = Number(row?.opusRate) || 0
+      summary.usd += usd
+      summary.opusUsd += opusUsd
+      project.usd += usd
+      project.opusUsd += opusUsd
+    }
+  }
+  // The folder name only breaks ties between projects with the same task count.
+  // A project with no task and no cost (a session that only started) is noise, not a row.
+  const ordered = [...projects].filter(([, row]) => row.tasks || row.usd || row.opusUsd).sort((a, b) => b[1].tasks - a[1].tasks || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+  const known = ordered.filter(([key]) => key !== UNKNOWN_PROJECT).map(([, row]) => row)
+  summary.projects = known.map((row, index) => ({ label: `project ${index + 1}`, ...row }))
+  const unknown = ordered.find(([key]) => key === UNKNOWN_PROJECT)?.[1]
+  if (unknown) summary.projects.push({ label: UNKNOWN_PROJECT, ...unknown })
+  if (summary.tasks >= minSample) {
+    summary.sample = 'enough'
+  } else {
+    summary.notes.push(`Fewer than ${minSample} tasks: the figures are descriptive only and must not change routing.`)
+  }
+  return summary
+}
+
+export function renderRealUse(summary) {
+  if (!summary.sessions) return ''
+  const finishedList = (row) => TIERS.map((tier) => String(row.finishedOn[tier] || 0))
+  const lines = [
+    '## Real use',
+    '',
+    `${summary.tasks} tasks in ${summary.sessions} sessions: ${summary.done} done, ${summary.tasks - summary.done} not done.`,
+    `Sample: ${summary.sample}.`,
+  ]
+  const tierNames = [...new Set([...TIERS, ...Object.keys(summary.startedOn), ...Object.keys(summary.finishedOn)])]
+  lines.push(...table('Tiers', ['tier', 'started on', 'finished on'], tierNames.map((tier) => [tier, String(summary.startedOn[tier] || 0), String(summary.finishedOn[tier] || 0)])))
+  lines.push(
+    ...table('Outcomes', ['outcome', 'tasks'], [
+      ['done with no failure', String(summary.clean)],
+      ['done after at least one failure', String(summary.afterFailure)],
+      ['escalated', String(summary.escalated)],
+      ['escalated, then done', String(summary.escalatedDone)],
+      ['reviewed', String(summary.reviewed)],
+    ]),
+  )
+  lines.push(...table('Verify', ['verify', 'tasks'], counts(summary.verify)))
+  lines.push(...table('Completion', ['completion', 'tasks'], counts(summary.completion)))
+  lines.push('', `Estimated cost: ${dollars(summary.usd)}. The same tokens at Opus rates: ${dollars(summary.opusUsd)}.`)
+  const projectRows = summary.projects.map((row) => [row.label, String(row.tasks), ...finishedList(row), String(row.clean), dollars(row.usd), dollars(row.opusUsd)])
+  lines.push(...table('Projects', ['project', 'tasks', ...TIERS.map((tier) => `finished on ${tier}`), 'done with no failure', 'estimated USD', 'at Opus rates USD'], projectRows))
+  lines.push(
+    '',
+    'Not measured: how often you had to ask again, and what plain Opus would have spent. The Opus-rate column prices the same tokens, and plain Opus would not use exactly those.',
+  )
+  if (summary.notes.length) lines.push('', ...summary.notes.map((note) => `- ${note}`))
+  return `${lines.join('\n')}\n`
+}
+
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 if (isMain) {
-  const dataDir = process.argv[2] || process.env.CLAUDE_PLUGIN_DATA || ''
+  const args = process.argv.slice(2)
+  const flag = args.indexOf('--sessions')
+  const sessionsDir = flag >= 0 ? args[flag + 1] : ''
+  const dataDir = args.find((arg, index) => !arg.startsWith('--') && !(flag >= 0 && index === flag + 1)) || process.env.CLAUDE_PLUGIN_DATA || ''
   const events = dataDir ? readEvents(telemetryPath(dataDir)) : []
-  process.stdout.write(events.length ? renderInsights(summarize(events)) : 'cc-tiers has no telemetry yet.\n')
+  const states = sessionFiles(sessionsDir || dataDir, true).map(readState).filter(Boolean)
+  const sections = [events.length ? renderInsights(summarize(events)) : '', renderRealUse(summarizeSessions(states))].filter(Boolean)
+  process.stdout.write(sections.length ? sections.join('\n') : 'cc-tiers has no telemetry yet.\n')
 }

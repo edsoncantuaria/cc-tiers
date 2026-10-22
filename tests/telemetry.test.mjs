@@ -385,3 +385,122 @@ test('renderInsights prints failure research by match with counts only, and noth
   assert.match(rows[1], /none\D+1\D+1\D+0/)
   assert.equal(renderInsights(summarize([{ type: 'task.passed', task: 'z', tier: 'sonnet' }])).includes('Failure research by match'), false)
 })
+
+const { renderRealUse, summarizeSessions } = insights
+
+function sessionState(id, project, log, cost = {}) {
+  return { session_id: id, cursor: project ? { file: `/home/u/.claude/projects/${project}/${id}.jsonl` } : {}, log, cost }
+}
+
+function logEntry(extra = {}) {
+  return { tiers: ['haiku'], attempts: 1, failures: 0, escalations: 0, reviews: [], status: 'done', finished: 'haiku', ...extra }
+}
+
+test('summarizeSessions counts tasks per session and slug, and keeps orchestration cost out of the tasks', () => {
+  const states = [
+    sessionState('s1', 'p-a', {
+      one: logEntry({ verify: { verified: ['x'], flaky: [], unverified: [] }, completion: 'verified', reviews: ['reviewer'] }),
+      two: logEntry({ tiers: ['sonnet', 'opus'], failures: 1, escalations: 1, finished: 'opus', verify: { verified: [], flaky: [], unverified: ['y'] } }),
+      three: logEntry({ status: 'open', finished: undefined, escalations: 1 }),
+    }, {
+      one: { haiku: 1, sonnet: 0, opus: 0, opusRate: 4 },
+      '(orchestration)': { haiku: 0, sonnet: 0, opus: 1, opusRate: 1 },
+    }),
+    sessionState('s2', 'p-a', { one: logEntry() }),
+  ]
+  const summary = summarizeSessions(states)
+  assert.equal(summary.sessions, 2)
+  assert.equal(summary.tasks, 4)
+  assert.equal(summary.done, 3)
+  assert.deepEqual(summary.startedOn, { haiku: 3, sonnet: 1 })
+  assert.deepEqual(summary.finishedOn, { haiku: 2, opus: 1 })
+  assert.equal(summary.clean, 2)
+  assert.equal(summary.afterFailure, 1)
+  assert.equal(summary.escalated, 2)
+  assert.equal(summary.escalatedDone, 1)
+  assert.equal(summary.reviewed, 1)
+  assert.deepEqual(summary.verify, { ok: 1, 'not validated': 1, '—': 2 })
+  assert.deepEqual(summary.completion, { verified: 1 })
+  assert.equal(summary.usd, 2)
+  assert.equal(summary.opusUsd, 5)
+  assert.equal(summary.sample, 'small')
+  assert.match(summary.notes[0], /Fewer than 10 tasks/)
+})
+
+test('summarizeSessions skips non-object states and tolerates entries with missing fields', () => {
+  const summary = summarizeSessions([null, 'x', 3, sessionState('s1', 'p', { bare: {}, broken: null, odd: { tiers: 'haiku', reviews: 'r', failures: 'many' } }), { log: [1, 2] }])
+  assert.equal(summary.tasks, 3)
+  assert.equal(summary.done, 0)
+  assert.equal(summary.reviewed, 0)
+  assert.deepEqual(summary.startedOn, { unknown: 3 })
+  assert.equal(summary.sessions, 2)
+})
+
+test('summarizeSessions handles slugs named like Object.prototype keys', () => {
+  const log = JSON.parse('{"constructor":{"status":"done","finished":"haiku","tiers":["haiku"]},"__proto__":{"status":"done","finished":"sonnet","tiers":["sonnet"]},"toString":{}}')
+  const summary = summarizeSessions([sessionState('s1', 'p', log, JSON.parse('{"constructor":{"haiku":2,"opusRate":3}}'))])
+  assert.equal(summary.tasks, 3)
+  assert.equal(summary.done, 2)
+  assert.deepEqual(summary.startedOn, { haiku: 1, sonnet: 1, unknown: 1 })
+  assert.equal(summary.usd, 2)
+  assert.equal(Object.getPrototypeOf(summary.startedOn), Object.prototype)
+})
+
+test('summarizeSessions labels projects by task count, with unknown project last', () => {
+  const states = [
+    sessionState('a', 'zzz', { t: logEntry() }),
+    sessionState('b', 'aaa', { t: logEntry(), u: logEntry({ failures: 2 }) }),
+    sessionState('c', null, { t: logEntry() , u: logEntry(), v: logEntry() }),
+    sessionState('d', 'mmm', { t: logEntry() }),
+  ]
+  const summary = summarizeSessions(states)
+  assert.deepEqual(summary.projects.map((row) => [row.label, row.tasks]), [['project 1', 2], ['project 2', 1], ['project 3', 1], ['unknown project', 3]])
+  assert.equal(summary.projects[0].clean, 1)
+})
+
+test('summarizeSessions drops a project with no task and no cost, and keeps one with cost only', () => {
+  const empty = summarizeSessions([sessionState('a', 'ppp', { t: logEntry() }), sessionState('b', null, {}), sessionState('c', 'qqq', {})])
+  assert.deepEqual(empty.projects.map((row) => row.label), ['project 1'])
+  const costOnly = summarizeSessions([sessionState('a', 'ppp', { t: logEntry() }), sessionState('b', null, {}, { '(orchestration)': { opus: 1, opusRate: 1 } })])
+  assert.deepEqual(costOnly.projects.map((row) => [row.label, row.tasks]), [['project 1', 1], ['unknown project', 0]])
+})
+
+test('renderRealUse never prints a slug, session id, path, project folder or command', () => {
+  const states = [
+    {
+      ...sessionState('sess-DISTINCT-123', '-home-u-Projetos-secretproj', {
+        'slug-DISTINCT-xyz': logEntry({ prompt: 'PROMPT-DISTINCT', command: 'rm -rf CMD-DISTINCT', completion: 'weird-DISTINCT', tiers: ['haiku-DISTINCT'] }),
+      }, { 'slug-DISTINCT-xyz': { haiku: 0.5, opusRate: 2 } }),
+      spend: { 'slug-DISTINCT-xyz': { haiku: 1 } },
+    },
+  ]
+  const out = renderRealUse(summarizeSessions(states))
+  assert.match(out, /## Real use/)
+  assert.match(out, /project 1/)
+  for (const secret of ['DISTINCT', 'secretproj', '/home/u', 'sess-', 'rm -rf']) assert.ok(!out.includes(secret), secret)
+  assert.match(out, /Not measured: how often you had to ask again, and what plain Opus would have spent/)
+  assert.match(out, /Estimated cost: \$0\.5000\. The same tokens at Opus rates: \$2\.00\./)
+  assert.equal(renderRealUse(summarizeSessions([])), '')
+})
+
+test('the script prints Real use from session files, in the data dir or in --sessions, without telemetry', (t) => {
+  const dir = tempDir(t)
+  const archive = tempDir(t)
+  const state = sessionState('s1', 'p-a', { one: logEntry() }, { one: { haiku: 1, opusRate: 3 } })
+  writeFileSync(path.join(archive, 'session-s1.json'), JSON.stringify(state))
+  writeFileSync(path.join(archive, 'session-bad.json'), '{not json')
+  writeFileSync(path.join(archive, 'latest.json'), JSON.stringify(state))
+  const empty = spawnSync(process.execPath, [SCRIPT, dir], { encoding: 'utf8' })
+  assert.equal(empty.stdout, 'cc-tiers has no telemetry yet.\n')
+  const viaFlag = spawnSync(process.execPath, [SCRIPT, dir, '--sessions', archive], { encoding: 'utf8' })
+  assert.equal(viaFlag.status, 0)
+  assert.match(viaFlag.stdout, /^## Real use/)
+  assert.match(viaFlag.stdout, /1 tasks in 1 sessions: 1 done, 0 not done\./)
+  assert.ok(!viaFlag.stdout.includes('## cc-tiers insights'))
+  writeFileSync(path.join(dir, 'session-s1.json'), JSON.stringify(state))
+  recordEvent(telemetryPath(dir), { type: 'task.passed', task: 'a', risk: 'low', costUsd: 0.01 })
+  const both = spawnSync(process.execPath, [SCRIPT, dir], { encoding: 'utf8' })
+  assert.match(both.stdout, /## cc-tiers insights[\s\S]*\n## Real use/)
+  const other = spawnSync(process.execPath, [SCRIPT, dir, '--sessions', path.join(dir, 'nope')], { encoding: 'utf8' })
+  assert.ok(!other.stdout.includes('## Real use'))
+})

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- A "Real use" section in `/cc-tiers:insights`, built from the session state files (`session-*.json`) in the data dir or in the folder given by `--sessions <dir>`: tasks, done, start and finish tiers, failures, escalations, reviews, verify, completion, and estimated cost next to Opus rates, with anonymous per-project rows. It names no task, session, path, or project, and says it does not measure re-asks or what plain Opus would have spent.
+
 ### Removed
 
 - The synthetic benchmark: the `bench/` directory, `tests/bench_quality.test.mjs`, the tests of `tests/cc_tiers.test.mjs` that ran it, the `bench` and `bench:table` npm scripts, and the Benchmark section and the `bench/` row of the READMEs. Tasks Opus solves easily do not measure cc-tiers.
