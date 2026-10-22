@@ -68,6 +68,16 @@ test('prompts send a hard task to Opus from the start', () => {
   assert.ok(read('agents/architect.md').includes('hard task'))
 })
 
+test('session prompts list the writer option and its opus rule', () => {
+  for (const file of ['agents/orchestrator.md', 'agents/dispatcher.md', 'skills/tiers/SKILL.md']) {
+    const text = read(file)
+    assert.ok(text.includes('- Writer: ${user_config.writer}'), `${file} reads the writer option`)
+    assert.ok(/writer `tiers`/.test(text), `${file} falls back to tiers`)
+    assert.ok(/Writer `opus`/.test(text) && text.includes('trivial ones included'), `${file} says what writer opus does`)
+  }
+  assert.ok(read('agents/dispatcher.md').includes('cc-tiers:architect'))
+})
+
 test('session prompts handle the small path note', () => {
   for (const file of ['agents/orchestrator.md', 'agents/dispatcher.md', 'skills/tiers/SKILL.md']) {
     const text = read(file)

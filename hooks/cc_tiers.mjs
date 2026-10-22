@@ -69,6 +69,9 @@ export const REVIEW_POLICIES = new Set(['cheap', 'risky', 'always', 'never'])
 export const CLASSIFIERS = new Set(['haiku', 'local'])
 export const LIGHT_MODES = new Set(['inline', 'delegate', 'off'])
 export const HARD_STARTS = new Set(['opus', 'sonnet'])
+export const WRITERS = new Set(['tiers', 'opus', 'alternate'])
+/** The two modes a task can record: alternate resolves to one of them for the day. */
+export const WRITER_MODES = ['tiers', 'opus']
 export const CONTRACT_APPROVALS = new Set(['critical', 'high', 'off'])
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 export const DEFAULT_LADDERS = { haiku: ['low', 'medium'], sonnet: ['high', 'xhigh'], opus: ['high', 'xhigh'] }
@@ -182,6 +185,20 @@ export function parseLightPath(value, fallback = 'inline') {
 export function parseHardStart(value, fallback = 'opus') {
   const text = String(value ?? '').trim().toLowerCase()
   return HARD_STARTS.has(text) ? text : fallback
+}
+
+/** Who writes the tasks: tiers (routing decides), opus (Opus writes every task), or alternate (opus on even local days). */
+export function parseWriter(value, fallback = 'tiers') {
+  const text = String(value ?? '').trim().toLowerCase()
+  return WRITERS.has(text) ? text : fallback
+}
+
+/** The mode in force at `now`: tiers or opus. Alternate is opus on an even local day number (days since 1970-01-01). */
+export function writerMode(routing, now = Date.now()) {
+  if (routing?.writer === 'opus') return 'opus'
+  if (routing?.writer !== 'alternate') return 'tiers'
+  const localDay = Math.floor((now - new Date(now).getTimezoneOffset() * 60000) / 86400000)
+  return localDay % 2 === 0 ? 'opus' : 'tiers'
 }
 
 /** The lowest risk whose criteria the user must approve before delegation: critical, high, or off. */
@@ -340,6 +357,7 @@ export function mergeRouting(defaults, project = null, user = null) {
   }
   const light = parseLightPath(config.light_path, parseLightPath(defaults.lightPath, 'inline'))
   const hardStart = parseHardStart(config.hard_start, parseHardStart(defaults.hardStart))
+  const writer = parseWriter(config.writer, parseWriter(defaults.writer))
   const showCost = parseLearn(config.show_cost, parseLearn(defaults.showCost, true))
   const research = parseLearn(config.research, parseLearn(source.research, parseLearn(defaults.research, true)))
   const failureResearch = parseLearn(config.failure_research, parseLearn(source.failureResearch, parseLearn(defaults.failureResearch, true)))
@@ -392,6 +410,7 @@ export function mergeRouting(defaults, project = null, user = null) {
     classifier,
     light,
     hardStart,
+    writer,
     showCost,
     research,
     failureResearch,
@@ -701,7 +720,7 @@ export function noteFailure(history, { tier = 'haiku', task, prompt, reason, now
 
 /**
  * Classify one task description.
- * because is one of: ceiling, orchestration, trivial, default, opus-phrase, history, risky, risk, hard, complex, budget.
+ * because is one of: ceiling, orchestration, trivial, default, opus-phrase, history, risky, risk, hard, writer, complex, budget.
  * risk is the taskRisk assessment the decision used.
  * effort is the level the first attempt runs at, or null when the ladder is off.
  */
@@ -766,6 +785,11 @@ function classify(text, routing, { history, conserve, ceiling, projectDir, risk 
     tier = 'opus'
     because = 'hard'
   }
+  // Opus writer mode sends every new task to Opus, trivial ones too, so the two modes compare on the same work.
+  if (because !== 'orchestration' && writerMode(routing) === 'opus') {
+    tier = 'opus'
+    because = 'writer'
+  }
   if (conserve && tier === 'opus' && because !== 'orchestration') {
     tier = 'sonnet'
     because = 'budget'
@@ -791,7 +815,7 @@ export function guidance(routing, budget, history) {
     const five = budget.fiveHour == null ? 'unread' : `${budget.fiveHour}%`
     const seven = budget.sevenDay == null ? 'unread' : `${budget.sevenDay}%`
     lines.push(
-      `Budget routing: normal. 5h ${five} (threshold ${routing.budget5h}%), 7d ${seven} (threshold ${routing.budget7d}%). Opus is the escalation ceiling, not the default implementer.`,
+      `Budget routing: normal. 5h ${five} (threshold ${routing.budget5h}%), 7d ${seven} (threshold ${routing.budget7d}%). ${writerMode(routing) === 'opus' ? 'Writer mode is opus today: Opus writes every task.' : 'Opus is the escalation ceiling, not the default implementer.'}`,
     )
   }
   if (policy === 'cheap') {
@@ -858,6 +882,16 @@ export function hardStartLine(routing) {
   )
 }
 
+const WRITER_OPUS_RULE = 'Every writer task, trivial ones included, is the session\'s own Opus attempt (in light mode, cc-tiers:architect), with research, spec, gate and review as usual; cc-tiers refuses a new cc-tiers:worker or cc-tiers:implementer call.'
+const WRITER_TIERS_RULE = 'Tasks are routed across the tiers as usual.'
+
+export function writerLine(routing, now = Date.now()) {
+  const mode = writerMode(routing, now)
+  const rule = mode === 'opus' ? WRITER_OPUS_RULE : WRITER_TIERS_RULE
+  if (routing.writer === 'alternate') return `Writer: alternate (${mode} today). ${rule} A task keeps the mode it started in.`
+  return `Writer: ${mode}. ${rule}`
+}
+
 export function classifierLine(routing) {
   if (routing.classifier === 'local') {
     return 'Classifier: local. Only the keyword lists and the complexity score route Haiku work. Add CC_TIERS_CLASSIFY: skip to every cc-tiers:worker prompt so the Haiku classifier hook stands down.'
@@ -920,6 +954,7 @@ export function formatSessionContext(routing, projectNote, snapshot = {}) {
     effortLine(routing, snapshot.budget?.conserve === true),
     classifierLine(routing),
     hardStartLine(routing),
+    writerLine(routing),
     researchLine(routing),
     failureResearchLine(routing),
     specifyLine(routing),
@@ -1932,6 +1967,8 @@ export function checkDelegation(state, toolInput, routing, { history = null, pro
     }
   }
   const now = Date.now()
+  // A task keeps the mode it recorded first, even when alternate flips at midnight.
+  const mode = own(state.log, task)?.writer || writerMode(routing, now)
   const spent = taskBudgetStatus(state, task, routing, now)
   if (spent.state === 'over' && !BUDGET_OVERRIDE_RE.test(headers.BUDGET || '')) return refuse(`cc-tiers: ${budgetMessage(task, spent)}`)
   for (const name of String(headers.RELEASE || '').split(',').map(slug).filter(Boolean)) releaseActive(state, name)
@@ -1973,7 +2010,13 @@ export function checkDelegation(state, toolInput, routing, { history = null, pro
     }
   } else {
     current = null
-    const decision = decideTier(routed, routing, { history, conserve: routing.conserve === true, projectDir })
+    const decision = decideTier(routed, { ...routing, writer: mode }, { history, conserve: routing.conserve === true, projectDir })
+    if ((role === 'worker' || role === 'implementer') && decision.because === 'writer') {
+      return refuse(
+        `cc-tiers: writer mode is opus, so ${task} is implemented as an Opus attempt: ${implementerFor('opus')}, not ${scoped}. ` +
+          'Research it and write its spec as usual, then open the attempt with the Opus trailer; review stays as usual.',
+      )
+    }
     if (role === 'worker' && ['history', 'risky', 'complex', 'risk'].includes(decision.because)) {
       const why = {
         history: 'a similar task already failed on Haiku in this project',
@@ -1996,7 +2039,7 @@ export function checkDelegation(state, toolInput, routing, { history = null, pro
   const level = effort.level || parseEffort(input.effort) || AGENT_EFFORT[role]
   logEffort(state, task, tier, level)
   held.commit?.(approved)
-  noteDelegation(state, task, { role, tier, risk, effort: level, now, files: scope.files, isolated, projectDir })
+  noteDelegation(state, task, { role, tier, risk, effort: level, now, files: scope.files, isolated, projectDir, mode })
   if (spent.state === 'near') notes.push(`cc-tiers: ${budgetMessage(task, spent)}`)
   if (spent.state === 'over') notes.push(`cc-tiers: ${task} is over its budget; the user approved more with CC_TIERS_BUDGET (${headers.BUDGET}).`)
   const extra = writerContext(routing, risk, routed, task, projectDir)
@@ -2052,13 +2095,14 @@ function taskBudgetStatus(state, task, routing, now) {
 }
 
 /** Book-keeping of one writer delegation: the log, the running-writer registry, the tree before it, and telemetry. */
-function noteDelegation(state, task, { role, tier, risk, effort, now, files, isolated, projectDir }) {
+function noteDelegation(state, task, { role, tier, risk, effort, now, files, isolated, projectDir, mode }) {
   const entry = logEntry(state, task)
   const first = !entry.started
   entry.calls = (Number(entry.calls) || 0) + 1
   if (first) entry.started = new Date(now).toISOString()
   entry.risk = risk.level
   entry.factors = risk.factors.slice(0, 8)
+  if (!entry.writer) entry.writer = mode
   // A dispatcher's report is not released like a delegated writer's, so it is not registered as one.
   if (DELEGATED_WRITERS.has(role)) registerActive(state, { task, role, files, isolated, now })
   if (!state.snapshots || typeof state.snapshots !== 'object') state.snapshots = {}
@@ -2067,7 +2111,7 @@ function noteDelegation(state, task, { role, tier, risk, effort, now, files, iso
   if (snapshot) state.snapshots[task] = snapshot
   if (first) queueEvent(state, { type: 'task.received', task, role, tier })
   queueEvent(state, { type: 'risk.assessed', task, risk: risk.level, factors: risk.factors })
-  queueEvent(state, { type: 'model.selected', task, tier, role, effort, risk: risk.level })
+  queueEvent(state, { type: 'model.selected', task, tier, role, effort, risk: risk.level, mode: entry.writer })
 }
 
 /** The commands cc-tiers found in the project, as argv: the gate runs them without a verify_allow entry. */
@@ -2841,6 +2885,7 @@ export function userFromEnv(env = process.env) {
     classifier: env.CLAUDE_PLUGIN_OPTION_CLASSIFIER || null,
     light_path: env.CLAUDE_PLUGIN_OPTION_LIGHT_PATH || null,
     hard_start: env.CLAUDE_PLUGIN_OPTION_HARD_START || null,
+    writer: env.CLAUDE_PLUGIN_OPTION_WRITER || null,
     show_cost: env.CLAUDE_PLUGIN_OPTION_SHOW_COST || null,
     research: env.CLAUDE_PLUGIN_OPTION_RESEARCH || null,
     failure_research: env.CLAUDE_PLUGIN_OPTION_FAILURE_RESEARCH || null,
@@ -2876,12 +2921,15 @@ export function lightHint(prompt, routing, { history = null, conserve = false, p
   const text = String(prompt || '').trim()
   if (!text || text.startsWith('/') || /^CC_TIERS_[A-Z]+:/m.test(text)) return ''
   if (text.split(/\s+/).length > 40) return ''
-  const decision = decideTier(text, routing, { history, conserve, projectDir })
+  // Opus writer mode would send every task to Opus; the notes judge the task as the tiers would.
+  const decision = decideTier(text, { ...routing, writer: 'tiers' }, { history, conserve, projectDir })
   if (assessComplexity(text, routing, { projectDir }).score > 0) return ''
+  // Delegating would be refused in opus mode, so the session does the task itself.
+  const inline = routing.light === 'inline' || (writerMode(routing) === 'opus' && !conserve)
   if (decision.tier === 'sonnet' && ['default', 'history'].includes(decision.because) && !isRisky(text, routing)) {
     const small = 'cc-tiers small path: this request looks like one small change. Read the target first. If the change fits in about 20 lines of one file (its test file aside), has a clear expected result, and uses no library API you have not seen in the repo, '
     const risk = 'If it is bigger, touches risky code, or you are unsure, route it as usual.'
-    if (routing.light === 'inline' && !conserve) {
+    if (inline && !conserve) {
       return (
         `${small}do it yourself in this session: no plan, no research, no subagent, and the spec is one to three criteria in a line of your message. ` +
         'A bug fix adds or extends the test that reproduces it when the file has tests. ' +
@@ -2896,7 +2944,7 @@ export function lightHint(prompt, routing, { history = null, conserve = false, p
     )
   }
   if (decision.tier !== 'haiku') return ''
-  if (routing.light === 'inline') {
+  if (inline) {
     return (
       'cc-tiers light path: this request looks like one trivial task. Do it yourself in this session: a fresh worker context plus a checker pass ' +
       'costs more than the edit. No plan, no slug, no delegation, no review. Make the change, run the smallest check that proves it, and reply in one or two lines. ' +
@@ -3171,7 +3219,7 @@ export function processReport(ctx, state, event, usage = null) {
       if (usage.cost) mergeCost(state.cost || (state.cost = {}), { [task]: usage.cost })
     }
   }
-  if (!applied.meta.planner && applied.meta.outcome !== 'research') logReport(state, applied.meta)
+  if (!applied.meta.planner && applied.meta.outcome !== 'research') logReport(state, applied.meta, writerMode(ctx.routing))
   if (task && Number(event.durationMs) > 0 && !applied.meta.planner) {
     const entry = logEntry(state, task)
     entry.durationMs = (Number(entry.durationMs) || 0) + Number(event.durationMs)
@@ -3250,7 +3298,7 @@ function emitEvents(state, meta, task, ctx) {
   const cost = costTotal(own(state.cost, task))
   const spend = own(state.spend, task)
   const tokens = spend ? TIERS.reduce((sum, tier) => sum + (Number(spend[tier]) || 0), 0) : undefined
-  const totals = { costUsd: cost || undefined, costEstimated: true, tokens, durationMs: Number(entry.durationMs) || undefined, calls: Number(entry.calls) || undefined }
+  const totals = { costUsd: cost || undefined, costEstimated: true, tokens, durationMs: Number(entry.durationMs) || undefined, calls: Number(entry.calls) || undefined, mode: entry.writer }
   if (meta.outcome === 'pass') queueEvent(state, { ...base, ...totals, type: 'task.passed', status: meta.completion?.status, confidence: meta.completion?.confidence })
   if (meta.outcome === 'stop') queueEvent(state, { ...base, ...totals, type: 'task.stopped' })
 }
@@ -3320,12 +3368,13 @@ function logEntry(state, task) {
 }
 
 /** One line per task for /cc-tiers:report: which tiers ran it, how often it failed, who reviewed it, how it ended. */
-export function logReport(state, meta) {
+export function logReport(state, meta, mode = '') {
   if (!meta?.task || meta.outcome === 'uncounted' || meta.outcome === 'plan') return
   const entry = logEntry(state, meta.task)
   const writer = WRITER_ROLES.has(meta.role) || SESSION_ROLES.has(meta.role)
   if (writer) {
     entry.attempts += 1
+    if (mode && !entry.writer) entry.writer = mode
     if (meta.tier && !entry.tiers.includes(meta.tier)) entry.tiers.push(meta.tier)
   } else if (REVIEW_ROLES.has(meta.role)) {
     entry.reviews.push(meta.role)

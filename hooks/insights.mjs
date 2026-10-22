@@ -10,7 +10,7 @@
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { TIERS } from './base.mjs'
-import { OVERHEAD, costTotal, own } from './cc_tiers.mjs'
+import { OVERHEAD, WRITER_MODES, costTotal, own } from './cc_tiers.mjs'
 import { readState, sessionFiles, verifyCell } from './report.mjs'
 import { readEvents, telemetryPath } from './telemetry.mjs'
 
@@ -24,6 +24,25 @@ function slot(map, key, fresh = () => ({ tasks: 0, usd: 0 })) {
   return map[key]
 }
 
+/** The mode a task recorded, or unknown for a task from before the option existed. */
+function modeOf(value) {
+  return WRITER_MODES.includes(value) ? value : 'unknown'
+}
+
+/** Rows for the by-mode table; empty until a task recorded a mode, so older data prints as before. */
+function modeRows(byMode, cells) {
+  return Object.keys(byMode).every((mode) => mode === 'unknown') ? [] : Object.entries(byMode).sort((a, b) => modeRank(a[0]) - modeRank(b[0]) || a[0].localeCompare(b[0])).map(([mode, row]) => [mode, ...cells(row)])
+}
+
+function modeRank(mode) {
+  const index = WRITER_MODES.indexOf(mode)
+  return index < 0 ? WRITER_MODES.length : index
+}
+
+function modeRow() {
+  return { tasks: 0, clean: 0, redone: 0, blocking: 0, usd: 0 }
+}
+
 function startRow() {
   return { tasks: 0, passed: 0, escalated: 0, finishedOn: {}, stopped: 0, afterBlocking: 0 }
 }
@@ -34,7 +53,7 @@ function matchRow() {
 
 /** What happened to one task, folded from its events in order. */
 function journeyOf(journeys, task) {
-  if (!journeys.has(task)) journeys.set(task, { start: '', risk: '', escalated: false, blocking: false, passed: false, stopped: false, finish: '', matches: new Set(), redone: 0, redoTier: '' })
+  if (!journeys.has(task)) journeys.set(task, { start: '', risk: '', escalated: false, blocking: false, passed: false, stopped: false, finish: '', matches: new Set(), redone: 0, redoTier: '', mode: '', usd: 0 })
   return journeys.get(task)
 }
 
@@ -53,6 +72,7 @@ export function summarize(events, { minSample = 10 } = {}) {
     confidence: {},
     hindsight: { byStart: {}, overRouted: 0 },
     redone: { tasks: 0, byTier: {} },
+    byMode: {},
     failureResearch: {},
     sample: 'small',
     notes: [],
@@ -69,6 +89,7 @@ export function summarize(events, { minSample = 10 } = {}) {
       case 'model.selected':
         // The first selection is what routing chose; a retry or an escalation selects again.
         if (journey && !journey.start && event.tier) Object.assign(journey, { start: event.tier, risk: event.risk || '' })
+        if (journey && !journey.mode && event.mode) journey.mode = event.mode
         break
       case 'review.done':
         if (journey && event.review?.blocking > 0) journey.blocking = true
@@ -107,6 +128,9 @@ export function summarize(events, { minSample = 10 } = {}) {
         }
         // The last outcome wins; the tier on it is where the task finished.
         if (journey) Object.assign(journey, { passed: event.type === 'task.passed', stopped: event.type === 'task.stopped', finish: event.tier || 'unknown' })
+        if (journey && !journey.mode && event.mode) journey.mode = event.mode
+        // A task's cost is cumulative, so the latest event holds its total.
+        if (journey && Number.isFinite(event.costUsd)) journey.usd = event.costUsd
         if (Number.isFinite(event.costUsd)) {
           const row = slot(summary.costByRisk, event.risk || 'unknown')
           row.tasks += 1
@@ -130,6 +154,12 @@ export function summarize(events, { minSample = 10 } = {}) {
     bump(summary.redone.byTier, journey.redoTier)
   }
   for (const [task, journey] of journeys) {
+    const mode = slot(summary.byMode, modeOf(journey.mode), modeRow)
+    mode.tasks += 1
+    if (journey.passed && !journey.escalated && !reworked.has(task)) mode.clean += 1
+    if (journey.redone > 0) mode.redone += 1
+    if (journey.blocking) mode.blocking += 1
+    mode.usd += journey.usd
     if (!journey.start) continue
     const row = slot(summary.hindsight.byStart, journey.start, startRow)
     row.tasks += 1
@@ -202,6 +232,8 @@ export function renderInsights(summary) {
     .sort((a, b) => tierRank(a[0]) - tierRank(b[0]) || a[0].localeCompare(b[0]))
     .map(([tier, count]) => [tier, String(count)])
   lines.push(...table('Sent back by the user, by the tier the task finished on', ['finished on', 'tasks'], redoneRows))
+  const modeCells = (row) => [String(row.tasks), String(row.clean), String(row.redone), String(row.blocking), dollars(row.usd)]
+  lines.push(...table('By writer mode', ['writer mode', 'tasks', 'done with no failure', 'sent back by the user', 'with a blocking review finding', 'estimated USD'], modeRows(summary.byMode, modeCells)))
   const matchRows = Object.entries(summary.failureResearch)
     .sort((a, b) => b[1].searches - a[1].searches || a[0].localeCompare(b[0]))
     .map(([match, row]) => [match, String(row.searches), String(row.tasks), String(row.passed)])
@@ -240,6 +272,7 @@ export function summarizeSessions(states, { minSample = 10 } = {}) {
     redone: 0,
     startedOn: {},
     finishedOn: {},
+    byMode: {},
     clean: 0,
     afterFailure: 0,
     escalated: 0,
@@ -280,6 +313,11 @@ export function summarizeSessions(states, { minSample = 10 } = {}) {
         bump(summary.finishedOn, tierOf(task.finished))
         bump(project.finishedOn, tierOf(task.finished))
       }
+      const mode = slot(summary.byMode, modeOf(task.writer), () => ({ tasks: 0, clean: 0, redone: 0, usd: 0 }))
+      mode.tasks += 1
+      mode.usd += costTotal(own(state.cost, slug))
+      if (done && failures === 0) mode.clean += 1
+      if (done && Number(task.redo) > 0) mode.redone += 1
       if (done) {
         summary.done += 1
         if (failures === 0) {
@@ -347,6 +385,8 @@ export function renderRealUse(summary) {
       ['reviewed', String(summary.reviewed)],
     ]),
   )
+  const modeCells = (row) => [String(row.tasks), String(row.clean), String(row.redone), dollars(row.usd)]
+  lines.push(...table('By writer mode', ['writer mode', 'tasks', 'done with no failure', 'sent back by the user', 'estimated USD'], modeRows(summary.byMode, modeCells)))
   lines.push(...table('Verify', ['verify', 'tasks'], counts(summary.verify)))
   lines.push(...table('Completion', ['completion', 'tasks'], counts(summary.completion)))
   lines.push('', `Estimated cost: ${dollars(summary.usd)}. The same tokens at Opus rates: ${dollars(summary.opusUsd)}.`)

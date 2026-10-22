@@ -1313,3 +1313,84 @@ test('failure research: a researcher run with CC_TIERS_FAILURE lines queues rese
   assert.equal(plain.researched.paging, true)
   assert.deepEqual(plain.events.map((item) => item.type), ['research.done'])
 })
+
+test('writer opus: a new worker or implementer call is refused toward an Opus attempt, the other roles are not', () => {
+  const routing = routingWith({ writer: 'opus', research: 'off', specify: 'off' })
+  const prompt = (task, tier, role) => `${header(task, tier, role)}Add pagination to src/users.js`
+  const implementer = delegate(tiers.emptyState('s'), routing, 'implementer', prompt('paging', 'sonnet', 'implementer'))
+  assert.match(implementer.deny, /writer mode is opus.*Opus attempt.*orchestrator implements it.*cc-tiers:architect/)
+  const worker = delegate(tiers.emptyState('s'), routing, 'worker', prompt('typo', 'haiku', 'worker'))
+  assert.match(worker.deny, /writer mode is opus/)
+  const state = tiers.emptyState('s')
+  assert.equal(delegate(state, routing, 'architect', prompt('paging', 'opus', 'architect')).deny, '')
+  assert.equal(state.log.paging.writer, 'opus')
+  for (const role of ['researcher', 'reviewer', 'checker']) assert.equal(delegate(tiers.emptyState('s'), routing, role, prompt('paging', 'sonnet', role)).deny, '', role)
+  assert.equal(delegate(tiers.emptyState('s'), routing, 'planner', 'plan it').deny, '')
+  assert.equal(delegate(tiers.emptyState('s'), routingWith({ research: 'off', specify: 'off' }), 'implementer', prompt('paging', 'sonnet', 'implementer')).deny, '')
+})
+
+test('writer opus: a task that already has a tier is untouched, and conserving lets Sonnet start it', () => {
+  const routing = routingWith({ writer: 'opus', research: 'off', specify: 'off' })
+  const state = tiers.emptyState('s')
+  state.tasks.paging = { tier: 'sonnet', failures: [], carried: [] }
+  assert.equal(delegate(state, routing, 'implementer', `${header('paging', 'sonnet', 'implementer')}Add pagination`).deny, '')
+  const down = delegate(state, routing, 'worker', `${header('paging', 'haiku', 'worker')}Add pagination`)
+  assert.match(down.deny, /already escalated to sonnet/)
+  const conserving = { ...routing, conserve: true }
+  const conserved = tiers.emptyState('s')
+  assert.equal(delegate(conserved, conserving, 'implementer', `${header('paging', 'sonnet', 'implementer')}Add pagination`).deny, '')
+  assert.equal(conserved.log.paging.writer, 'opus')
+})
+
+test('writer: a task records its mode once, at its first delegation, and keeps it when the day flips', () => {
+  const routing = routingWith({ writer: 'alternate', research: 'off', specify: 'off' })
+  const state = tiers.emptyState('s')
+  const noon = (day) => new Date(2026, 9, day, 12).getTime()
+  const evenDay = [1, 2].find((day) => Math.floor(Date.UTC(2026, 9, day) / 86400000) % 2 === 1)
+  const realNow = Date.now
+  try {
+    Date.now = () => noon(evenDay)
+    assert.equal(tiers.writerMode(routing), 'tiers')
+    delegate(state, routing, 'implementer', `${header('paging', 'sonnet', 'implementer')}Add pagination`)
+    Date.now = () => noon(evenDay + 1)
+    assert.equal(tiers.writerMode(routing), 'opus')
+    delegate(state, routing, 'implementer', `${header('paging', 'sonnet', 'implementer')}Add pagination again`)
+  } finally {
+    Date.now = realNow
+  }
+  assert.equal(state.log.paging.writer, 'tiers')
+  const modes = state.events.filter((item) => item.type === 'model.selected').map((item) => item.mode)
+  assert.deepEqual(modes, ['tiers', 'tiers'])
+
+  // The other way round: a task recorded as opus stays an Opus task on the tiers day.
+  const stays = tiers.emptyState('s')
+  stays.log.paging = { tiers: [], attempts: 0, failures: 0, escalations: 0, reviews: [], effort: {}, status: 'open', finished: '', writer: 'opus' }
+  const refused = delegate(stays, routingWith({ writer: 'tiers', research: 'off', specify: 'off' }), 'implementer', `${header('paging', 'sonnet', 'implementer')}Add pagination`)
+  assert.match(refused.deny, /writer mode is opus/)
+})
+
+test('writer: an Opus attempt with no delegation records the mode at its first counted report, and telemetry carries it', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-int-'))
+  try {
+    const ctx = { routing: routingWith({ writer: 'opus' }), ccCost: false, projectDir: '', dataDir: path.join(dir, 'data') }
+    const state = tiers.emptyState('s')
+    const text = report('paging', 'orchestrator', 'opus', 'pass', ['CC_TIERS_VERIFY: npm test', 'CC_TIERS_REVIEW: skip'])
+    tiers.processReport(ctx, state, event('m1', 'orchestrator', text, '', { gate: passGate() }))
+    assert.equal(state.log.paging.writer, 'opus')
+    const other = { ...ctx, routing: routingWith({ writer: 'tiers' }) }
+    tiers.processReport(other, state, event('m2', 'orchestrator', text, '', { gate: passGate() }))
+    assert.equal(state.log.paging.writer, 'opus')
+    tiers.flushEvents(ctx, state)
+    const events = readFileSync(path.join(ctx.dataDir, 'events.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+    assert.ok(events.filter((item) => item.type === 'task.passed').every((item) => item.mode === 'opus'))
+    assert.ok(events.some((item) => item.type === 'task.passed'))
+
+    const delegated = tiers.emptyState('s')
+    const tiersCtx = { ...ctx, routing: routingWith({ research: 'off', specify: 'off' }) }
+    delegate(delegated, tiersCtx.routing, 'implementer', `${header('paging', 'sonnet', 'implementer')}Add pagination`)
+    assert.equal(delegated.log.paging.writer, 'tiers')
+    assert.equal(delegated.events.find((item) => item.type === 'model.selected').mode, 'tiers')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})

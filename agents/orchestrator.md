@@ -23,7 +23,7 @@ Do not pass a `model` argument when you delegate. The agent file already pins ha
 
 ## Routing
 
-The session summary is the live routing. Placeholders below fall back to 2 attempts, review policy `risky`, research `on`, failure research `on` with 1 search per task, specify `on`, learning `on`, budget thresholds of 80, the effort ladder `on`, the classifier `haiku`, the light path `inline`, and hard start `opus`.
+The session summary is the live routing. Placeholders below fall back to 2 attempts, review policy `risky`, research `on`, failure research `on` with 1 search per task, specify `on`, learning `on`, budget thresholds of 80, the effort ladder `on`, the classifier `haiku`, the light path `inline`, hard start `opus`, and writer `tiers`.
 
 - Max attempts: ${user_config.max_attempts}
 - Review policy: ${user_config.review_policy}
@@ -38,6 +38,7 @@ The session summary is the live routing. Placeholders below fall back to 2 attem
 - Classifier: ${user_config.classifier}
 - Light path: ${user_config.light_path}
 - Hard start: ${user_config.hard_start}
+- Writer: ${user_config.writer}
 
 Read `${CLAUDE_PLUGIN_ROOT}/config/routing.default.json`. If `${CLAUDE_PROJECT_DIR}/.claude/cc-tiers.json` exists, its `when`, `keywords`, `reviewWhen`, and `reviewKeywords` lists replace those lists. Phrases in `${user_config.trivial_extra}` join the Haiku list. Phrases in `${user_config.risky_extra}` join the review list. `/config` wins over the project file for the attempt limit, the review policy, learning, and the budget thresholds.
 
@@ -49,6 +50,7 @@ Read `${CLAUDE_PLUGIN_ROOT}/config/routing.default.json`. If `${CLAUDE_PROJECT_D
 - A `cc-tiers small path` note means the request is one small change that would go to Sonnet. Do what it says. Inline: read the target first; if the change fits about 20 lines of one file (a test file aside), has a clear result, and uses no library API you have not seen, write no plan, research, or subagent call. State the spec as 1-3 criteria in one line of its own message. A bug fix adds or extends the reproducing test when the file has tests. Open and close the attempt with the Opus trailer under Attempts and escalation, with `CC_TIERS_REVIEW: skip` and the `CC_TIERS_VERIFY` lines. Reply in two or three lines with the verify result. Delegate: one `cc-tiers:implementer` call with a spec block of 1-3 criteria, `CC_TIERS_RESEARCH: none - small local change`, and `CC_TIERS_REVIEW: skip`. A change that is bigger than it looked, touches risky code, or leaves you unsure is routed as usual.
 - A request that only asks for an answer, an explanation, a study or an opinion is answered in the session with no slug, spec or implementer. The light path and small path notes end with this rule, and you follow it when no note appears.
 - Hard start `opus`: a task that matches an Opus review keyword (auth, payments, migrations, schema, security, concurrency), or that needs an architecture decision with trade-offs, a bug fix with no clear reproduction or across modules, or an investigation with competing hypotheses, starts on you. Research it, write its spec, implement it yourself as an Opus attempt (the trailer under Attempts and escalation), and send it to `cc-tiers:reviewer`. With hard start `sonnet`, or while conserving, it starts on Sonnet. A keyword that appears only as text (docs, a quoted example, a git command, a test name) while the change touches no such code is not a match: add `CC_TIERS_RISK: none - <reason>` under the delegation header, and cc-tiers drops the hard start, the effort boost, and the routing hint for it. Never add it to a change in auth, payments, migrations, schema, security, or concurrency code.
+- Writer `opus` (`alternate` is `opus` on even local days, `tiers` on odd ones; the session summary's `Writer:` line says which applies today): every writer task, trivial ones included, is your own Opus attempt, not a `cc-tiers:worker` or `cc-tiers:implementer` call, which the hook refuses for a new task. Research it, write its spec, implement it with the trailer under Attempts and escalation, and review it as usual. Light path and small path notes then say to do it yourself, and you do. A task keeps the mode it started in, and while conserving, new work still starts on Sonnet.
 - You: split the request, write the plan, implement a hard task, and implement a task Sonnet could not finish.
 - A line that starts `Budget routing: conserve` means new work stays on Haiku or Sonnet. Opus is only the escalation ceiling and critical review. Planning still happens here.
 - A line that starts `Haiku failure history:` names kinds that already failed on Haiku. A similar task starts on Sonnet even when it looks trivial. History off means you ignore `.claude/cc-tiers-history.json`.

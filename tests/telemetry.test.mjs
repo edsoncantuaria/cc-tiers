@@ -543,3 +543,67 @@ test('the script prints Real use from session files, in the data dir or in --ses
   const other = spawnSync(process.execPath, [SCRIPT, dir, '--sessions', path.join(dir, 'nope')], { encoding: 'utf8' })
   assert.ok(!other.stdout.includes('## Real use'))
 })
+
+test('sanitizeEvent keeps the writer mode as a text key', () => {
+  assert.equal(sanitizeEvent({ type: 'task.passed', task: 'a', mode: 'opus' }).mode, 'opus')
+  assert.equal(sanitizeEvent({ type: 'model.selected', task: 'a', mode: 7 }).mode, undefined)
+})
+
+test('summarize compares tasks by the writer mode they recorded, with unknown for older ones', () => {
+  const mode = (name, extra = {}) => ({ type: 'task.passed', task: name, tier: 'sonnet', ...extra })
+  const summary = summarize([
+    { ...started('t1', 'sonnet'), mode: 'tiers' },
+    mode('t1', { mode: 'tiers', costUsd: 0.1 }),
+    { ...started('t2', 'sonnet'), mode: 'tiers' },
+    { type: 'failure.diagnosed', task: 't2', category: 'test' },
+    mode('t2', { mode: 'tiers', costUsd: 0.2 }),
+    { type: 'task.redone', task: 't2', tier: 'sonnet' },
+    { ...started('o1', 'opus'), mode: 'opus' },
+    { type: 'review.done', task: 'o1', review: { blocking: 1 } },
+    mode('o1', { mode: 'opus', tier: 'opus', costUsd: 0.5 }),
+    { type: 'task.stopped', task: 'o2', tier: 'opus', mode: 'opus', costUsd: 0.25 },
+    mode('old', { costUsd: 0.05 }),
+    { ...started('flip', 'sonnet'), mode: 'tiers' },
+    mode('flip', { mode: 'opus', costUsd: 0.4 }),
+  ])
+  assert.deepEqual(summary.byMode, {
+    tiers: { tasks: 3, clean: 2, redone: 1, blocking: 0, usd: 0.1 + 0.2 + 0.4 },
+    opus: { tasks: 2, clean: 1, redone: 0, blocking: 1, usd: 0.75 },
+    unknown: { tasks: 1, clean: 1, redone: 0, blocking: 0, usd: 0.05 },
+  })
+  const text = renderInsights(summary)
+  assert.match(text, /### By writer mode/)
+  assert.match(text, /\| writer mode \| tasks \| done with no failure \| sent back by the user \| with a blocking review finding \| estimated USD \|/)
+  assert.ok(text.indexOf('| tiers | 3 |') < text.indexOf('| opus | 2 |') && text.indexOf('| opus | 2 |') < text.indexOf('| unknown | 1 |'))
+  for (const name of ['t1', 'o1', 'flip']) assert.ok(!text.includes(name), name)
+  assert.ok(!renderInsights(summarize([mode('old')])).includes('By writer mode'))
+})
+
+test('summarizeSessions and renderRealUse compare tasks by the recorded writer mode, with no slug in the output', () => {
+  const states = [
+    sessionState('s1', 'p-a', {
+      'slug-DISTINCT-a': logEntry({ writer: 'tiers' }),
+      'slug-DISTINCT-b': logEntry({ writer: 'tiers', failures: 1, redo: 1 }),
+      'slug-DISTINCT-c': logEntry({ writer: 'opus', finished: 'opus' }),
+      'slug-DISTINCT-d': logEntry(),
+      'slug-DISTINCT-e': logEntry({ writer: 'bogus' }),
+    }, {
+      'slug-DISTINCT-a': { haiku: 0.5 },
+      'slug-DISTINCT-c': { opus: 1.5, opusRate: 1.5 },
+      '(orchestration)': { opus: 9, opusRate: 9 },
+    }),
+  ]
+  const summary = summarizeSessions(states)
+  assert.deepEqual(summary.byMode, {
+    tiers: { tasks: 2, clean: 1, redone: 1, usd: 0.5 },
+    opus: { tasks: 1, clean: 1, redone: 0, usd: 1.5 },
+    unknown: { tasks: 2, clean: 2, redone: 0, usd: 0 },
+  })
+  const out = renderRealUse(summary)
+  assert.match(out, /### By writer mode/)
+  assert.match(out, /\| tiers \| 2 \| 1 \| 1 \| \$0\.5000 \|/)
+  assert.match(out, /\| opus \| 1 \| 1 \| 0 \| \$1\.50 \|/)
+  assert.match(out, /\| unknown \| 2 \| 2 \| 0 \| \$0\.0000 \|/)
+  assert.ok(!out.includes('DISTINCT') && !out.includes('bogus'))
+  assert.ok(!renderRealUse(summarizeSessions([sessionState('s2', 'p', { one: logEntry() })])).includes('By writer mode'))
+})

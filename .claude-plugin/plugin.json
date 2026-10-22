@@ -82,6 +82,13 @@
       "default": "opus",
       "options": ["opus", "sonnet"]
     },
+    "writer": {
+      "type": "string",
+      "title": "Who writes the code",
+      "description": "tiers (default): routing picks the writer for each task. opus: Opus writes every task, trivial ones included, with research, spec, verify gate, and review as usual, so you can compare it with the tiers. alternate: opus on even days and tiers on odd days (local time). Each task records its mode, and /cc-tiers:insights compares re-asks, review findings, and estimated cost per mode. While budget routing conserves, new work still starts on Sonnet.",
+      "default": "tiers",
+      "options": ["tiers", "opus", "alternate"]
+    },
     "show_cost": {
       "type": "string",
       "title": "Show cost",

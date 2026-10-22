@@ -2831,3 +2831,77 @@ test('a review rejection with a blocking finding of a searchable category gets t
   const off = await reviewFlow('reviewer', block('api-usage'), { probes: { 'bad.mjs': 1 }, routing: defaultRouting({ specify: 'off', verify: 'off', failure_research: 'off' }) })
   assert.equal(off.applied.message.includes('Failure research:'), false)
 })
+
+// A local noon of the first even and the first odd day number (days since 1970-01-01 in local time) in October 2026.
+function localNoon(parity) {
+  for (let day = 1; day < 4; day += 1) {
+    const number = Math.floor(Date.UTC(2026, 9, day) / 86400000)
+    if (number % 2 === parity) return new Date(2026, 9, day, 12).getTime()
+  }
+  throw new Error('no day')
+}
+
+test('writer: option, env, manifest and default file agree, and a bad value falls back to tiers', () => {
+  assert.equal(defaultRouting().writer, 'tiers')
+  for (const value of ['tiers', 'opus', 'alternate']) assert.equal(defaultRouting({ writer: value }).writer, value)
+  assert.equal(defaultRouting({ writer: ' OPUS ' }).writer, 'opus')
+  assert.equal(defaultRouting({ writer: 'bogus' }).writer, 'tiers')
+  assert.equal(tiers.userFromEnv({ CLAUDE_PLUGIN_OPTION_WRITER: 'alternate' }).writer, 'alternate')
+  assert.equal(tiers.userFromEnv({}).writer, null)
+  const option = JSON.parse(readFileSync(path.join(ROOT, '.claude-plugin/plugin.json'), 'utf8')).userConfig.writer
+  assert.equal(option.type, 'string')
+  assert.deepEqual(option.options, ['tiers', 'opus', 'alternate'])
+  assert.equal(option.default, 'tiers')
+  assert.equal(tiers.loadJson(path.join(ROOT, 'config/routing.default.json')).writer, 'tiers')
+})
+
+test('writerMode: alternate is opus on an even local day number and tiers on an odd one', () => {
+  assert.equal(tiers.writerMode(defaultRouting({ writer: 'tiers' })), 'tiers')
+  assert.equal(tiers.writerMode(defaultRouting({ writer: 'opus' })), 'opus')
+  const alternate = defaultRouting({ writer: 'alternate' })
+  const even = localNoon(0)
+  const odd = localNoon(1)
+  assert.equal(tiers.writerMode(alternate, even), 'opus')
+  assert.equal(tiers.writerMode(alternate, odd), 'tiers')
+  const midnight = new Date(even)
+  midnight.setHours(0, 0, 0, 0)
+  const lastMinute = new Date(even)
+  lastMinute.setHours(23, 59, 59, 999)
+  assert.equal(tiers.writerMode(alternate, midnight.getTime()), 'opus')
+  assert.equal(tiers.writerMode(alternate, lastMinute.getTime()), 'opus')
+  assert.equal(tiers.writerMode(alternate, lastMinute.getTime() + 2), 'tiers')
+  assert.equal(tiers.writerMode(defaultRouting({ writer: 'opus' }), odd), 'opus')
+})
+
+test('writer: in opus mode decideTier sends every new task to Opus, and the budget guard still wins', () => {
+  const routing = defaultRouting({ writer: 'opus' })
+  for (const text of ['fix a typo in README', 'Add pagination to GET /users', 'Write a database migration for the users table']) {
+    const decision = tiers.decideTier(text, routing)
+    assert.deepEqual([decision.tier, decision.because, decision.effort], ['opus', 'writer', 'high'], text)
+  }
+  const conserved = tiers.decideTier('fix a typo in README', routing, { conserve: true })
+  assert.deepEqual([conserved.tier, conserved.because], ['sonnet', 'budget'])
+  assert.equal(tiers.decideTier('fix a typo in README', defaultRouting()).tier, 'haiku')
+  assert.equal(tiers.decideTier('fix a typo in README', defaultRouting({ writer: 'alternate' }), { ceiling: true }).because, 'ceiling')
+})
+
+test('writer: in opus mode the light path and small path notes never say to delegate', () => {
+  const routing = defaultRouting({ writer: 'opus', light_path: 'delegate' })
+  const trivial = tiers.lightHint('fix a typo in README', routing)
+  assert.ok(trivial.includes('Do it yourself in this session'))
+  assert.ok(!trivial.includes('cc-tiers:worker'))
+  const small = tiers.lightHint('Add pagination to GET /users', routing)
+  assert.ok(small.includes('do it yourself in this session'))
+  assert.ok(!small.includes('cc-tiers:implementer'))
+  assert.ok(tiers.lightHint('Add pagination to GET /users', defaultRouting({ writer: 'opus' })).includes('do it yourself in this session'))
+  assert.ok(tiers.lightHint('Add pagination to GET /users', defaultRouting({ light_path: 'delegate' })).includes('cc-tiers:implementer'))
+})
+
+test('writer: the session summary has a Writer line that names the mode of the day', () => {
+  const context = (routing) => tiers.formatSessionContext(routing, 'not present', { ccCost: { installed: false } })
+  assert.ok(context(defaultRouting()).includes('Writer: tiers.'))
+  assert.ok(context(defaultRouting({ writer: 'opus' })).includes('Writer: opus.'))
+  assert.match(context(defaultRouting({ writer: 'alternate' })), /Writer: alternate \((opus|tiers) today\)\./)
+  assert.equal(tiers.writerLine(defaultRouting({ writer: 'alternate' }), localNoon(0)).startsWith('Writer: alternate (opus today).'), true)
+  assert.equal(tiers.writerLine(defaultRouting({ writer: 'alternate' }), localNoon(1)).startsWith('Writer: alternate (tiers today).'), true)
+})
