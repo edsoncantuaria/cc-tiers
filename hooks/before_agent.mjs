@@ -8,20 +8,18 @@
  * delivers reports counted since the last hook.
  */
 
-import {
-  checkDelegation,
-  historyPath,
-  loadHistory,
-  openContext,
-  parsePayload,
-  preToolOutput,
-  readStdin,
-  takePending,
-  withSession,
-} from './cc_tiers.mjs'
+import { runHook } from './integrity.mjs'
 
-function main() {
-  const payload = parsePayload(readStdin())
+async function main(payload) {
+  const {
+    checkDelegation,
+    historyPath,
+    loadHistory,
+    openContext,
+    preToolOutput,
+    takePending,
+    withSession,
+  } = await import('./cc_tiers.mjs')
   if (!Object.keys(payload).length) return
   if (payload.tool_name != null && payload.tool_name !== '' && payload.tool_name !== 'Agent') return
   const ctx = openContext(payload)
@@ -37,8 +35,9 @@ function main() {
   process.stdout.write(`${JSON.stringify(preToolOutput(deny, context, input))}\n`)
 }
 
-try {
-  main()
-} catch {
-  process.exit(0)
-}
+runHook('before_agent', main, (note, payload) => {
+  const agent = String(payload.tool_input?.subagent_type || '').trim().toLowerCase()
+  if (!agent.startsWith('cc-tiers:')) return { hookSpecificOutput: { hookEventName: 'PreToolUse', additionalContext: note } }
+  // A cc-tiers delegation the check could not judge is refused, not let through unchecked.
+  return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: note } }
+})

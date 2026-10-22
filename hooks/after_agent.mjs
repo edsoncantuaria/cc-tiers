@@ -1,22 +1,20 @@
 #!/usr/bin/env node
 /** PostToolUse / PostToolUseFailure hook for Agent calls from cc-tiers. */
 
-import {
-  hookOutput,
-  normalizeEvent,
-  openContext,
-  parsePayload,
-  peekFor,
-  prepareReport,
-  processReport,
-  readStdin,
-  takePending,
-  usageFromToolResponse,
-  withSession,
-} from './cc_tiers.mjs'
+import { runHook } from './integrity.mjs'
 
-function main() {
-  const payload = parsePayload(readStdin())
+async function main(payload) {
+  const {
+    hookOutput,
+    normalizeEvent,
+    openContext,
+    peekFor,
+    prepareReport,
+    processReport,
+    takePending,
+    usageFromToolResponse,
+    withSession,
+  } = await import('./cc_tiers.mjs')
   if (!Object.keys(payload).length) return
   const normalized = normalizeEvent(payload)
   if (!normalized) return
@@ -46,8 +44,9 @@ function main() {
   process.stdout.write(`${JSON.stringify(hookOutput(eventName, message))}\n`)
 }
 
-try {
-  main()
-} catch {
-  process.exit(0)
-}
+runHook(
+  'after_agent',
+  main,
+  (note, payload) => ({ hookSpecificOutput: { hookEventName: String(payload.hook_event_name || 'PostToolUse'), additionalContext: note } }),
+  { effect: 'The report was not counted and its gate did not run' },
+)

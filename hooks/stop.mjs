@@ -9,26 +9,24 @@
  * not dropped at the end of the turn.
  */
 
-import {
-  historyPath,
-  hookOutput,
-  lightHint,
-  loadHistory,
-  openContext,
-  dropAwaiting,
-  parsePayload,
-  peekAwaiting,
-  peekParked,
-  prepareParked,
-  processReport,
-  readStdin,
-  releaseIdleWriters,
-  takePending,
-  withSession,
-} from './cc_tiers.mjs'
+import { runHook } from './integrity.mjs'
 
-function main() {
-  const payload = parsePayload(readStdin())
+async function main(payload) {
+  const {
+    historyPath,
+    hookOutput,
+    lightHint,
+    loadHistory,
+    openContext,
+    dropAwaiting,
+    peekAwaiting,
+    peekParked,
+    prepareParked,
+    processReport,
+    releaseIdleWriters,
+    takePending,
+    withSession,
+  } = await import('./cc_tiers.mjs')
   if (!Object.keys(payload).length) return
   const eventName = String(payload.hook_event_name || 'Stop')
   const ctx = openContext(payload)
@@ -66,8 +64,8 @@ function main() {
   process.stdout.write(`${JSON.stringify({ decision: 'block', reason: message })}\n`)
 }
 
-try {
-  main()
-} catch {
-  process.exit(0)
-}
+runHook('stop', main, (note, payload) => {
+  if (String(payload.hook_event_name || 'Stop') === 'UserPromptSubmit') return { hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: note } }
+  // Blocked once; when Claude is already continuing from a stop hook, only the user is told.
+  return payload.stop_hook_active === true ? { systemMessage: note } : { decision: 'block', reason: note }
+})

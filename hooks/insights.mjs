@@ -276,7 +276,7 @@ export function summarizeSessions(states, { minSample = 10 } = {}) {
         if (done) summary.escalatedDone += 1
       }
       if (Array.isArray(task.reviews) && task.reviews.length) summary.reviewed += 1
-      bump(summary.verify, verifyCell(task.verify))
+      bump(summary.verify, verifyCell(task.verify, task.hookErrors))
       if (task.completion) bump(summary.completion, COMPLETIONS.includes(task.completion) ? task.completion : 'other')
     }
     const cost = state.cost && typeof state.cost === 'object' ? state.cost : {}

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- A cc-tiers hook that fails internally no longer exits as if it had succeeded. `before_agent`, `after_agent`, `subagent_stop` and `stop` run through `hooks/integrity.mjs`, which loads `hooks/cc_tiers.mjs` inside the catch, appends the failure to `hook-errors.jsonl` in the plugin data folder (time, session, hook, task slug, redacted error; written even with `telemetry: off`), and tells the orchestrator the work is not validated. The task slug in the record is the one `slug()` tracks, now shared from `hooks/base.mjs`. Before a delegation a `cc-tiers:*` call is refused and another agent gets a note; after an agent (and after a background agent) the note says the report was not counted and its gate did not run; on Stop the stop is blocked once (a `systemMessage` when `stop_hook_active`); on UserPromptSubmit the note joins the context; SubagentStop only warns. The PreToolUse command hook now has `"onFailure": "block"`. The next hook that works marks the named tasks (`hookErrors` in the task log) and says so once; such a task completes at most `partial` with confidence low and the reason in the completion line, a task that had already completed loses `verified` the same way, and `/cc-tiers:report` shows `hook error` and how often the hooks failed.
+
 ## 0.11.2 - 2026-10-22
 
 ### Added

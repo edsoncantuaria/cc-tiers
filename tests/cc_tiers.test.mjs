@@ -255,7 +255,7 @@ test('hooks call node directly, so they run under bash and PowerShell', () => {
   const events = hooks.hooks
   for (const name of ['SessionStart', 'Stop', 'UserPromptSubmit', 'SubagentStop']) assert.ok(events[name], name)
   for (const name of ['PreToolUse', 'PostToolUse', 'PostToolUseFailure']) assert.equal(events[name][0].matcher, 'Agent')
-  assert.equal(events.PreToolUse[0].hooks[0].onFailure, 'continue')
+  assert.equal(events.PreToolUse[0].hooks[0].onFailure, 'block')
   const classifier = events.PreToolUse[1]
   assert.equal(classifier.matcher, 'Agent')
   assert.equal(classifier.hooks[0].type, 'prompt')

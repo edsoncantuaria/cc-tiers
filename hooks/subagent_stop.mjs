@@ -6,23 +6,21 @@
  * state until the next hook that can reach the orchestrator.
  */
 
-import {
-  agentHandbackReport,
-  agentTranscriptUsage,
-  matchRole,
-  openContext,
-  parseHeaders,
-  parsePayload,
-  peekFor,
-  prepareReport,
-  processReport,
-  queueMessage,
-  readStdin,
-  withSession,
-} from './cc_tiers.mjs'
+import { runHook } from './integrity.mjs'
 
-function main() {
-  const payload = parsePayload(readStdin())
+async function main(payload) {
+  const {
+    agentHandbackReport,
+    agentTranscriptUsage,
+    matchRole,
+    openContext,
+    parseHeaders,
+    peekFor,
+    prepareReport,
+    processReport,
+    queueMessage,
+    withSession,
+  } = await import('./cc_tiers.mjs')
   const agentId = String(payload.agent_id || '')
   if (!agentId) return
   const ctx = openContext(payload)
@@ -65,8 +63,5 @@ function main() {
   })
 }
 
-try {
-  main()
-} catch {
-  process.exit(0)
-}
+// Blocking a SubagentStop would keep the subagent running; the next hook that works tells the orchestrator.
+runHook('subagent_stop', main, (note) => ({ systemMessage: note }), { effect: 'The background report was not counted and its gate did not run' })

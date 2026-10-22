@@ -19,13 +19,14 @@ import {
 } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { TIERS, dollars, extractFiles, writeAtomic } from './base.mjs'
+import { TIERS, dollars, extractFiles, slug, writeAtomic } from './base.mjs'
 import { BUDGET_OVERRIDE_RE, budgetMessage, budgetStatus, parseTaskBudget } from './budget.mjs'
 import { completion, evaluateCriteria, oneSpacing, parseContract, parseCriterionReports, parseReproLines, plural, weakenedCriteria } from './contract.mjs'
 import { declaresPackage, diagnoseFailure, failureResearchLines, missingPackage, nextAction } from './diagnose.mjs'
 import { MEMORY_BEGIN, MEMORY_END, MEMORY_IGNORE, addRecord, formatRecall, loadMemory, memoryPath, recall, sanitize, saveMemory } from './memory.mjs'
 import { checkParallel, declaredFiles, pruneActive, registerActive, releaseActive } from './parallel.mjs'
 import { availableChecks, parseProfile, profileSettings, reviewRequired, selectChecks } from './policy.mjs'
+import { readHookErrors } from './integrity.mjs'
 import { clip } from './redact.mjs'
 import { assessRisk, riskRank, testsAvailableIn } from './risk.mjs'
 import { parseTelemetry, recordEvent, telemetryPath } from './telemetry.mjs'
@@ -1229,14 +1230,6 @@ function contentText(content) {
   return ''
 }
 
-function slug(value) {
-  return String(value || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9-]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 64)
-}
-
 export function normalizeEvent(raw) {
   if (!raw || typeof raw !== 'object') return null
   const event = String(raw.hook_event_name || '')
@@ -1655,6 +1648,12 @@ function finishTask(state, task, routing, { reviewed, tier }) {
   })
   if (state.contracts) delete state.contracts[task]
   if (state.evidence) delete state.evidence[task]
+  // A hook that failed on this task may have skipped a gate or a count, so the pass is never more than partial.
+  const hookErrors = Number(entry?.hookErrors) || 0
+  if (hookErrors) {
+    if (result.status === 'verified') result.status = 'partial'
+    result.confidence = { level: 'low', reasons: [...result.confidence.reasons, `a cc-tiers hook failed ${hookErrors === 1 ? 'once' : `${hookErrors} times`} on this task`] }
+  }
   const { checks } = result
   const criteriaPart = result.criteria.total ? ` Criteria with evidence: ${result.criteria.evidenced}/${result.criteria.total}.` : ' No spec criteria.'
   const remaining = result.remaining.length ? ` Remaining: ${result.remaining.slice(0, 6).join('; ')}.` : ''
@@ -2961,6 +2960,7 @@ export function openContext(payload, env = process.env) {
 export function withSession(ctx, payload, fn) {
   return withLock(ctx.file, () => {
     const state = ctx.file ? loadState(ctx.file, ctx.sessionId) : emptyState(ctx.sessionId)
+    absorbHookErrors(state, ctx.dataDir)
     const scan = scanTranscript(state, payload.transcript_path, ctx.routing)
     const budget = budgetDecision(collectLimits({ payload, cursor: state.cursor, env: ctx.env }), ctx.routing)
     ctx.routing.conserve = budget.conserve
@@ -2978,6 +2978,34 @@ export function withSession(ctx, payload, fn) {
     if (ctx.file) saveState(ctx.file, state)
     return result
   })
+}
+
+/** Marks each task a failed hook named and tells the orchestrator once per batch of new failures. */
+export function absorbHookErrors(state, dataDir) {
+  if (!dataDir) return
+  const found = readHookErrors(dataDir, state.session_id)
+  const seen = Number.isInteger(state.hookErrorsSeen) && state.hookErrorsSeen >= 0 ? state.hookErrorsSeen : 0
+  const fresh = found.slice(seen)
+  state.hookErrorsSeen = found.length
+  if (!fresh.length) return
+  const tasks = []
+  for (const row of fresh) {
+    const task = slug(row.task)
+    if (!task) continue
+    const entry = logEntry(state, task)
+    entry.hookErrors = (Number(entry.hookErrors) || 0) + 1
+    // A task that already completed is not validated either: the failure may have skipped its count.
+    if (entry.completion === 'verified') entry.completion = 'partial'
+    if (entry.completion) entry.confidence = 'low'
+    if (!tasks.includes(task)) tasks.push(task)
+  }
+  const hooks = [...new Set(fresh.map((row) => String(row.hook || '')).filter(Boolean))]
+  const named = tasks.length ? ` ${tasks.join(', ')} ${tasks.length === 1 ? 'is' : 'are'} not validated.` : ''
+  queueMessage(
+    state,
+    `cc-tiers recorded ${plural(fresh.length, 'internal hook error')} (${hooks.join(', ') || 'unknown hook'}): the checks that hook should have run did not run.${named} ` +
+      'Do not report that work as verified: it stays at most partial in this session. Run its checks yourself and tell the user what you verified.',
+  )
 }
 
 /**

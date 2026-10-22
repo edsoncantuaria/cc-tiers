@@ -28,7 +28,8 @@ export function sessionFiles(dataDir, all) {
     .map((name) => path.join(dataDir, name))
 }
 
-export function verifyCell(verify) {
+export function verifyCell(verify, hookErrors = 0) {
+  if (Number(hookErrors) > 0) return 'hook error'
   if (!verify) return '—'
   if (verify.flaky?.length) return 'flaky'
   if (verify.unverified?.length) return 'not validated'
@@ -79,14 +80,16 @@ export function renderReport(states) {
     const reviews = [...new Set(entry.reviews || [])].join(', ')
     const status = entry.status === 'done' && entry.finished ? `done on ${entry.finished}` : entry.status
     lines.push(
-      `| ${cell(task)} | ${cell((entry.tiers || []).join(' → '))} | ${entry.attempts ?? 0} | ${entry.escalations ?? 0} | ${cell(effort)} | ${cell(reviews)} | ${verifyCell(entry.verify)} | ${cell(status)} | ${row ? dollars(costTotal(row)) : '—'} | ${row ? dollars(row.opusRate) : '—'} | ${cell(entry.risk)} | ${cell(entry.completion)} | ${cell(entry.confidence)} | ${minutes(entry.durationMs)} |`,
+      `| ${cell(task)} | ${cell((entry.tiers || []).join(' → '))} | ${entry.attempts ?? 0} | ${entry.escalations ?? 0} | ${cell(effort)} | ${cell(reviews)} | ${verifyCell(entry.verify, entry.hookErrors)} | ${cell(status)} | ${row ? dollars(costTotal(row)) : '—'} | ${row ? dollars(row.opusRate) : '—'} | ${cell(entry.risk)} | ${cell(entry.completion)} | ${cell(entry.confidence)} | ${minutes(entry.durationMs)} |`,
     )
   }
   if (cost[OVERHEAD]) {
     lines.push(`| ${OVERHEAD} | — | — | — | — | — | — | — | ${dollars(costTotal(cost[OVERHEAD]))} | ${dollars(cost[OVERHEAD].opusRate)} | — | — | — | — |`)
   }
   const summary = costSummary(cost)
+  const hookErrors = states.reduce((sum, state) => sum + (Number.isInteger(state.hookErrorsSeen) ? state.hookErrorsSeen : 0), 0)
   lines.push('')
+  if (hookErrors) lines.push(`cc-tiers hooks failed ${hookErrors === 1 ? 'once' : `${hookErrors} times`}: a task marked hook error is not validated.`, '')
   lines.push(
     `Total: about ${dollars(summary.total)} at Anthropic API list prices. The same tokens at Opus rates: about ${dollars(summary.opus)} ` +
       `(${Math.round(summary.saved * 100)}% less). Subscription plans are not billed this way; read it as a comparison. ` +

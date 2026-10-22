@@ -557,8 +557,18 @@ A memória, a telemetria e a trilha de auditoria guardam só texto que passou an
 - O contexto da sessão informa o perfil, a memória, a telemetria, o orçamento da tarefa, se a pesquisa de falha está ligada e o limite dela, e as regras de paralelismo e de contrato em vigor.
 - O `.claude/cc-tiers.json` também pode definir `profile`, `memory`, `telemetry`, `maxParallel`, `taskBudgetUsd`, `taskBudgetCalls`, `taskBudgetMinutes`, `budgetWarnAt`, `contractApproval`, `failureResearch` e `failureResearchMax`. O `/config` ganha quando os dois estão definidos.
 
+### Falhas dos hooks
+
+Um erro interno num hook do cc-tiers nunca vale como sucesso. `before_agent`, `after_agent`, `subagent_stop` e `stop` o capturam, até quando o próprio `hooks/cc_tiers.mjs` não carrega, gravam uma linha em `hook-errors.jsonl` na pasta de dados do plugin (hora, sessão, hook, slug da tarefa, o erro já mascarado) e avisam:
+
+- Antes de uma delegação, a chamada `cc-tiers:*` é recusada com o motivo; outro agente passa com um aviso. O hook de comando do PreToolUse tem `"onFailure": "block"`, então uma queda que ele não captura, ou o timeout de 15 s, também recusa a chamada.
+- Depois de um agente, o orquestrador fica sabendo que o relatório não foi contado, o gate não rodou e a tarefa não está validada.
+- No Stop, a parada é bloqueada uma vez com esse aviso (só aviso quando o Claude já está continuando por um hook de parada). Num prompt, o aviso entra no contexto.
+- O próximo hook que funcionar marca as tarefas citadas nessas linhas. Uma tarefa assim nunca fecha como `verified`: no máximo `partial`, confiança baixa, com o motivo na linha de conclusão. Uma tarefa que já tinha fechado perde o `verified` do mesmo jeito, e o `/cc-tiers:report` mostra `hook error`.
+
 ### Limitações
 
+- Um SubagentStop que falha não pode bloquear, porque isso manteria o subagente rodando: o aviso chega ao orquestrador no próximo hook que funcionar.
 - O lock de estado espera 3 s; depois disso um hook segue sem ele, então uma sessão muito ocupada pode perder uma contagem.
 - A foto do workspace vem do `git status`, então arquivos que o git ignora não são vistos.
 - Sem `CC_TIERS_FILES`, o escopo são os caminhos que o prompt cita. Caminhos absolutos são descartados, então um prompt que cita só esses tem escopo desconhecido e o escritor dele roda sozinho.
@@ -741,6 +751,7 @@ claude --plugin-dir .
 | `hooks/parallel.mjs` | O registro dos escritores em andamento, o escopo de arquivos, as dependências e o teto |
 | `hooks/workspace.mjs` | Fotos da árvore de trabalho, arquivos sensíveis e fora do escopo, e a validação do estado |
 | `hooks/telemetry.mjs`, `hooks/insights.mjs` | O log local de eventos e o auxiliar por trás do `/cc-tiers:insights` |
+| `hooks/integrity.mjs` | Falhas dos hooks: o registro em `hook-errors.jsonl` e o aviso de que o trabalho não está validado |
 | `hooks/redact.mjs` | A máscara de segredos antes da memória, da telemetria e da trilha de auditoria |
 | `.github/workflows/ci.yml` | Testes no Linux, macOS e Windows, e `claude plugin validate` |
 | `CHANGELOG.md` | Notas da versão |

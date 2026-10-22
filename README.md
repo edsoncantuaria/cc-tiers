@@ -557,8 +557,18 @@ Memory, telemetry, and the audit trail store only text that went through `hooks/
 - The session context states the profile, memory, telemetry, the task budget, whether failure research is on and its cap, and the parallel and contract rules in force.
 - `.claude/cc-tiers.json` may also set `profile`, `memory`, `telemetry`, `maxParallel`, `taskBudgetUsd`, `taskBudgetCalls`, `taskBudgetMinutes`, `budgetWarnAt`, `contractApproval`, `failureResearch`, and `failureResearchMax`. `/config` wins when both are set.
 
+### Hook failures
+
+An internal error in a cc-tiers hook is never taken as a success. `before_agent`, `after_agent`, `subagent_stop` and `stop` catch it, even when `hooks/cc_tiers.mjs` itself fails to load, append one line to `hook-errors.jsonl` in the plugin data folder (time, session, hook, task slug, the redacted error), and say so:
+
+- Before a delegation, a `cc-tiers:*` call is refused with the reason; another agent goes through with a note. The PreToolUse command hook has `"onFailure": "block"`, so a crash it cannot catch, or its 15 s timeout, refuses the call too.
+- After an agent, the orchestrator is told the report was not counted, its gate did not run, and the task is not validated.
+- On Stop, the stop is blocked once with that warning (only a warning when Claude is already continuing from a stop hook). On a prompt, the warning is added to the context.
+- The next hook that works marks the tasks those lines name. Such a task never completes as `verified`: at most `partial`, confidence low, with the reason in the completion line. A task that had already completed loses `verified` the same way, and `/cc-tiers:report` shows `hook error`.
+
 ### Limitations
 
+- A SubagentStop that fails cannot block, since that would keep the subagent running: its warning reaches the orchestrator at the next hook that works.
 - The state lock waits 3 s; after that a hook proceeds without it, so a very busy session can lose a count.
 - The workspace snapshot comes from `git status`, so files that git ignores are not seen.
 - Without `CC_TIERS_FILES`, the scope is the paths named in the prompt. Absolute paths are dropped, so a prompt that names only those has an unknown scope and its writer runs alone.
@@ -741,6 +751,7 @@ claude --plugin-dir .
 | `hooks/parallel.mjs` | The registry of running writers, file scope, dependencies, and the cap |
 | `hooks/workspace.mjs` | Working-tree snapshots, sensitive and out-of-scope files, and state validation |
 | `hooks/telemetry.mjs`, `hooks/insights.mjs` | The local event log and the helper behind `/cc-tiers:insights` |
+| `hooks/integrity.mjs` | Hook failures: the record in `hook-errors.jsonl` and the warning that the work is not validated |
 | `hooks/redact.mjs` | Secret masking before memory, telemetry, and the audit trail |
 | `.github/workflows/ci.yml` | Tests on Linux, macOS, and Windows, and `claude plugin validate` |
 | `CHANGELOG.md` | Release notes |

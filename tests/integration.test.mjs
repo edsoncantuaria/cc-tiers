@@ -1076,6 +1076,22 @@ test('completion: a first-try pass prints the line as before, with no retry or r
   assert.equal(line, 'cc-tiers completion: tweak verified on sonnet, low risk; confidence high (gate verified 1 command). Checks run 1, passed 1, failed 0, not run 0. No spec criteria.')
 })
 
+test('completion: a task a hook failed on is at most partial, with low confidence and the reason', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const { state, send } = completionSession()
+    const prompt = plainTask('tweak')
+    delegate(state, routingWith(), 'implementer', prompt)
+    writeFileSync(path.join(dir, 'hook-errors.jsonl'), `${JSON.stringify({ ts: 'x', session: 's', hook: 'after_agent', task: 'tweak', error: 'Error: boom' })}\n`)
+    tiers.absorbHookErrors(state, dir)
+    const line = completionLine(send('c1', 'implementer', 'sonnet', 'pass', prompt, { gate: passGate() }))
+    assert.match(line, /^cc-tiers completion: tweak partial on sonnet, low risk; confidence low \(gate verified 1 command; a cc-tiers hook failed once on this task\)/)
+    assert.equal(state.log.tweak.completion, 'partial')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('completion: a pass after a retry says how many attempts failed', () => {
   const { state, send } = completionSession()
   const prompt = plainTask('tweak')

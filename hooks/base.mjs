@@ -9,6 +9,15 @@ import path from 'node:path'
 
 export const TIERS = ['haiku', 'sonnet', 'opus']
 
+/** A CC_TIERS_TASK value as cc-tiers tracks it: lowercase, runs of other characters as one hyphen, at most 64. */
+export function slug(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64)
+}
+
 export function dollars(value) {
   const number = Number(value) || 0
   if (number >= 1) return `$${number.toFixed(2)}`
