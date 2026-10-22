@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
@@ -100,6 +100,103 @@ test('redo works for a slug named like an Object.prototype key, and with telemet
   assert.equal(readEvents(dir).length, 0)
 })
 
+test('redo takes telemetry and the project dir from its arguments, since the command line has no plugin environment', (t) => {
+  const dir = tempDir(t)
+  const file = writeSession(dir, 's1', { 'fix-login': entry() })
+  const result = redo.run([dir, 's1', '--telemetry', 'off', '--project', '', 'fix-login', 'still', 'broken'], { now: NOW, env: {} })
+  assert.equal(result.code, 0)
+  assert.equal(readLog(file)['fix-login'].redo, 1)
+  assert.equal(readEvents(dir).length, 0, 'telemetry off writes no event')
+  assert.equal(redo.run([dir, 's1', '--telemetry', 'off', '--undo', 'fix-login'], { env: {} }).code, 0)
+  assert.equal(readLog(file)['fix-login'].redo, 0)
+  assert.equal(readEvents(dir).length, 0)
+  assert.equal(redo.run([dir, 's1', '--telemetry', 'on', 'fix-login'], { now: NOW, env: { CLAUDE_PLUGIN_OPTION_TELEMETRY: 'off' } }).code, 0)
+  assert.deepEqual(readEvents(dir).map((event) => event.type), ['task.redone'], 'the argument wins over the environment')
+})
+
+test('redo honours telemetry off from the project file named by --project', (t) => {
+  const dir = tempDir(t)
+  const project = tempDir(t)
+  mkdirSync(path.join(project, '.claude'))
+  writeFileSync(path.join(project, '.claude', 'cc-tiers.json'), JSON.stringify({ telemetry: 'off' }))
+  const file = writeSession(dir, 's1', { 'fix-login': entry() })
+  assert.equal(redo.run([dir, 's1', '--telemetry', '', '--project', project, 'fix-login'], { now: NOW, env: {} }).code, 0)
+  assert.equal(readLog(file)['fix-login'].redo, 1)
+  assert.equal(readEvents(dir).length, 0)
+  assert.equal(redo.run([dir, 's1', 'fix-login'], { now: NOW, env: {} }).code, 0)
+  assert.equal(readEvents(dir).length, 1, 'without the project dir the level falls back to on')
+})
+
+test('redo ignores an empty or unsubstituted setting and falls back to telemetry on', (t) => {
+  const dir = tempDir(t)
+  writeSession(dir, 's1', { 'fix-login': entry() })
+  const result = redo.run([dir, 's1', '--telemetry', '${user_config.telemetry}', '--project', '${CLAUDE_PROJECT_DIR}', 'fix-login'], { now: NOW, env: {} })
+  assert.equal(result.code, 0)
+  assert.equal(readEvents(dir).length, 1)
+  assert.equal(redo.run([dir, 's1', '--telemetry', '', 'fix-login'], { now: NOW, env: {} }).code, 0)
+  assert.equal(readEvents(dir).length, 2)
+})
+
+test('redo joins every word after the slug into the reason, quoted or not', (t) => {
+  const dir = tempDir(t)
+  writeSession(dir, 's1', { 'fix-login': entry() })
+  redo.run([dir, 's1', 'fix-login', "doesn't work (again)"], { now: NOW, env: {} })
+  redo.run([dir, 's1', 'fix-login', 'broken', '(again)'], { now: NOW, env: {} })
+  assert.deepEqual(readEvents(dir).map((event) => event.reason), ["doesn't work (again)", 'broken (again)'])
+})
+
+test('the bash line of redo.md runs end to end with telemetry off and a quoted reason', (t) => {
+  const dir = tempDir(t)
+  const file = writeSession(dir, 's1', { 'fix-login': entry() })
+  const line = readFileSync(path.join(ROOT, 'commands', 'redo.md'), 'utf8').match(/```bash\n(.+)\n```/)[1]
+  assert.match(line, /--telemetry '\$\{user_config\.telemetry\}' --project "\$\{CLAUDE_PROJECT_DIR\}" \$ARGUMENTS$/)
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('CLAUDE_')))
+  const bash = (telemetryValue) =>
+    spawnSync(
+      'bash',
+      [
+        '-c',
+        line
+          .replaceAll('${CLAUDE_PLUGIN_ROOT}', ROOT)
+          .replaceAll('${CLAUDE_PLUGIN_DATA}', dir)
+          .replaceAll('${CLAUDE_SESSION_ID}', 's1')
+          .replaceAll('${CLAUDE_PROJECT_DIR}', '')
+          .replaceAll('${user_config.telemetry}', telemetryValue)
+          .replace('$ARGUMENTS', "fix-login 'doesn'\\''t work (again)'"),
+      ],
+      { encoding: 'utf8', env },
+    )
+  const off = bash('off')
+  assert.equal(off.status, 0, off.stderr)
+  assert.match(off.stdout, /Marked fix-login/)
+  assert.equal(readLog(file)['fix-login'].redo, 1)
+  assert.equal(readEvents(dir).length, 0)
+  const raw = bash('${user_config.telemetry}')
+  assert.equal(raw.status, 0, raw.stderr)
+  assert.equal(readEvents(dir)[0].reason, "doesn't work (again)")
+})
+
+test('redo keeps the times of another session file it saves', (t) => {
+  const dir = tempDir(t)
+  writeSession(dir, 'current', {})
+  const when = new Date('2026-10-05T08:00:00Z')
+  const other = writeSession(dir, 'other', { 'fix-login': entry() }, when)
+  assert.equal(redo.run([dir, 'current', 'fix-login'], { now: NOW, env: {} }).code, 0)
+  const after = statSync(other)
+  assert.equal(after.mtimeMs, when.getTime())
+  assert.equal(after.atimeMs, when.getTime())
+  assert.equal(readLog(other)['fix-login'].redo, 1)
+})
+
+test('redo skips a session file that vanished before it was read', (t) => {
+  const dir = tempDir(t)
+  writeSession(dir, 'current', {})
+  symlinkSync(path.join(dir, 'gone.json'), path.join(dir, 'session-gone.json'))
+  const real = writeSession(dir, 'real', { 'fix-login': entry() })
+  assert.equal(redo.run([dir, 'current', 'fix-login'], { now: NOW, env: {} }).code, 0)
+  assert.equal(readLog(real)['fix-login'].redo, 1)
+})
+
 test('the script runs from the command line', (t) => {
   const dir = tempDir(t)
   writeSession(dir, 's1', { 'fix-login': entry() })
@@ -135,6 +232,7 @@ test('redoFromPrompt ignores a missing complaint word, a task not done, a substr
   assert.deepEqual(tiers.redoFromPrompt(state, 'the prefix is still broken, and fixes too'), [])
   assert.deepEqual(tiers.redoFromPrompt(state, 'fix-login-more is still broken'), [])
   assert.deepEqual(tiers.redoFromPrompt(state, '/cc-tiers:redo fix still broken'), [])
+  assert.deepEqual(tiers.redoFromPrompt(state, 'o fix continua a mesma coisa'), [])
   assert.equal(state.events.length, 0)
   assert.equal(tiers.redoFromPrompt(state, 'constructor is broken').length, 1)
 })

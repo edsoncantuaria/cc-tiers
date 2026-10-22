@@ -3370,7 +3370,7 @@ export function undoRedo(state, task) {
 }
 
 const COMPLAINT = [
-  'ainda', 'n[ãa]o\\s+funciona', 'quebrou', 'voltou', 'de\\s+novo', 'continua', 'errado', 'deu\\s+erro',
+  'ainda', 'n[ãa]o\\s+funciona', 'quebrou', 'voltou', 'de\\s+novo', 'errado', 'deu\\s+erro',
   'still', 'broken', 'again', "doesn['’]t\\s+work", 'not\\s+working', 'wrong', 'regressed',
 ]
 const COMPLAINT_RE = new RegExp(`(?<![\\p{L}\\p{N}])(?:${COMPLAINT.join('|')})(?![\\p{L}\\p{N}])`, 'iu')
