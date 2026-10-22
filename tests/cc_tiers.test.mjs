@@ -3344,7 +3344,7 @@ test('a review rejection with a blocking finding of a searchable category gets t
     const { applied } = await reviewFlow('reviewer', block(category), { probes: { 'bad.mjs': 1 } })
     assert.equal(applied.meta.outcome, 'retry', category)
     assert.match(applied.message, new RegExp(`Diagnosis: ${diagnosed} `), category)
-    assert.match(applied.message, /Failure research: run cc-tiers:researcher for users-pagination before the retry/, category)
+    assert.match(applied.message, /Failure research: run cc-tiers:researcher for users-pagination before the next attempt/, category)
     assert.match(applied.message, /\nCC_TIERS_FAILURE: /, category)
     assert.equal(applied.state.tasks['users-pagination'].searches, 1, category)
   }

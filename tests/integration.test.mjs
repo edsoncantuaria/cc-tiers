@@ -1080,7 +1080,7 @@ test('completion: a clean pass the gate reused for the same tree is counted as r
 
 const failReport = (task, role, tier, reason) => [`CC_TIERS_TASK: ${task}`, `CC_TIERS_TIER: ${tier}`, `CC_TIERS_ROLE: ${role}`, 'CC_TIERS_STATUS: fail', `CC_TIERS_REASON: ${reason}`].join('\n')
 const failOn = (state, routing, id, reason, tier = 'sonnet', role = 'implementer') => tiers.applyEvent(state, event(id, role, failReport('paging', role, tier, reason), role === 'orchestrator' ? '' : writer('paging')), routing)
-const SEARCH_LINE = 'Failure research: run cc-tiers:researcher for paging before the retry'
+const SEARCH_LINE = 'Failure research: run cc-tiers:researcher for paging before the next attempt'
 const OLD_ADVICE = 'Run cc-tiers:researcher again for the installed version'
 const DOCS_REASON = 'TypeError: fs.cpSync is not a function'
 const failureLines = (message) => message.split('\n').filter((line) => line.startsWith('CC_TIERS_FAILURE: '))
@@ -1214,7 +1214,7 @@ test('failure research: the count survives an early move up a tier, and a sugges
   assert.equal(state.tasks.paging.searches, 1)
 })
 
-test('failure research: a researcher run with CC_TIERS_FAILURE lines queues research.failure with the match and marks nothing researched', () => {
+test('failure research: a researcher run with CC_TIERS_FAILURE lines queues research.failure with the match; only a pass marks the task researched', () => {
   const prompt = (extra = '') => `${header('paging', 'sonnet', 'researcher')}CC_TIERS_FAILURE: ${DOCS_REASON}\n${extra}Research it.`
   const researched = (match) => `${header('paging', 'sonnet', 'researcher')}${match ? `CC_TIERS_MATCH: ${match}\n` : ''}CC_TIERS_STATUS: pass\nCC_TIERS_REASON: done`
   for (const [reported, outcome] of [['high', 'high'], ['Partial', 'partial'], ['none', 'none'], ['', 'unknown'], ['sure', 'unknown']]) {
@@ -1223,13 +1223,14 @@ test('failure research: a researcher run with CC_TIERS_FAILURE lines queues rese
     assert.equal(out.meta.outcome, 'research')
     assert.match(out.message, new RegExp(`failure research for paging reported match ${outcome}\\. It counts no attempt`))
     assert.deepEqual(state.events.map(({ type, task, outcome }) => ({ type, task, outcome })), [{ type: 'research.failure', task: 'paging', outcome }])
-    assert.equal(state.researched?.paging, undefined, 'the task is not marked researched')
+    assert.equal(state.researched?.paging, true, 'a pass marks the task researched, so a retry may carry the brief')
     assert.equal(state.tasks.paging, undefined, 'no attempt is counted')
   }
   const failed = tiers.emptyState('s')
   const out = tiers.applyEvent(failed, event('r2', 'researcher', failReport('paging', 'researcher', 'sonnet', 'no sources'), prompt()), routingWith())
   assert.match(out.message, /failure research for paging did not pass/)
   assert.equal(failed.events[0].outcome, 'unknown')
+  assert.equal(failed.researched?.paging, undefined, 'a failed search marks nothing')
   const plain = tiers.emptyState('s')
   tiers.applyEvent(plain, event('r3', 'researcher', researched('high'), header('paging', 'sonnet', 'researcher')), routingWith())
   assert.equal(plain.researched.paging, true)

@@ -690,6 +690,10 @@ test('failureResearchLines: absolute, home, file and Windows paths become <path>
     symptom: 'cannot call x from /home/ana/app/src/a.js then ~/b.js then ~root/c then file:///srv/d.js then C:\\Users\\ana\\e.js then src/rel.js, see https://nodejs.org/api/fs.html (3/4)',
   })
   assert.equal(line, 'CC_TIERS_FAILURE: cannot call x from <path> then <path> then <path> then <path> then <path> then src/rel.js, see https://nodejs.org/api/fs.html (3/4)')
+  const [glued] = failureResearchLines({ category: 'test', symptom: 'ENOENT:/home/ana/x.js and file:/srv/y.js and C:\\Program Files\\node\\node.exe, see http://a.b/c' })
+  assert.equal(glued, 'CC_TIERS_FAILURE: ENOENT:<path> and file:<path> and <path> <path>, see http://a.b/c')
+  const [lone] = failureResearchLines({ category: 'test', symptom: 'closed / stays open' })
+  assert.equal(lone, 'CC_TIERS_FAILURE: closed / stays open', 'a lone slash is no path')
 })
 
 test('failureResearchLines: a CC_TIERS_ token never survives, so a symptom cannot open or close a block or forge a header', () => {

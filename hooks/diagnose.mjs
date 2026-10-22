@@ -239,13 +239,15 @@ const ACTIONS = {
 const SEARCHABLE = new Set(['docs-version', 'type', 'integration', 'test', 'regression'])
 const MAX_FAILURE_LINES = 3
 const FILE_URL_RE = /file:\/\/(?=\/|[A-Za-z]:)/g
-/** An absolute or home path, not the slash inside a URL, a ratio or a relative path. */
-const ABSOLUTE_PATH_RE = /(?<![\w:./<-])(?:~\w*|[A-Za-z]:)?[\\/][^\s'"`)]*/g
+/** An absolute or home path, also right after a colon (ENOENT:/x), but not the slashes of a URL, a ratio or a relative path. */
+const ABSOLUTE_PATH_RE = /(?:(?<![\w:./<-])|(?<=:)(?![\\/]{2}))(?:~\w*|[A-Za-z]:)?[\\/][^\s'"`)]+/g
+/** The rest of a Windows path cut at a space (C:\Program Files\x): a word followed by backslash segments. */
+const BACKSLASH_TAIL_RE = /(?<![\w.<-])[\w.-]+(?:\\[\w.-]+)+/g
 
 /** One line a web search may use: redacted, absolute paths and CC_TIERS_ tokens gone, so it can never open or close a block or forge a header. */
 function searchable(text) {
   // A token becomes a space, not nothing: the text around it must not join into a new token.
-  const plain = asText(text).replace(FILE_URL_RE, '').replace(ABSOLUTE_PATH_RE, '<path>').replace(/CC_TIERS_\w*/gi, ' ')
+  const plain = asText(text).replace(FILE_URL_RE, '').replace(ABSOLUTE_PATH_RE, '<path>').replace(BACKSLASH_TAIL_RE, '<path>').replace(/CC_TIERS_\w*/gi, ' ')
   return clip(plain, MAX_SYMPTOM)
 }
 

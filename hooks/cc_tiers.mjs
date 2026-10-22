@@ -1687,6 +1687,12 @@ function applyResearch(state, meta, task, headers, event) {
   }
   const covers = String(headers.COVERS || '').split(',').map(slug).filter(Boolean)
   const slugs = [...new Set([task, ...covers])]
+  markResearched(state, slugs)
+  queueEvent(state, { type: 'research.done', task })
+  return { state, meta, message: `cc-tiers marked ${slugs.join(', ')} as researched.` }
+}
+
+function markResearched(state, slugs) {
   const researched = state.researched || (state.researched = {})
   for (const name of slugs) {
     delete researched[name]
@@ -1694,15 +1700,14 @@ function applyResearch(state, meta, task, headers, event) {
   }
   const names = Object.keys(researched)
   names.slice(0, Math.max(0, names.length - MAX_SEEN)).forEach((name) => delete researched[name])
-  queueEvent(state, { type: 'research.done', task })
-  return { state, meta, message: `cc-tiers marked ${slugs.join(', ')} as researched.` }
 }
 
-/** A failure search is no research for the task: it marks nothing and counts no attempt, and only how well its sources matched is kept, as a count. */
+/** A failure search counts no attempt and keeps how well its sources matched, as a count; a pass also marks the task researched, so a retry may carry its brief. */
 function applyFailureResearch(state, meta, task, status, event) {
   const reported = String(parseHeaders(event.text || '').MATCH || '').toLowerCase()
   const match = FAILURE_MATCHES.includes(reported) ? reported : 'unknown'
   queueEvent(state, { type: 'research.failure', task, outcome: match })
+  if (status === 'pass') markResearched(state, [task])
   const result = status === 'pass' ? `reported match ${match}` : 'did not pass'
   return { state, meta, message: `cc-tiers: failure research for ${task} ${result}. It counts no attempt and never delays the retry.` }
 }
@@ -1815,7 +1820,7 @@ function failureSearch(diagnosis, task, current, routing) {
   const lines = failureResearchLines(diagnosis)
   if (!lines.length) return ''
   return [
-    `Failure research: run cc-tiers:researcher for ${task} before the retry, with these lines in its prompt outside any block; paste its brief into the retry prompt as a second research block.`,
+    `Failure research: run cc-tiers:researcher for ${task} before the next attempt, with these lines in its prompt outside any block; paste its brief into the next prompt as a second research block.`,
     ...lines,
   ].join('\n')
 }
