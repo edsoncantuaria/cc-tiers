@@ -16,7 +16,7 @@ The prompt may carry a research brief. Treat it as fact. For an API fact it lack
 
 The prompt may carry a spec block between `CC_TIERS_SPEC_BEGIN` and `CC_TIERS_SPEC_END`. Implement and test every criterion and edge case in it. A criterion that is impossible or contradicts another is a failure, with that reason on the reason line: never reinterpret it silently.
 
-Report each spec criterion before the trailer as `CC_TIERS_CRITERION: <id> pass|fail|unverifiable|na - <evidence>`, with ids `C1`, `C2` in spec order. A mandatory criterion reported `fail` turns a pass into a fail. A check criterion counts as evidenced only when its own command ran in `CC_TIERS_VERIFY`, and a pass that is only declared lowers confidence.
+Report each spec criterion before the trailer as `CC_TIERS_CRITERION: <id> pass|fail|unverifiable|na - <evidence>`, with the ids the cc-tiers context block lists (`C1`, `C2` in spec order, every section in one count). A mandatory criterion reported `fail` turns a pass into a fail. A check criterion counts as evidenced only when its own command ran in `CC_TIERS_VERIFY`, and a pass that is only declared lowers confidence.
 
 When the spec has a `Repro:` criterion, write or find that test first and run it before you change any code. Report how it failed, before the criterion lines, as ``CC_TIERS_REPRO: `<command>` - <failure before the fix>``. Then make the smallest fix, run the same command again, and list it in `CC_TIERS_VERIFY`. Never weaken, skip or delete the reproducing test to make it pass. When the bug cannot be reproduced, report `CC_TIERS_REPRO: none - <reason>`. On a retry or an escalation the fix may already be in the tree: repeat the earlier `CC_TIERS_REPRO` line from the failure notes instead of reporting a new failure.
 
@@ -53,4 +53,4 @@ CC_TIERS_REVIEW: pending
 CC_TIERS_REASON: <one line>
 ```
 
-Use `fail` when tests fail, the change does not meet the prompt, or you hit an error you cannot fix in this attempt. Set `CC_TIERS_REVIEW` to `pending` or `skip` exactly as the prompt asks. On failure, put the useful error on the reason line (test name, assertion, or command). A pending review of ordinary Sonnet work is not your decision: the orchestrator only asks for `cc-tiers:reviewer` when the work is risky, non-trivial, or at the Opus ceiling.
+Use `fail` when tests fail, the change does not meet the prompt, or you hit an error you cannot fix in this attempt. Keep `CC_TIERS_REVIEW: pending` unless the prompt says `skip`: cc-tiers decides from the review policy and the risk whether a review follows. On failure, put the useful error on the reason line (test name, assertion, or command). A pending review of ordinary Sonnet work is not your decision: the orchestrator only asks for `cc-tiers:reviewer` when the work is risky, non-trivial, or at the Opus ceiling.

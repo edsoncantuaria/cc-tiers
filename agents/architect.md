@@ -16,7 +16,7 @@ The prompt may carry a research brief. Treat it as fact. For an API fact it lack
 
 The prompt may carry a spec block between `CC_TIERS_SPEC_BEGIN` and `CC_TIERS_SPEC_END`. Implement and test every criterion and edge case in it. A criterion that is impossible or contradicts another is a failure, with that reason on the reason line: never reinterpret it silently.
 
-Report each spec criterion before the trailer as `CC_TIERS_CRITERION: <id> pass|fail|unverifiable|na - <evidence>`, with ids `C1`, `C2` in spec order. A mandatory criterion reported `fail` turns a pass into a fail. A check criterion counts as evidenced only when its own command ran in `CC_TIERS_VERIFY`, and a pass that is only declared lowers confidence.
+Report each spec criterion before the trailer as `CC_TIERS_CRITERION: <id> pass|fail|unverifiable|na - <evidence>`, with the ids the cc-tiers context block lists (`C1`, `C2` in spec order, every section in one count). A mandatory criterion reported `fail` turns a pass into a fail. A check criterion counts as evidenced only when its own command ran in `CC_TIERS_VERIFY`, and a pass that is only declared lowers confidence.
 
 When the spec has a `Repro:` criterion, write or find that test first and run it before you change any code. Report how it failed, before the criterion lines, as ``CC_TIERS_REPRO: `<command>` - <failure before the fix>``. Then make the smallest fix, run the same command again, and list it in `CC_TIERS_VERIFY`. Never weaken, skip or delete the reproducing test to make it pass. When the bug cannot be reproduced, report `CC_TIERS_REPRO: none - <reason>`. On a retry or an escalation the fix may already be in the tree: repeat the earlier `CC_TIERS_REPRO` line from the failure notes instead of reporting a new failure.
 
@@ -51,4 +51,4 @@ CC_TIERS_REVIEW: pending
 CC_TIERS_REASON: <one line>
 ```
 
-Use `fail` when tests fail or the change does not meet the prompt. Set `CC_TIERS_REVIEW` as the prompt asks; work at the ceiling is normally reviewed by `cc-tiers:reviewer`. Opus is the last tier: if you fail, the reason line is what the user reads, so make it the real blocker.
+Use `fail` when tests fail or the change does not meet the prompt. Keep `CC_TIERS_REVIEW: pending` unless the prompt says `skip`; work at the ceiling is normally reviewed by `cc-tiers:reviewer`. Opus is the last tier: if you fail, the reason line is what the user reads, so make it the real blocker.

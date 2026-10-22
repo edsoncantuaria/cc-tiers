@@ -12,7 +12,7 @@ import {
   collectLimits,
   decideTier,
   historyPath,
-  isRisky,
+  keywordRisk,
   loadHistory,
   loadJson,
   mergeRouting,
@@ -31,7 +31,7 @@ const routing = mergeRouting(loadJson(path.join(pluginRoot(env), 'config', 'rout
 const budget = budgetDecision(collectLimits({ env }), routing)
 const history = routing.learn ? loadHistory(historyPath(projectDir)) : null
 const decision = decideTier(text, routing, { history, conserve: budget.conserve, projectDir })
-const risky = isRisky(text, routing)
+const risky = Boolean(keywordRisk(text, routing))
 const complexity = assessComplexity(text, routing, { projectDir })
 const review = selectReviewer({ policy: routing.reviewPolicy, writerTier: decision.tier, risky, conserve: budget.conserve })
 const result = {

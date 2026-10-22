@@ -1121,8 +1121,9 @@ test('completion: a task that finishes on a review pass still counts the attempt
   tiers.releaseIdleWriters(state)
   const reviewPrompt = `${header('tweak', 'sonnet', 'reviewer')}diff --git a/src/x.js`
   assert.equal(delegate(state, routingWith(), 'reviewer', reviewPrompt).deny, '')
+  // The review header says opus, but Sonnet wrote the diff: the completion names the writer's tier.
   const line = completionLine(send('c3', 'reviewer', 'opus', 'pass', reviewPrompt))
-  assert.match(line, /^cc-tiers completion: tweak \w+ on opus after 1 failed attempt, /)
+  assert.match(line, /^cc-tiers completion: tweak \w+ on sonnet after 1 failed attempt, /)
 })
 
 test('completion: a log entry that is missing or has no counters reads as no retries', () => {

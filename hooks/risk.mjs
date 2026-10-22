@@ -8,6 +8,8 @@ import path from 'node:path'
 import { fold } from './verify.mjs'
 
 export const RISK_LEVELS = ['low', 'medium', 'high', 'critical']
+/** A risk keyword in the task text while every file it names is ordinary: high risk, Sonnet writes it, Opus must review it. */
+export const TEXT_KEYWORD_FACTOR = 'risk keyword, no sensitive file named'
 
 // Whole words of a path, so docs/author.md or src/tokenizer.js are not sensitive; `.env` is matched as a file name.
 const SENSITIVE_WORDS = new Set([
@@ -64,7 +66,7 @@ function pathWords(file) {
   return fold(spaced).split(/[^a-z0-9]+/)
 }
 
-const isSensitivePath = (file) => ENV_FILE_RE.test(baseName(file)) || pathWords(file).some((word) => SENSITIVE_WORDS.has(word))
+export const isSensitivePath = (file) => ENV_FILE_RE.test(baseName(file)) || pathWords(file).some((word) => SENSITIVE_WORDS.has(word))
 
 function topLevelDirs(files) {
   const dirs = new Set()
@@ -104,7 +106,10 @@ function scoreRisk({ text, files, keywordRisk, complexity, history, testsAvailab
   if (complexityScore) factors.push(`complexity score ${rawScore}`)
 
   let sensitivity = 0
-  if (keywordRisk) {
+  if (keywordRisk === 'text') {
+    sensitivity = 2
+    factors.push(TEXT_KEYWORD_FACTOR)
+  } else if (keywordRisk) {
     sensitivity = 3
     factors.push('risk keyword')
   }

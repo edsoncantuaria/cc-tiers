@@ -208,7 +208,7 @@ test('agents pin family aliases, including the Sonnet checker', () => {
     for (const needle of ['cc-tiers:researcher', 'CC_TIERS_RESEARCH_BEGIN', 'CC_TIERS_RESEARCH: none - ', 'into the `cc-tiers:reviewer` or `cc-tiers:checker` prompt', 'reuses the research']) {
       assert.ok(text.includes(needle), `${file} mentions ${needle}`)
     }
-    assert.ok(text.includes('|reviewer|researcher\n'), `${file} header lists the researcher role`)
+    assert.ok(text.includes('`CC_TIERS_TIER` and `CC_TIERS_ROLE` lines are optional'), `${file} says only CC_TIERS_TASK is required`)
   }
   const brief = readFileSync(path.join(ROOT, 'agents', 'researcher.md'), 'utf8')
   for (const needle of ['Version and docs:', 'In the repo:', 'Outside the repo:', 'under about 40 lines']) assert.ok(brief.includes(needle), `researcher mentions ${needle}`)
@@ -483,7 +483,8 @@ test('a task moved to a new tier inside a failure keeps its infra skip count', (
   const routing = riskyRouting()
   const state = tiers.emptyState('sess-1')
   state.tasks['users-pagination'] = { tier: 'sonnet', failures: ['sonnet/implementer: broke'], carried: [], infra: 2 }
-  const moved = apply(state, routing, 'k1', 'reviewer', report('reviewer', 'opus', 'fail', '', 'still wrong'))
+  // An Opus writer attempt on a task the counter still holds at sonnet moves it inside applyFailure.
+  const moved = apply(state, routing, 'k1', 'architect', report('architect', 'opus', 'fail', '', 'still wrong'))
   assert.equal(moved.meta.outcome, 'retry')
   assert.equal(moved.state.tasks['users-pagination'].tier, 'opus')
   assert.equal(moved.state.tasks['users-pagination'].infra, 2)
