@@ -1512,10 +1512,22 @@ export function applyEvent(state, event, routing) {
 
   let current = own(tasks, task)
   if (!current || typeof current !== 'object') current = { tier, failures: [], carried: [] }
-  // A writer report is a new attempt: a rejection of the attempt before it no longer sticks.
   if (current.rejected && !REVIEW_ROLES.has(role)) {
+    // The session's own pass, parked until Stop, of the attempt a review already rejected: it is that attempt, not a new one.
+    if (id && (current.judged || []).includes(id)) {
+      meta.tier = tier
+      meta.outcome = stoppedAt(current, routing) ? 'stop' : 'retry'
+      meta.stillRejected = true
+      return {
+        state,
+        meta,
+        message: `${gateNote}Task ${task}: its review already rejected this ${tier} attempt, so this pass is not a new attempt and the rejection stands. ${meta.outcome === 'stop' ? 'The task stays stopped: report it to the user.' : `Retry with that review's notes (${implementerFor(current.tier)}).`}`,
+      }
+    }
+    // Any other writer report is a new attempt: a rejection of the attempt before it no longer sticks.
     current = { ...current }
     delete current.rejected
+    delete current.judged
   }
 
   // The counter already moved past this tier. A stale lower-tier run must not reset it.
@@ -1611,7 +1623,10 @@ export function applyEvent(state, event, routing) {
     }
     meta.outcome = applied.outcome
     // A rejection sticks to the writer attempt it judged: a pass from another review of that attempt must not clear it.
-    if (['retry', 'escalate', 'stop'].includes(applied.outcome)) tasks[task] = { ...tasks[task], rejected: true }
+    if (['retry', 'escalate', 'stop'].includes(applied.outcome)) {
+      const judged = [...new Set([...(tasks[task]?.judged || []), ...parkedFor(state, task).map((item) => item.id)])].slice(-MAX_JUDGED)
+      tasks[task] = { ...tasks[task], rejected: true, ...(judged.length ? { judged } : {}) }
+    }
     if (applied.outcome === 'review') meta.floor = reviewFloor(state, task, routing, flagged)
     if (verdictless && !applied.stillRejected) applied.message = `Task ${task}: the review had no CC_TIERS_STATUS line but had blocking findings, so it counts as a failure. ${applied.message}`
     message = reviewLine ? `${reviewLine}\n${applied.message}` : applied.message
@@ -1814,9 +1829,16 @@ function stoppedAt(current, routing) {
   return (current.failures?.length || 0) >= Number(routing.maxAttempts)
 }
 
+const MAX_JUDGED = 10
+
+/** The session's own reports of a task that wait for the Stop gate, oldest first. */
+function parkedFor(state, task) {
+  return (state.awaiting || []).filter((item) => item?.id && slug(parseHeaders(item.text || '').TASK || '') === task)
+}
+
 /** The tier of the last writer attempt of a task: a session attempt still waiting for its gate, its counter, else its log; '' when none knows it. */
 function writerTier(state, task) {
-  const parked = (state.awaiting || []).filter((item) => slug(parseHeaders(item?.text || '').TASK || '') === task).pop()
+  const parked = parkedFor(state, task).pop()
   if (parked && TIERS.includes(ROLES[parked.role])) return ROLES[parked.role]
   const counted = own(state.tasks, task)?.tier
   if (TIERS.includes(counted)) return counted
@@ -2064,8 +2086,8 @@ export function checkDelegation(state, toolInput, routing, { history = null, pro
     }
   }
   const now = Date.now()
-  // A task keeps the mode it recorded first, even when alternate flips at midnight.
-  const mode = own(state.log, task)?.writer || writerMode(routing, now)
+  // A task keeps the mode it recorded first, even when alternate flips at midnight; one started while conserving routes, and is recorded, as tiers.
+  const mode = own(state.log, task)?.writer || (routing.conserve === true ? 'tiers' : writerMode(routing, now))
   const spent = taskBudgetStatus(state, task, routing, now)
   if (spent.state === 'over' && !BUDGET_OVERRIDE_RE.test(headers.BUDGET || '')) return refuse(`cc-tiers: ${budgetMessage(task, spent)}`)
   for (const name of String(headers.RELEASE || '').split(',').map(slug).filter(Boolean)) releaseActive(state, name)

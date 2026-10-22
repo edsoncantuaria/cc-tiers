@@ -1340,7 +1340,9 @@ test('writer opus: a task that already has a tier is untouched, and conserving l
   const conserving = { ...routing, conserve: true }
   const conserved = tiers.emptyState('s')
   assert.equal(delegate(conserved, conserving, 'implementer', `${header('paging', 'sonnet', 'implementer')}Add pagination`).deny, '')
-  assert.equal(conserved.log.paging.writer, 'opus')
+  // Conserving routes it as tiers, so it must not count in the opus row of the mode comparison.
+  assert.equal(conserved.log.paging.writer, 'tiers')
+  assert.equal(delegate(tiers.emptyState('s'), conserving, 'worker', `${header('typo', 'haiku', 'worker')}Fix the typo in README.md`).deny, '')
 })
 
 test('writer: a task records its mode once, at its first delegation, and keeps it when the day flips', () => {

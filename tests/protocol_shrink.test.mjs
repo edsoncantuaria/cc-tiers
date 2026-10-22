@@ -156,3 +156,30 @@ test("a review of the session's own Opus attempt, still waiting for its gate, is
     const other = step(state, routing, dir, 'r2', 'reviewer', text.replaceAll('gate-env', 'users-pagination'), 'CC_TIERS_TASK: users-pagination\nReview.')
     assert.equal(other.meta.tier, 'sonnet')
   }))
+
+test('a review that rejects the session attempt parked for Stop keeps its rejection when that parked report is counted', () =>
+  inTemp(async (dir) => {
+    // Verify off here: the parking is set by hand, and the gate is not what this test checks.
+    const routing = routingWith({ specify: 'off' })
+    const state = tiers.emptyState('s')
+    const own = 'CC_TIERS_TASK: gate-env\nCC_TIERS_TIER: opus\nCC_TIERS_ROLE: orchestrator\nCC_TIERS_STATUS: pass\nCC_TIERS_REASON: done'
+    state.awaiting = [{ id: 'transcript:1', role: 'orchestrator', text: own }]
+    const rejected = step(state, routing, dir, 'r1', 'reviewer', `${finding}\nCC_TIERS_TASK: gate-env\nCC_TIERS_STATUS: fail\nCC_TIERS_REASON: page size`, 'CC_TIERS_TASK: gate-env\nReview.')
+    assert.equal(rejected.meta.outcome, 'retry')
+    assert.deepEqual(state.tasks['gate-env'].judged, ['transcript:1'])
+    // Stop counts the parked pass: it is the attempt the review judged, not a new one.
+    const parked = tiers.applyEvent(state, tiers.prepareReport({ routing, projectDir: dir }, { kind: 'report', id: 'transcript:1', role: 'orchestrator', prompt: '', text: own }), routing)
+    tiers.dropAwaiting(state, ['transcript:1'])
+    assert.equal(parked.meta.outcome, 'retry')
+    assert.equal(parked.meta.stillRejected, true)
+    assert.match(parked.message, /its review already rejected this opus attempt/)
+    assert.equal(state.tasks['gate-env'].rejected, true)
+    assert.equal(state.tasks['gate-env'].failures.length, 1)
+    const slice = step(state, routing, dir, 'r2', 'reviewer', 'CC_TIERS_TASK: gate-env\nCC_TIERS_STATUS: pass\nCC_TIERS_REASON: ok', 'CC_TIERS_TASK: gate-env\nReview.')
+    assert.equal(slice.meta.outcome, 'retry', 'another review of the rejected attempt does not finish it')
+    // The next session attempt is new: it clears the rejection and goes to review.
+    const next = tiers.applyEvent(state, tiers.prepareReport({ routing, projectDir: dir }, { kind: 'report', id: 'transcript:2', role: 'orchestrator', prompt: '', text: own }), routing)
+    assert.equal(next.meta.outcome, 'review')
+    assert.equal(state.tasks['gate-env'].rejected, undefined)
+    assert.equal(state.tasks['gate-env'].judged, undefined)
+  }))
