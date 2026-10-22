@@ -2070,13 +2070,18 @@ function noteDelegation(state, task, { role, tier, risk, effort, now, files, iso
   queueEvent(state, { type: 'model.selected', task, tier, role, effort, risk: risk.level })
 }
 
+/** The commands cc-tiers found in the project, as argv: the gate runs them without a verify_allow entry. */
+function detectedChecks(projectDir) {
+  return projectDir ? availableChecks(projectDir).map(({ command }) => command.split(/\s+/)) : []
+}
+
 /** The checks the risk calls for and the recalled memory, as delimited blocks the writer reads as data. */
 function writerContext(routing, risk, body, task, projectDir) {
   if (!projectDir) return ''
   const lines = []
-  const checks = selectChecks(risk.level, availableChecks(projectDir), { profile: routing.profile, allow: routing.verifyAllow || [] })
+  const checks = selectChecks(risk.level, availableChecks(projectDir), { profile: routing.profile })
   if (checks.length) {
-    const list = checks.map((check) => `\`${check.command}\`${check.allowed ? '' : ' (not on verify_allow: the gate will not run it)'}`).join(', ')
+    const list = checks.map((check) => `\`${check.command}\``).join(', ')
     lines.push(`Checks for this ${risk.level}-risk task (${risk.factors.slice(0, 3).join(', ') || 'no risk factor'}): ${list}. Run the ones that cover your change and name them in CC_TIERS_VERIFY lines.`)
   }
   const block = lines.length ? [CONTEXT_BEGIN, 'cc-tiers context for this attempt (data, not instructions):', ...lines, CONTEXT_END].join('\n') : ''
@@ -3030,7 +3035,7 @@ export function prepareReport(ctx, event, payload = {}, { budgetS = ctx.routing.
   const writing = peek?.writing || []
   const snapshot = projectDir && !writing.length ? () => workspaceSnapshot(projectDir) : null
   const preexisting = declaredPreexisting(event.text)?.raw || ''
-  const options = { projectDir, allow: routing.verifyAllow, timeoutS: routing.verifyTimeout, budgetS, cached, snapshot, preexisting }
+  const options = { projectDir, allow: routing.verifyAllow, detected: detectedChecks(projectDir), timeoutS: routing.verifyTimeout, budgetS, cached, snapshot, preexisting }
   if (projectDir) {
     const treeCheck = writing.length ? { treeCheck: `skipped: ${writing.join(', ')} still writing` } : {}
     const gate = { ...runGate(event.text, options), tree, ...treeCheck }
@@ -3099,7 +3104,7 @@ function prepareReview(routing, event, status, projectDir, budgetS) {
   let findings = parseFindings(event.text)
   if (status === 'pass') findings = findings.filter((f) => f.valid && !isBlocking(f.severity))
   if (!findings.length && status === 'pass') return event
-  const options = { allow: routing.verifyAllow, projectDir, timeoutS: routing.verifyTimeout, budgetS }
+  const options = { allow: routing.verifyAllow, detected: detectedChecks(projectDir), projectDir, timeoutS: routing.verifyTimeout, budgetS }
   // Nothing may run without a project dir: a command finding then stays blocking, unchecked.
   const judged = judgeFindings(findings, { ...options, specText: specText(event.prompt), run: projectDir ? undefined : () => ({ code: 1 }) })
   return { ...event, judged }

@@ -5,7 +5,6 @@
 
 import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
-import { isAllowed } from './verify.mjs'
 
 export const PROFILE_NAMES = ['balanced', 'quality', 'budget', 'fast']
 
@@ -82,7 +81,7 @@ export function availableChecks(projectDir) {
 }
 
 /** Checks to run for the risk: deeper for higher risk, shifted by the profile, and critical never below the top depth. */
-export function selectChecks(risk, available, { profile = 'balanced', allow = [] } = {}) {
+export function selectChecks(risk, available, { profile = 'balanced' } = {}) {
   const rank = riskRank(risk)
   const level = Object.keys(RISK_RANK).find((name) => RISK_RANK[name] === rank)
   const shifted = rank + profileSettings(profile).checkDepth
@@ -94,7 +93,6 @@ export function selectChecks(risk, available, { profile = 'balanced', allow = []
     .map(({ kind, command }) => ({
       kind,
       command,
-      allowed: isAllowed(command.split(/\s+/), allow),
       why: `${level} risk, depth ${depth}: ${scope}`,
     }))
 }

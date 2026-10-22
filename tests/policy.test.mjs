@@ -9,7 +9,6 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const { PROFILES, PROFILE_NAMES, availableChecks, evidenceRule, parseProfile, profileSettings, reviewRequired, selectChecks } = await import(
   pathToFileURL(path.join(ROOT, 'hooks', 'policy.mjs')).href
 )
-const { parseAllow } = await import(pathToFileURL(path.join(ROOT, 'hooks', 'verify.mjs')).href)
 
 async function withProject(files, fn) {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-policy-'))
@@ -171,18 +170,10 @@ test('selectChecks treats an unknown risk as medium and skips kinds the project 
   assert.deepEqual(selectChecks('low', undefined), [])
 })
 
-test('selectChecks marks commands outside the allow list', () => {
-  const allow = parseAllow('npm test, npm run')
-  const checks = selectChecks('critical', ALL, { allow })
-  const flags = Object.fromEntries(checks.map((check) => [check.command, check.allowed]))
-  assert.deepEqual(flags, {
-    'npm test': true,
-    'npm run lint': true,
-    'npx tsc --noEmit': false,
-    'vendor/bin/phpstan analyse': false,
-    'npm audit --omit=dev': false,
-  })
-  assert.ok(selectChecks('low', ALL).every((check) => check.allowed === false))
+test('selectChecks lists the detected commands as they are, with no allow flag: the gate runs them all', () => {
+  const checks = selectChecks('critical', ALL)
+  assert.deepEqual(checks.map((check) => check.command), ['npm test', 'npm run lint', 'npx tsc --noEmit', 'vendor/bin/phpstan analyse', 'npm audit --omit=dev'])
+  assert.ok(checks.every((check) => !('allowed' in check)))
 })
 
 test('evidenceRule follows strictFrom and strong from high', () => {

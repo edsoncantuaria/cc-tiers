@@ -116,6 +116,63 @@ export function isAllowed(argv, allow) {
   return allow.some((entry) => entry.length <= argv.length && entry.every((token, i) => token === argv[i]))
 }
 
+/**
+ * The container wrappers the gate looks through, with the only options it accepts before the container.
+ * Anything else (-e, --env-file, --privileged, -d, an unknown option) makes the line a plain command again.
+ */
+const WRAPPERS = [
+  // --user is left out: the code-flag check reads it as an abbreviation of --userconfig, so only -u gets here.
+  { prefix: ['docker', 'exec'], flags: ['-i', '--interactive', '-t', '--tty', '-it', '-ti'], values: ['-w', '--workdir', '-u'] },
+  { prefix: ['docker', 'compose', 'exec'], flags: ['-T', '--no-tty'], values: ['-w', '--workdir', '-u', '--index'] },
+  { prefix: ['docker-compose', 'exec'], flags: ['-T', '--no-tty'], values: ['-w', '--workdir', '-u', '--index'] },
+]
+
+/** The command a docker exec or compose exec line runs in its container, or null when argv is not such a line. */
+export function wrappedCommand(argv) {
+  const wrapper = WRAPPERS.find(({ prefix }) => prefix.every((token, i) => argv[i] === token))
+  if (!wrapper) return null
+  let i = wrapper.prefix.length
+  while (i < argv.length && argv[i].startsWith('-')) {
+    const token = argv[i]
+    if (wrapper.flags.includes(token)) {
+      i += 1
+      continue
+    }
+    const eq = token.indexOf('=')
+    // Only the long form takes =value; a short option takes the next token.
+    if (eq > 0 && token.startsWith('--') && wrapper.values.includes(token.slice(0, eq)) && eq < token.length - 1) i += 1
+    else if (wrapper.values.includes(token) && i + 1 < argv.length) i += 2
+    else return null
+  }
+  // argv[i] is the container or the service; the command follows it.
+  return i + 1 < argv.length ? argv.slice(i + 1) : null
+}
+
+/**
+ * True when the gate may run argv: the allow list covers it, it is one of the commands cc-tiers
+ * detected in the project (exactly, not as a prefix), or it is a wrapper around such a command.
+ * A wrapped line with leading env is refused: DOCKER_CONFIG, DOCKER_HOST and the like choose what docker runs.
+ */
+export function gateAllows(argv, allow, detected = [], env = {}) {
+  const covered = (tokens) => isAllowed(tokens, allow) || detected.some((entry) => entry.length === tokens.length && entry.every((token, i) => token === tokens[i]))
+  if (covered(argv)) return true
+  const inner = Object.keys(env || {}).length ? null : wrappedCommand(argv)
+  return Boolean(inner) && covered(inner)
+}
+
+/** Programs that run whatever code follows them (bash -c, python -c): an entry of the bare name would allow anything. */
+const INTERPRETERS = new Set(['bash', 'sh', 'zsh', 'dash', 'fish', 'python', 'python3', 'node', 'php', 'ruby', 'perl', 'deno', 'bun', 'pwsh', 'powershell'])
+
+/** The narrowest verify_allow entry that covers this command on other files: it without the paths it ends with. */
+export function allowPrefix(argv) {
+  const tokens = wrappedCommand(argv) || argv
+  // An interpreter keeps its script or subcommand, so the entry never allows its -c.
+  const keep = INTERPRETERS.has(String(tokens[0]).toLowerCase()) ? 2 : 1
+  let end = tokens.length
+  while (end > keep && /[\\/]|\.\w+$|^\.+$/.test(tokens[end - 1])) end -= 1
+  return tokens.slice(0, end).join(' ')
+}
+
 /** Real paths when the dir exists, so a symlink cannot lead out; a missing dir is judged by its path. */
 function insideProject(projectDir, cwd) {
   const resolved = path.resolve(projectDir)
@@ -163,7 +220,7 @@ export function runCommand(cmd, { projectDir, timeoutS }) {
  * preexisting is the raw command the writer declared failing without its change: its failure is kept apart
  * in gate.preexisting and the other commands still run; any other failure is gate.failure and stops the gate.
  */
-export function runGate(text, { projectDir, allow, timeoutS, budgetS, run = runCommand, cached = null, snapshot = null, preexisting = '' }) {
+export function runGate(text, { projectDir, allow, detected = [], timeoutS, budgetS, run = runCommand, cached = null, snapshot = null, preexisting = '' }) {
   const gate = { status: 'unverified', verified: [], flaky: [], unverified: [], failure: null, cached: [] }
   const lines = parseVerify(text)
   if (!lines.length) return { ...gate, status: 'missing' }
@@ -186,8 +243,12 @@ export function runGate(text, { projectDir, allow, timeoutS, budgetS, run = runC
       skip(line.raw, `cd dir outside the project: ${line.raw}`)
       continue
     }
-    if (!isAllowed(line.argv, allow)) {
-      skip(line.raw, `outside verify_allow: ${line.raw} (add its prefix in /config)`)
+    if (!gateAllows(line.argv, allow, detected, line.env)) {
+      if (Object.keys(line.env).length && wrappedCommand(line.argv)) {
+        skip(line.raw, `refused env on a docker exec line, which can choose what docker runs: ${line.raw}`)
+        continue
+      }
+      skip(line.raw, `outside verify_allow: ${line.raw} (add \`${allowPrefix(line.argv)}\` to verify_allow in /config, keeping the entries already there)`)
       continue
     }
     if (cached && cached(line.raw)) {
@@ -349,9 +410,9 @@ export function parseFindings(text) {
 }
 
 /** Runs a blocking command finding once: true when it failed (still blocks), false when it passed, null when it could not run. */
-function commandFails(finding, { allow, projectDir, timeoutS }, budget, run) {
+function commandFails(finding, { allow, detected, projectDir, timeoutS }, budget, run) {
   const line = parseLine(finding.command)
-  if (line.kind !== 'command' || !insideProject(projectDir, line.cwd) || !isAllowed(line.argv, allow) || budget.remaining <= 0) return null
+  if (line.kind !== 'command' || !insideProject(projectDir, line.cwd) || !gateAllows(line.argv, allow, detected, line.env) || budget.remaining <= 0) return null
   const seconds = Math.min(timeoutS, budget.remaining)
   const result = run(line, { projectDir, timeoutS: seconds })
   budget.remaining -= (result.ms || 0) / 1000
@@ -360,7 +421,7 @@ function commandFails(finding, { allow, projectDir, timeoutS }, budget, run) {
 }
 
 /** Splits findings by what the hook can check; only blocking ones with evidence that holds stay blocking. */
-export function judgeFindings(findings, { specText, allow, projectDir, timeoutS, budgetS, run = runCommand }) {
+export function judgeFindings(findings, { specText, allow, detected = [], projectDir, timeoutS, budgetS, run = runCommand }) {
   const judged = { blocking: [], discarded: [], notes: [], invalid: [] }
   const budget = { remaining: budgetS }
   const spec = new Set(String(specText || '').split(/\r?\n/).map(criterionKey).filter(Boolean))
@@ -373,7 +434,7 @@ export function judgeFindings(findings, { specText, allow, projectDir, timeoutS,
       if (spec.has(criterionKey(finding.criterion))) judged.blocking.push(finding)
       else judged.invalid.push({ ...finding, valid: false, problem: spec.size ? 'criterion not in the spec block' : 'no spec block to cover' })
     } else if (finding.evidence === 'command') {
-      const fails = commandFails(finding, { allow, projectDir, timeoutS }, budget, run)
+      const fails = commandFails(finding, { allow, detected, projectDir, timeoutS }, budget, run)
       if (fails === false) judged.discarded.push(finding)
       else judged.blocking.push(finding)
     } else judged.blocking.push(finding)

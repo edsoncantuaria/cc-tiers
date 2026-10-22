@@ -174,11 +174,11 @@ test('out of list → unverified, not fail', () => {
   assert.equal(result.failure, null)
   assert.equal(calls.length, 0)
   assert.deepEqual(result.unverified, [
-    { raw: 'docker exec app php artisan test', reason: 'outside verify_allow: docker exec app php artisan test (add its prefix in /config)' },
+    { raw: 'docker exec app php artisan test', reason: 'outside verify_allow: docker exec app php artisan test (add `php artisan test` to verify_allow in /config, keeping the entries already there)' },
     { raw: 'none - checked the screen by hand', reason: 'checked the screen by hand' },
   ])
   assert.equal(verify.gateMessage('booking', result), [
-    'cc-tiers gate: booking not validated: outside verify_allow: docker exec app php artisan test (add its prefix in /config)',
+    'cc-tiers gate: booking not validated: outside verify_allow: docker exec app php artisan test (add `php artisan test` to verify_allow in /config, keeping the entries already there)',
     'cc-tiers gate: booking not validated: checked the screen by hand',
   ].join('\n'))
   const mixed = gate('CC_TIERS_VERIFY: docker exec app x\nCC_TIERS_VERIFY: npm test', scripted().run)
@@ -586,4 +586,103 @@ test('review message and writer note', () => {
   assert.match(verify.reviewMessage('T1', { blocking: [], discarded: [], notes: [], invalid: [] }, { failed: true }), /rejected without evidence; 0 finding/)
   const real = judge(FIELDS)
   assert.equal(verify.findingsNote(real), 'state @ src/a.js:1: stays open / closed')
+})
+
+const argv = (text) => text.split(' ')
+
+test('wrappedCommand looks through docker exec and compose exec with the accepted options only', () => {
+  const inner = (text) => verify.wrappedCommand(argv(text))
+  assert.deepEqual(inner('docker exec -w /app -u www-data -it qc vendor/bin/phpunit --filter X'), ['vendor/bin/phpunit', '--filter', 'X'])
+  assert.deepEqual(inner('docker exec --workdir=/app -u 1000 -i -t qc npm test'), ['npm', 'test'])
+  assert.deepEqual(inner('docker compose exec -T --index 2 -w /srv app npm test'), ['npm', 'test'])
+  assert.deepEqual(inner('docker compose exec --index=1 --no-tty app npm test'), ['npm', 'test'])
+  assert.deepEqual(inner('docker-compose exec -T app vendor/bin/phpunit'), ['vendor/bin/phpunit'])
+  for (const refused of [
+    'docker exec -e FOO=1 qc npm test',
+    'docker exec --user root qc npm test',
+    'docker exec --env FOO=1 qc npm test',
+    'docker exec --env-file .env qc npm test',
+    'docker exec --privileged qc npm test',
+    'docker exec -d qc npm test',
+    'docker exec --detach-keys x qc npm test',
+    'docker exec -w/app qc npm test',
+    'docker exec -w=/app qc npm test',
+    'docker exec -T qc npm test',
+    'docker compose exec -i app npm test',
+    'docker compose exec --dry-run app npm test',
+    'docker exec --workdir= qc npm test',
+    'docker exec -w',
+    'docker exec qc',
+    'docker exec',
+    'docker --context x exec qc npm test',
+    'docker run qc npm test',
+  ]) {
+    assert.equal(inner(refused), null, refused)
+  }
+  assert.equal(verify.wrappedCommand(['npm', 'test']), null)
+})
+
+test('gateAllows: the allow list, a detected command exactly, or a wrapper around either', () => {
+  const allow = verify.parseAllow('npm test, vendor/bin/phpunit')
+  const detected = [['npx', 'eslint', '.'], ['go', 'vet', './...']]
+  assert.equal(verify.gateAllows(argv('vendor/bin/phpunit tests/Unit'), allow, detected), true)
+  assert.equal(verify.gateAllows(argv('npx eslint .'), allow, detected), true)
+  assert.equal(verify.gateAllows(argv('npx eslint . --fix'), allow, detected), false, 'a detected command is exact, not a prefix')
+  assert.equal(verify.gateAllows(argv('docker exec -w /app qc vendor/bin/phpunit'), allow, detected), true)
+  assert.equal(verify.gateAllows(argv('docker compose exec -T app npx eslint .'), allow, detected), true)
+  assert.equal(verify.gateAllows(argv('docker exec qc sh -c vendor/bin/phpunit'), allow, detected), false)
+  assert.equal(verify.gateAllows(argv('docker exec --privileged qc vendor/bin/phpunit'), allow, detected), false)
+  assert.equal(verify.gateAllows(argv('docker exec qc rm -rf /'), allow, detected), false)
+  assert.equal(verify.gateAllows(argv('docker exec qc'), allow), false)
+})
+
+test('allowPrefix names the entry to add: the command without the paths it ends with', () => {
+  assert.equal(verify.allowPrefix(argv('node --check hooks/x.mjs')), 'node --check')
+  assert.equal(verify.allowPrefix(argv('docker exec -w /app qc vendor/bin/phpunit tests/Unit')), 'vendor/bin/phpunit')
+  assert.equal(verify.allowPrefix(argv('go test ./...')), 'go test')
+  assert.equal(verify.allowPrefix(argv('php artisan test')), 'php artisan test')
+  assert.equal(verify.allowPrefix(argv('vendor/bin/phpunit')), 'vendor/bin/phpunit')
+  // An interpreter keeps its script: a bare `bash` or `python` entry would allow `-c`.
+  assert.equal(verify.allowPrefix(argv('bash scripts/test.sh')), 'bash scripts/test.sh')
+  assert.equal(verify.allowPrefix(argv('python tools/check.py')), 'python tools/check.py')
+  assert.equal(verify.allowPrefix(argv('node --check hooks/x.mjs')), 'node --check')
+})
+
+test('a wrapped line with leading env is refused, since the env can choose what docker runs', () => {
+  const allow = verify.parseAllow('npm test')
+  assert.equal(verify.gateAllows(argv('docker compose exec app npm test'), allow, [], {}), true)
+  for (const env of [{ DOCKER_CONFIG: 'cfg' }, { DOCKER_HOST: 'tcp://x' }, { DOCKER_CONTEXT: 'evil' }, { CI: '1' }]) {
+    assert.equal(verify.gateAllows(argv('docker compose exec app npm test'), allow, [], env), false, Object.keys(env)[0])
+  }
+  assert.equal(verify.gateAllows(argv('npm test'), allow, [], { CI: '1' }), true, 'env on a plain allowed command keeps working')
+  const { run, calls } = scripted()
+  const result = verify.runGate('CC_TIERS_VERIFY: DOCKER_CONFIG=cfg docker compose exec app npm test', { projectDir: PROJECT, allow, timeoutS: 60, budgetS: 60, run })
+  assert.equal(calls.length, 0)
+  assert.equal(result.status, 'unverified')
+  assert.equal(result.unverified[0].reason, 'refused env on a docker exec line, which can choose what docker runs: DOCKER_CONFIG=cfg docker compose exec app npm test')
+  const judged = verify.judgeFindings(
+    [{ valid: true, severity: 'blocking', evidence: 'command', command: 'DOCKER_HOST=tcp://x docker exec c npm test', expected: 'a', observed: 'b', where: 'a.js:1', category: 'correctness' }],
+    { specText: '', allow, projectDir: PROJECT, timeoutS: 60, budgetS: 60, run },
+  )
+  assert.equal(calls.length, 0, 'a reviewer finding cannot run it either')
+  assert.equal(judged.blocking.length, 1)
+})
+
+test('the gate runs a wrapped allowed command and a detected command, and still refuses -e and metacharacters', () => {
+  const { run, calls } = scripted()
+  const result = verify.runGate(
+    'CC_TIERS_VERIFY: docker exec -w /app qc vendor/bin/phpunit\nCC_TIERS_VERIFY: npx eslint .\nCC_TIERS_VERIFY: docker exec -e LD_PRELOAD=/x.so qc vendor/bin/phpunit\nCC_TIERS_VERIFY: docker exec qc vendor/bin/phpunit; id',
+    { projectDir: PROJECT, allow: ALLOW, detected: [['npx', 'eslint', '.']], timeoutS: 60, budgetS: 600, run },
+  )
+  assert.deepEqual(calls.map((call) => call.cmd.argv.join(' ')), ['docker exec -w /app qc vendor/bin/phpunit', 'npx eslint .'])
+  assert.deepEqual(result.verified, ['docker exec -w /app qc vendor/bin/phpunit', 'npx eslint .'])
+  assert.deepEqual(result.unverified.map((item) => item.reason.split(':')[0]), ['refused flag -e', 'refused shell metacharacter'])
+})
+
+test('a reviewer finding runs a detected command too', () => {
+  const { run, calls } = scripted({ code: 1, timedOut: false, tail: 'lint error', ms: 10 })
+  const finding = { valid: true, severity: 'blocking', evidence: 'command', command: 'npx eslint .', expected: 'clean', observed: 'error', where: 'a.js:1', category: 'correctness' }
+  const judged = verify.judgeFindings([finding], { specText: '', allow: [], detected: [['npx', 'eslint', '.']], projectDir: PROJECT, timeoutS: 60, budgetS: 60, run })
+  assert.equal(calls.length, 1)
+  assert.equal(judged.blocking.length, 1)
 })
