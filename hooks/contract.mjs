@@ -7,26 +7,28 @@ import { criterionKey } from './verify.mjs'
 
 export { criterionKey }
 
-export const CRITERION_KINDS = ['functional', 'preserve', 'check', 'security', 'evidence', 'edge']
+export const CRITERION_KINDS = ['functional', 'preserve', 'check', 'repro', 'security', 'evidence', 'edge']
 export const CRITERION_STATES = ['pending', 'pass', 'fail', 'unverifiable', 'na']
 
 const HEADINGS = {
   criteria: 'functional',
   preserve: 'preserve',
   checks: 'check',
+  repro: 'repro',
   security: 'security',
   evidence: 'evidence',
   'edge cases': 'edge',
   assumed: 'assumed',
   ambiguous: 'ambiguity',
 }
-const HEADING_RE = /^[*_#\s]*(criteria|preserve|checks|security|evidence|edge cases|assumed|ambiguous)[*_#\s]*:?[*_#\s]*$/i
+const HEADING_RE = /^[*_#\s]*(criteria|preserve|checks|repro|security|evidence|edge cases|assumed|ambiguous)[*_#\s]*:?[*_#\s]*$/i
 const BULLET_RE = /^\s*(?:[-*•]|\d+\.)\s+/
 const BARE_BULLET_RE = /^(?:[-*•]|\d+\.)\s*/
 const ORIGIN_RE = /\s*\((?:request|user|repo|docs|decided)(?::.*)?\)\s*$/i
 const ORIGIN_TAG_RE = /\((?:request|user|repo|docs|decided)(?::[^)]*)?\)/gi
 const CHECK_RE = /`([^`]+)`/
 const REPORT_RE = /^CC_TIERS_CRITERION:\s*(C\d+)\s+(pass|fail|unverifiable|na)(?:\s+-\s+(.*?))?\s*$/i
+const REPRO_RE = /^CC_TIERS_REPRO:\s*(?:`([^`]*\S[^`]*)`|none)\s+-\s+(\S.*?)\s*$/i
 const RISK_RANK = { low: 0, medium: 1, high: 2, critical: 3 }
 
 /** Same rule as the spec check in cc_tiers.mjs: a heading, a bare bullet or an origin tag alone is not a line. */
@@ -58,7 +60,7 @@ export function parseContract(specText) {
         text,
         origin: origin ? origin[0].trim().slice(1, -1) : '',
         mandatory: true,
-        check: kind === 'check' ? (CHECK_RE.exec(text)?.[1] ?? '') : '',
+        check: kind === 'check' || kind === 'repro' ? (CHECK_RE.exec(text)?.[1] ?? '') : '',
       })
     }
   }
@@ -85,6 +87,18 @@ export function parseCriterionReports(text) {
   return [...reports.values()]
 }
 
+/** Every CC_TIERS_REPRO line with evidence: how a command failed before the fix, or command '' for `none - <reason>`; the last line per command wins. */
+export function parseReproLines(text) {
+  const declared = new Map()
+  for (const line of String(text || '').split(/\r?\n/)) {
+    const match = REPRO_RE.exec(line.trim())
+    if (!match) continue
+    const command = oneSpacing(match[1])
+    declared.set(command, { command, evidence: match[2] })
+  }
+  return [...declared.values()]
+}
+
 export function oneSpacing(text) {
   return String(text ?? '').split(/\s+/).filter(Boolean).join(' ')
 }
@@ -96,7 +110,7 @@ function namesCommand(evidence, command) {
 }
 
 /** The criteria with the state the evidence supports: a declared pass alone is not evidence until a verified command or a passed review backs it. */
-export function evaluateCriteria(contract, { reports = [], verified = [], reviewPassed = false, failedCriteria = [] } = {}) {
+export function evaluateCriteria(contract, { reports = [], verified = [], repro = [], reviewPassed = false, failedCriteria = [] } = {}) {
   const reported = new Map()
   for (const report of reports) reported.set(String(report.id).toUpperCase(), report)
   const failed = new Set(failedCriteria.map(criterionKey))
@@ -106,7 +120,19 @@ export function evaluateCriteria(contract, { reports = [], verified = [], review
     if (failed.has(criterionKey(criterion.text))) return evaluated('fail', false, report?.evidence || 'reviewer finding')
     if (report?.state === 'fail') return evaluated('fail', false, report.evidence)
     const command = criterion.check && verified.find((item) => oneSpacing(item) === oneSpacing(criterion.check))
-    if (command) return evaluated('pass', true, command)
+    const isRepro = criterion.kind === 'repro' && criterion.check
+    if (command && !isRepro) return evaluated('pass', true, command)
+    if (isRepro) {
+      // A repro is evidenced by its command passing now, a declared failure before the fix, and a review that confirms the declaration.
+      const before = repro.find((item) => item.command && item.command === oneSpacing(criterion.check))
+      const none = repro.find((item) => !item.command)
+      if (command && before) {
+        const shown = `failed before (declared): ${before.evidence}; passes now: \`${command}\``
+        return evaluated('pass', reviewPassed, `${shown}; ${reviewPassed ? 'confirmed' : 'not yet confirmed'} by a review`)
+      }
+      if (none) return evaluated('unverifiable', false, none.evidence)
+      if (command) return evaluated('pending', false, 'no failure-before evidence')
+    }
     // A check criterion names its own command: only that command passing is evidence, never another one or a review.
     if (criterion.check && report?.state === 'pass') return evaluated('pass', false, `declared; \`${criterion.check}\` did not run`)
     if (report?.state === 'pass') {

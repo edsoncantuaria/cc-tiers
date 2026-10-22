@@ -44,7 +44,7 @@ function evaluated(states) {
 
 test('exports the kinds and states', () => {
   assert.deepEqual(contract.CRITERION_STATES, ['pending', 'pass', 'fail', 'unverifiable', 'na'])
-  assert.deepEqual(contract.CRITERION_KINDS, ['functional', 'preserve', 'check', 'security', 'evidence', 'edge'])
+  assert.deepEqual(contract.CRITERION_KINDS, ['functional', 'preserve', 'check', 'repro', 'security', 'evidence', 'edge'])
 })
 
 test('parseContract reads every heading into its kind, with ids over criteria only', () => {
@@ -435,6 +435,112 @@ test('completion: criteria approved as none cap the confidence at moderate and a
   assert.equal(low.confidence.level, 'moderate', 'a level already at moderate stays there')
   const unverified = contract.completion({ criteria: evaluated(['pending']), approved: 'none' })
   assert.equal(unverified.confidence.level, 'low', 'the cap never raises a level')
+})
+
+const REPRO_SPEC = 'Repro:\n- `node --test tests/a.test.mjs` fails before the fix (request)\n- the crash cannot be reproduced in a test'
+const REPRO_COMMAND = 'node --test tests/a.test.mjs'
+
+test('parseContract reads a Repro heading as mandatory repro criteria that take the first backticked command', () => {
+  const parsed = contract.parseContract(`Criteria:\n- The list is paginated\n**Repro:**\n- \`node  --test tests/a.test.mjs\` then \`npm test\` (decided: no shell)\n- the crash cannot be reproduced in a test`)
+  assert.deepEqual(parsed.criteria.map((c) => [c.id, c.kind, c.mandatory, c.check]), [['C1', 'functional', true, ''], ['C2', 'repro', true, 'node  --test tests/a.test.mjs'], ['C3', 'repro', true, '']])
+  assert.equal(parsed.criteria[1].origin, 'decided: no shell')
+})
+
+test('parseReproLines reads a command with how it failed before, or none with a reason; the last line per command wins', () => {
+  const text = [
+    'CC_TIERS_REPRO: `node --test tests/a.test.mjs` - 3 failing, page size was 50',
+    'CC_TIERS_REPRO: `node   --test tests/a.test.mjs` - on second thought, 1 failing',
+    'CC_TIERS_REPRO: `npm test` - suite crashed before the fix',
+    'CC_TIERS_REPRO: none - needs a device',
+    'CC_TIERS_REPRO: NONE - needs a real gateway',
+  ].join('\n')
+  assert.deepEqual(contract.parseReproLines(text), [
+    { command: 'node --test tests/a.test.mjs', evidence: 'on second thought, 1 failing' },
+    { command: 'npm test', evidence: 'suite crashed before the fix' },
+    { command: '', evidence: 'needs a real gateway' },
+  ])
+})
+
+test('parseReproLines ignores a line with no evidence, no command, or a different shape', () => {
+  const text = 'CC_TIERS_REPRO: `npm test` -\nCC_TIERS_REPRO: `npm test`\nCC_TIERS_REPRO: none\nCC_TIERS_REPRO: none -\nCC_TIERS_REPRO: npm test - failed\nCC_TIERS_REPRO: ` ` - failed\nnoise'
+  assert.deepEqual(contract.parseReproLines(text), [])
+  assert.deepEqual(contract.parseReproLines(undefined), [])
+})
+
+test('evaluateCriteria: a repro passes once its command passes now and a failure before is declared, and a review evidences it', () => {
+  const parsed = contract.parseContract(REPRO_SPEC)
+  const repro = contract.parseReproLines('CC_TIERS_REPRO: `node --test  tests/a.test.mjs` - 2 tests failed on the old code')
+  const verified = [REPRO_COMMAND]
+  const declared = contract.evaluateCriteria(parsed, { verified, repro })[0]
+  assert.deepEqual([declared.state, declared.evidenced], ['pass', false])
+  assert.equal(declared.evidence, `failed before (declared): 2 tests failed on the old code; passes now: \`${REPRO_COMMAND}\`; not yet confirmed by a review`)
+  const spaced = contract.parseContract('Repro:\n- `node   --test tests/a.test.mjs`')
+  assert.deepEqual(contract.evaluateCriteria(spaced, { verified, repro }).map((c) => c.state), ['pass'], 'the criterion command is compared after whitespace normalization')
+  const reviewed = contract.evaluateCriteria(parsed, { verified, repro, reviewPassed: true })[0]
+  assert.deepEqual([reviewed.state, reviewed.evidenced], ['pass', true])
+  assert.equal(reviewed.evidence, `failed before (declared): 2 tests failed on the old code; passes now: \`${REPRO_COMMAND}\`; confirmed by a review`)
+})
+
+test('evaluateCriteria: a repro without a failure-before line is pending, and a review does not change that', () => {
+  const parsed = contract.parseContract(REPRO_SPEC)
+  for (const reviewPassed of [false, true]) {
+    const out = contract.evaluateCriteria(parsed, { verified: [REPRO_COMMAND], repro: contract.parseReproLines('CC_TIERS_REPRO: `npm test` - failed before'), reviewPassed })[0]
+    assert.deepEqual([out.state, out.evidenced, out.evidence], ['pending', false, 'no failure-before evidence'], `review ${reviewPassed}`)
+  }
+})
+
+test('evaluateCriteria: a repro whose command did not pass now is not evidenced by its failure-before line', () => {
+  const parsed = contract.parseContract(REPRO_SPEC)
+  const repro = contract.parseReproLines(`CC_TIERS_REPRO: \`${REPRO_COMMAND}\` - failed before`)
+  const other = contract.evaluateCriteria(parsed, { verified: ['npm test'], repro, reviewPassed: true })[0]
+  assert.deepEqual([other.state, other.evidenced], ['pending', false])
+  const longer = contract.evaluateCriteria(parsed, { verified: [`${REPRO_COMMAND} --test-name-pattern x`], repro, reviewPassed: true })[0]
+  assert.deepEqual([longer.state, longer.evidenced], ['pending', false], 'a command that adds arguments is another command')
+  const claimed = contract.evaluateCriteria(parsed, { verified: ['npm test'], repro, reports: [{ id: 'C1', state: 'pass', evidence: 'fine' }], reviewPassed: true })[0]
+  assert.deepEqual([claimed.state, claimed.evidenced, claimed.evidence], ['pass', false, `declared; \`${REPRO_COMMAND}\` did not run`])
+})
+
+test('evaluateCriteria: none with a reason makes a repro unverifiable, and a failed report still fails it', () => {
+  const parsed = contract.parseContract(REPRO_SPEC)
+  const repro = contract.parseReproLines('CC_TIERS_REPRO: none - the bug needs a live gateway')
+  const out = contract.evaluateCriteria(parsed, { verified: [REPRO_COMMAND], repro, reviewPassed: true })[0]
+  assert.deepEqual([out.state, out.evidenced, out.evidence], ['unverifiable', false, 'the bug needs a live gateway'])
+  const failed = contract.evaluateCriteria(parsed, { verified: [REPRO_COMMAND], repro, reports: [{ id: 'C1', state: 'fail', evidence: 'still broken' }] })[0]
+  assert.deepEqual([failed.state, failed.evidence], ['fail', 'still broken'])
+})
+
+test('evaluateCriteria: a Repro bullet without a command behaves like a functional criterion', () => {
+  const parsed = contract.parseContract(REPRO_SPEC)
+  const repro = contract.parseReproLines(`CC_TIERS_REPRO: \`${REPRO_COMMAND}\` - failed before`)
+  const report = [{ id: 'C2', state: 'pass', evidence: 'checked by hand' }]
+  const declared = contract.evaluateCriteria(parsed, { reports: report, verified: [REPRO_COMMAND], repro })[1]
+  assert.deepEqual([declared.state, declared.evidenced, declared.evidence], ['pass', false, 'declared'])
+  const reviewed = contract.evaluateCriteria(parsed, { reports: report, verified: [REPRO_COMMAND], repro, reviewPassed: true })[1]
+  assert.deepEqual([reviewed.state, reviewed.evidenced, reviewed.evidence], ['pass', true, 'checked by hand'])
+  assert.equal(contract.evaluateCriteria(parsed, { verified: [REPRO_COMMAND], repro })[1].state, 'pending')
+})
+
+test('completion: a repro awaiting its review keeps confidence below high and blocks verified in strict mode; the review lifts both', () => {
+  const parsed = contract.parseContract('Repro:\n- `node --test tests/a.test.mjs` fails before the fix')
+  const repro = contract.parseReproLines(`CC_TIERS_REPRO: \`${REPRO_COMMAND}\` - failed before`)
+  const passGate = { status: 'pass', verified: [REPRO_COMMAND], flaky: [], unverified: [] }
+  const waiting = contract.completion({ criteria: contract.evaluateCriteria(parsed, { verified: [REPRO_COMMAND], repro }), risk: 'medium', gate: passGate })
+  assert.equal(waiting.status, 'partial')
+  assert.notEqual(waiting.confidence.level, 'high')
+  assert.ok(waiting.confidence.reasons.includes('criterion C1 passed only as declared'))
+  const reviewed = contract.completion({ criteria: contract.evaluateCriteria(parsed, { verified: [REPRO_COMMAND], repro, reviewPassed: true }), risk: 'medium', gate: passGate, review: 'pass' })
+  assert.equal(reviewed.status, 'verified')
+  assert.equal(reviewed.confidence.level, 'high')
+  const none = contract.completion({ criteria: contract.evaluateCriteria(parsed, { verified: [REPRO_COMMAND], repro: contract.parseReproLines('CC_TIERS_REPRO: none - device only'), reviewPassed: true }), risk: 'medium', gate: passGate, review: 'pass' })
+  assert.notEqual(none.status, 'verified')
+  assert.ok(none.confidence.reasons.includes('criterion C1 unverifiable'))
+})
+
+test('weakenedCriteria keeps working with the repro kind: a dropped or reworded Repro bullet is weaker', () => {
+  const previous = contract.parseContract('Criteria:\n- Keep A\nRepro:\n- `npm test` fails before the fix')
+  assert.deepEqual(contract.weakenedCriteria(previous, contract.parseContract('Criteria:\n- Keep A\nRepro:\n- `npm test` fails before the fix (request)')), [])
+  assert.deepEqual(contract.weakenedCriteria(previous, contract.parseContract('Criteria:\n- Keep A')).map((c) => [c.id, c.kind]), [['C2', 'repro']])
+  assert.deepEqual(contract.weakenedCriteria(previous, contract.parseContract('Criteria:\n- Keep A\nRepro:\n- `npm test` may fail before')).map((c) => c.id), ['C2'])
 })
 
 test('completion: a failing check the writer declared pre-existing is reported, never verified, and never failed on its own', () => {

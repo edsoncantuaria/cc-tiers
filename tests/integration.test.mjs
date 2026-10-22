@@ -733,6 +733,67 @@ test('pre-existing failure: not counted once, reviewed on Opus, and the task nev
   assert.equal(rejected.tasks.paging.preexisting, 1, 'the one skip is spent')
 })
 
+const REPRO_SPEC = 'CC_TIERS_SPEC_BEGIN\nRepro:\n- `npm test` fails before the fix and passes after (request)\nCC_TIERS_SPEC_END'
+const reproRow = (done) => done.message.split('\n').find((line) => line.startsWith('| C1 '))
+
+test('repro: a Repro heading is not a criterion line, only its bullets are', () => {
+  assert.deepEqual(tiers.specCriteria(REPRO_SPEC), ['- `npm test` fails before the fix and passes after (request)'])
+})
+
+test('repro: the criteria table shows how the command failed before and that it passes now; no missing line is refused', () => {
+  const routing = routingWith({ review_policy: 'never' })
+  const prompt = writer('paging', '', REPRO_SPEC)
+  const run = (lines) => {
+    const state = tiers.emptyState('s')
+    assert.equal(delegate(state, routing, 'implementer', prompt).deny, '')
+    return tiers.applyEvent(state, event('r1', 'implementer', report('paging', 'implementer', 'sonnet', 'pass', ['CC_TIERS_VERIFY: npm test', ...lines]), prompt, { gate: passGate() }), routing)
+  }
+  const declared = run(['CC_TIERS_REPRO: `npm test` - 2 tests failed on the old code'])
+  assert.equal(declared.meta.outcome, 'pass')
+  assert.match(reproRow(declared), /\| pass \| failed before \(declared\): 2 tests failed on the old code; passes now: `npm test`; not yet confirmed.*\|$/)
+  assert.match(declared.message, /Criteria with evidence: 0\/1/)
+  assert.notEqual(declared.meta.completion.confidence, 'high')
+
+  const missing = run([])
+  assert.equal(missing.meta.outcome, 'pass', 'a missing REPRO line is never refused')
+  assert.match(reproRow(missing), /\| pending \| no failure-before evidence \|$/)
+
+  const none = run(['CC_TIERS_REPRO: none - the bug needs a live gateway'])
+  assert.equal(none.meta.outcome, 'pass')
+  assert.match(reproRow(none), /\| unverifiable \| the bug needs a live gateway \|$/)
+
+  const pasted = run(['CC_TIERS_SPEC_BEGIN\nCC_TIERS_REPRO: `npm test` - pasted from the spec\nCC_TIERS_SPEC_END', 'CC_TIERS_RESEARCH_BEGIN\nCC_TIERS_REPRO: none - pasted research\nCC_TIERS_RESEARCH_END'])
+  assert.match(reproRow(pasted), /\| pending \| no failure-before evidence \|$/, 'a REPRO line inside a pasted block is ignored')
+})
+
+test('repro: an independent review confirms the declared failure before, also when a pre-existing failure sent the task to review', () => {
+  const routing = routingWith()
+  const reviewPrompt = `${header('login', 'sonnet', 'reviewer')}${REPRO_SPEC}\ndiff --git a/src/auth/session.js`
+  const repro = 'CC_TIERS_REPRO: `npm test` - 2 tests failed on the old code'
+  const preexisting = { raw: 'npm run lint', code: 1, timedOut: false, tail: 'error', seconds: 3 }
+  const finish = (gate, lines) => {
+    const state = tiers.emptyState('s')
+    const prompt = critical('login', 'CC_TIERS_APPROVED: user - option 1\n', REPRO_SPEC)
+    assert.equal(delegate(state, routing, 'implementer', prompt).deny, '')
+    const written = tiers.applyEvent(state, event('v1', 'implementer', report('login', 'implementer', 'sonnet', 'pass', lines), prompt, { gate }), routing)
+    assert.equal(written.meta.outcome, 'review')
+    assert.equal(state.evidence.login.repro.length, 1, 'the declaration waits in the task evidence for the review')
+    assert.equal(Boolean(state.evidence.login.preexisting), gate.status === 'fail')
+    tiers.releaseIdleWriters(state)
+    assert.equal(delegate(state, routing, 'reviewer', reviewPrompt).deny, '')
+    return tiers.applyEvent(state, event('v2', 'reviewer', report('login', 'reviewer', 'opus', 'pass'), reviewPrompt), routing)
+  }
+  const reviewed = finish(passGate(), ['CC_TIERS_VERIFY: npm test', repro])
+  assert.equal(reviewed.meta.outcome, 'pass')
+  assert.match(reproRow(reviewed), /\| pass \| failed before \(declared\): 2 tests failed on the old code; passes now: `npm test`; confirmed by a review \|$/)
+  assert.match(reviewed.message, /Criteria with evidence: 1\/1/)
+
+  const inherited = { status: 'fail', verified: ['npm test'], flaky: [], unverified: [], failure: null, preexisting, cached: [] }
+  const lines = ['CC_TIERS_VERIFY: npm run lint', 'CC_TIERS_VERIFY: npm test', 'CC_TIERS_PREEXISTING: npm run lint - fails on main', repro]
+  const carried = finish(inherited, lines)
+  assert.match(reproRow(carried), /\| pass \| failed before \(declared\): .*confirmed by a review \|$/)
+})
+
 test('approval: a dispatcher call cannot store the spec around the rule, and a critical call after a lower one asks', () => {
   const routing = routingWith()
   const state = tiers.emptyState('s')

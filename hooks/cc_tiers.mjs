@@ -21,7 +21,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { TIERS, dollars, extractFiles, writeAtomic } from './base.mjs'
 import { BUDGET_OVERRIDE_RE, budgetMessage, budgetStatus, parseTaskBudget } from './budget.mjs'
-import { completion, evaluateCriteria, oneSpacing, parseContract, parseCriterionReports, plural, weakenedCriteria } from './contract.mjs'
+import { completion, evaluateCriteria, oneSpacing, parseContract, parseCriterionReports, parseReproLines, plural, weakenedCriteria } from './contract.mjs'
 import { declaresPackage, diagnoseFailure, failureResearchLines, missingPackage, nextAction } from './diagnose.mjs'
 import { MEMORY_BEGIN, MEMORY_END, MEMORY_IGNORE, addRecord, formatRecall, loadMemory, memoryPath, recall, sanitize, saveMemory } from './memory.mjs'
 import { checkParallel, declaredFiles, pruneActive, registerActive, releaseActive } from './parallel.mjs'
@@ -104,7 +104,7 @@ const SPEC_END = 'CC_TIERS_SPEC_END'
 const SPEC_NONE_RE = /^none\s*-\s*\S/i
 const RISK_NONE_RE = /^none\s*-\s*\S/i
 const APPROVED_RE = /^(user|none)\s*-\s*\S/i
-const SPEC_HEADING_RE = /^[*_#\s]*(criteria|edge cases|assumed|preserve|checks|security|evidence|ambiguous)[*_#\s]*:?[*_#\s]*$/i
+const SPEC_HEADING_RE = /^[*_#\s]*(criteria|edge cases|assumed|preserve|checks|repro|security|evidence|ambiguous)[*_#\s]*:?[*_#\s]*$/i
 const CONTEXT_BEGIN = 'CC_TIERS_CONTEXT_BEGIN'
 const CONTEXT_END = 'CC_TIERS_CONTEXT_END'
 const RESPEC_RE = /^\S/
@@ -1408,6 +1408,7 @@ export function applyEvent(state, event, routing) {
   // A pass that reports a mandatory criterion as failed is a failure, whatever the status line says.
   const contract = own(state.contracts, task)
   const criterionReports = REVIEW_ROLES.has(role) ? [] : parseCriterionReports(event.text || '')
+  const repro = REVIEW_ROLES.has(role) ? [] : parseReproLines(stripBriefs(event.text || ''))
   if (status === 'pass' && contract && criterionReports.length) {
     const mandatory = new Set(contract.criteria.filter((item) => item.mandatory).map((item) => item.id))
     const failedIds = criterionReports.filter((item) => item.state === 'fail' && mandatory.has(item.id)).map((item) => item.id)
@@ -1417,7 +1418,7 @@ export function applyEvent(state, event, routing) {
     }
   }
   const covered = status === 'pass' && !REVIEW_ROLES.has(role) && coveredByReview(state, tasks, task, event)
-  if (status === 'pass' && !REVIEW_ROLES.has(role) && !covered) recordEvidence(state, task, criterionReports, meta.gate || null)
+  if (status === 'pass' && !REVIEW_ROLES.has(role) && !covered) recordEvidence(state, task, criterionReports, meta.gate || null, { repro })
   const scopeNote = workspaceNote(task, event.workspace, Object.keys(tasks).filter((name) => name !== task))
   const flagged = Boolean(event.workspace?.sensitive?.length)
   if (scopeNote) gateNote += `${scopeNote}\n`
@@ -1481,7 +1482,7 @@ export function applyEvent(state, event, routing) {
     const othersPassed = !meta.gate.failure && !meta.gate.unverified.length
     if (declared && declared.raw === meta.gate.preexisting?.raw && othersPassed && used < MAX_PREEXISTING_SKIPS && routing.reviewPolicy !== 'never') {
       tasks[task] = { ...current, tier, failures: current.failures || [], preexisting: used + 1 }
-      recordEvidence(state, task, criterionReports, meta.gate, { command: declared.command, evidence: declared.evidence })
+      recordEvidence(state, task, criterionReports, meta.gate, { preexisting: { command: declared.command, evidence: declared.evidence }, repro })
       meta.outcome = 'review'
       meta.floor = reviewFloor(state, task, routing, flagged)
       return {
@@ -1589,14 +1590,15 @@ function declaredPreexisting(text) {
   return null
 }
 
-/** What a writer's report and gate proved, kept until the task finishes; preexisting is the failure the writer declared it did not cause. */
-function recordEvidence(state, task, reports, gate, preexisting = null) {
+/** What a writer's report and gate proved, kept until the task finishes; preexisting is the failure the writer declared it did not cause, repro how its commands failed before the fix. */
+function recordEvidence(state, task, reports, gate, { preexisting = null, repro = [] } = {}) {
   state.evidence = state.evidence && typeof state.evidence === 'object' ? state.evidence : {}
   state.evidence[task] = {
     reports,
     verified: gate ? [...gate.verified, ...gate.flaky] : [],
     gate: gate ? { status: gate.status, verified: gate.verified, flaky: gate.flaky, unverified: gate.unverified, cached: gate.cached } : null,
     ...(preexisting ? { preexisting } : {}),
+    ...(repro.length ? { repro } : {}),
   }
 }
 
@@ -1641,7 +1643,7 @@ function finishTask(state, task, routing, { reviewed, tier }) {
   const contract = own(state.contracts, task) || { criteria: [] }
   const entry = own(state.log, task)
   const risk = entry?.risk || 'medium'
-  const criteria = evaluateCriteria(contract, { reports: evidence.reports || [], verified: evidence.verified || [], reviewPassed: reviewed })
+  const criteria = evaluateCriteria(contract, { reports: evidence.reports || [], verified: evidence.verified || [], repro: evidence.repro || [], reviewPassed: reviewed })
   const result = completion({
     criteria,
     risk,
