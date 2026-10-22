@@ -1,6 +1,6 @@
 {
   "name": "cc-tiers",
-  "version": "0.11.3",
+  "version": "0.12.0",
   "private": true,
   "description": "Claude Code plugin: Opus plans and reviews, Sonnet builds, research comes first",
   "license": "MIT",
