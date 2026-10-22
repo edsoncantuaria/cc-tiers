@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.11.1 - 2026-10-22
+
+### Added
+
+- Failure research and the `failure_research` and `failure_research_max` options (`on` and `1` by default, `failure_research_max` from 0 to 5 with 0 acting as `off`; project keys `failureResearch` and `failureResearchMax`; environment `CLAUDE_PLUGIN_OPTION_FAILURE_RESEARCH` and `CLAUDE_PLUGIN_OPTION_FAILURE_RESEARCH_MAX`). After a counted failure diagnosed as docs-version, type, integration, test, or regression, the failure note adds a `Failure research:` line and up to three `CC_TIERS_FAILURE: <symptom>` lines (redacted, absolute paths replaced by `<path>`, `CC_TIERS_` tokens removed, each line cut at 160 characters). The orchestrator or the dispatcher may run `cc-tiers:researcher` with them before the retry. In that mode the researcher searches the official docs of the installed version, then the official repo's issues and PRs, then technical discussions and bug reports, then Stack Overflow and community sources, with queries that hold only the failure message, the library, and the version. Its brief has Symptom, Probable cause, Suggested fix, Version, Sources, and Match, and its trailer adds `CC_TIERS_MATCH: high|partial|none`. The brief goes into the next prompt as a second research block. The hook counts no attempt for it, never delays the retry, marks the task researched on a pass, and records `research.failure`. The cap counts the notes that offered a search, across tiers. The note that stops a task after its last Opus attempt suggests nothing, and an escalation note adds a `Research dossier:` line when a search was offered.
+- `Repro:` spec section and `CC_TIERS_REPRO: `<command>` - <failure before the fix>` (or `none - <reason>`). For a bug that can be reproduced in code, the writer runs the reproducing test before the fix, never weakens, skips, or deletes it, and repeats the earlier `CC_TIERS_REPRO` line on a retry or an escalation. A `Repro:` criterion with a backticked command is `pass` and evidenced only when that command passes in the gate, a before line exists, and a review passed; without the review it reads `not yet confirmed by a review`, without a before line it stays `pending`, and with `none` it is `unverifiable`. The hook cannot run the command on the base, so the failure before is a claim that the review's mutant check tests: the reviewer and the checker run the `Repro:` command on a scratch copy of the base with the test files copied in (it must fail) and with the change (it must pass), and a weakened, skipped, or deleted test is a blocking `correctness` finding. The orchestrator and the dispatcher do not set `CC_TIERS_REVIEW: skip` on a task with a `Repro:` criterion.
+- `/cc-tiers:insights` prints a "Routing in hindsight" table, one row per start tier (the tier of the task's first `model.selected` event): tasks, passed there, escalated, the tier they finished on, stopped, and passed after a blocking review finding. A `Possibly over-routed: N task(s) ...` line appears when tasks that started on Opus at `low` or `medium` risk passed with no escalation, failure, or blocking finding; it is a hint, not a verdict. A "Failure research by match" table counts searches, tasks, and tasks that passed later without escalating, per `CC_TIERS_MATCH` (`high`, `partial`, `none`, or `unknown`).
+- The completion line says `on <tier> after N failed attempts and M escalations` when the task failed or moved up before it passed, and `Checks run N (K reused)` when the gate reused checks from the same tree.
+- Tests for a stale lock, the lock wait, the atomic state write, and a corrupt state file.
+
+### Changed
+
+- A confirmed `dependency` failure of the gate that names a package the root manifest declares and the tree lacks is not counted, under the same count and limit as infra (2 per task). For Node it needs a bare specifier in `Cannot find module` or `Cannot find package`, no `node_modules/<name>`, and a declaration in the root `package.json`. For Python it needs an undotted `No module named` and a listing in the root `pyproject.toml` or a root `requirements*.txt`. A local module, an undeclared package, a subpath or dotted miss, a missing command, a timeout, and a pip name that differs from the import name still count. The note says to install the package and run the same tier again.
+- The gate at Stop, for the Opus ceiling and the dispatcher, reuses a verify pass on the same tree, the way the gate for a delegated writer does.
+- The failure searches a task was offered stay with the task across every tier change, like the infra count.
+
+### Fixed
+
+- A `flaky` verify pass was cached and lost its `flaky` label when it was reused. It is no longer cached, so the command runs again and keeps the label.
+
 ## 0.11.0 - 2026-10-21
 
 ### Added

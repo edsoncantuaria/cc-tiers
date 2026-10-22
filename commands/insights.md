@@ -9,4 +9,4 @@ Run the insights helper and show its tables. Do not edit files and do not delega
 node "${CLAUDE_PLUGIN_ROOT}/hooks/insights.mjs" "${CLAUDE_PLUGIN_DATA}"
 ```
 
-Print the tables as they come back. Then add at most three short lines: the most common failure category, the most common escalation reason, and which risk level cost the most. Costs are estimates from token counts, never billed amounts. If the sample is small, say so and do not suggest routing changes. Never change config or routing rules from this output.
+Print the tables as they come back, including "Routing in hindsight" (how each start tier fared) and "Failure research by match" (how the failure searches ended) when they appear. Both are descriptive and give no advice. Then add at most three short lines: the most common failure category, the most common escalation reason, and which risk level cost the most. Costs are estimates from token counts, never billed amounts. If the sample is small, say so and do not suggest routing changes. Never change config or routing rules from this output.
