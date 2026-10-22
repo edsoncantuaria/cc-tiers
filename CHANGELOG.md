@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Removed
+
+- The synthetic benchmark: the `bench/` directory, `tests/bench_quality.test.mjs`, the tests of `tests/cc_tiers.test.mjs` that ran it, the `bench` and `bench:table` npm scripts, and the Benchmark section and the `bench/` row of the READMEs. Tasks Opus solves easily do not measure cc-tiers.
+
 ## 0.11.1 - 2026-10-22
 
 ### Added

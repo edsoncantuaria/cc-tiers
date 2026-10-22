@@ -2,7 +2,7 @@
 
 ### O Opus planeja, revisa e constrói o difícil. O Sonnet constrói o resto. O Haiku faz o simples.
 
-Um plugin do Claude Code para assinantes Pro e Max que querem o trabalho certo da primeira vez. O ponto é o seu tempo e o código, não tokens. Você faz um pedido curto e não escreve a spec: o cc-tiers pesquisa o projeto e escreve os critérios de aceite sozinho. O código segue a documentação da versão instalada e as convenções do seu próprio projeto, reaproveita o que já existe e fica dentro da tarefa, sem você precisar pedir código limpo nem escrever regras para isso. Os hooks rodam os testes de novo antes de um pass valer, e uma revisão só conta com um defeito reproduzido, então você não precisa pedir de novo. Cada tarefa vai para o modelo de que precisa: Haiku para o simples, Sonnet para o trabalho normal, Opus para planejar, revisar, construir as tarefas difíceis (auth, pagamento, migration, concorrência, arquitetura) e pegar o que o Sonnet não terminou, para o Opus não ser gasto num typo. No relógio, uma execução demora mais que o Opus sozinho; o [benchmark](#-benchmark) mede se o resultado sai melhor.
+Um plugin do Claude Code para assinantes Pro e Max que querem o trabalho certo da primeira vez. O ponto é o seu tempo e o código, não tokens. Você faz um pedido curto e não escreve a spec: o cc-tiers pesquisa o projeto e escreve os critérios de aceite sozinho. O código segue a documentação da versão instalada e as convenções do seu próprio projeto, reaproveita o que já existe e fica dentro da tarefa, sem você precisar pedir código limpo nem escrever regras para isso. Os hooks rodam os testes de novo antes de um pass valer, e uma revisão só conta com um defeito reproduzido, então você não precisa pedir de novo. Cada tarefa vai para o modelo de que precisa: Haiku para o simples, Sonnet para o trabalho normal, Opus para planejar, revisar, construir as tarefas difíceis (auth, pagamento, migration, concorrência, arquitetura) e pegar o que o Sonnet não terminou, para o Opus não ser gasto num typo. No relógio, uma execução demora mais que o Opus sozinho.
 
 [![Claude Code](https://img.shields.io/badge/Claude_Code-2.1.295%2B-d97757?style=for-the-badge&logo=anthropic&logoColor=white)](https://claude.com/claude-code)
 [![Plugin](https://img.shields.io/badge/tipo-plugin-8a63d2?style=for-the-badge)](#-instala%C3%A7%C3%A3o)
@@ -673,121 +673,6 @@ A ordem de escalonamento é fixa. As frases e palavras-chave de roteamento, o li
 
 ---
 
-## 📊 Benchmark
-
-> [!IMPORTANT]
-> **O benchmark mede só qualidade: se o trabalho sai certo da primeira vez.** Ele não mede custo. Os tokens aparecem na última coluna, só para informação.
-
-Uma rodada sai certa da primeira vez quando o usuário não teria de pedir de novo. Teria quando ela não funciona, quebrou algo que funcionava, recriou código que o projeto já tinha ou é inconsistente entre rodadas. O `bench/` corrige cada rodada com checks ocultos e reporta:
-
-| Métrica | Significado | De onde vem |
-| --- | --- | --- |
-| `pass@1` | Parcela das rodadas que resolvem a tarefa, na média das tarefas. `Δ pass@1 vs Opus only` é a diferença para o só Opus, em pontos percentuais | pass@k, HumanEval (Chen et al., 2021) |
-| FAIL_TO_PASS | O check oculto falha na fixture intocada e precisa passar depois da mudança | SWE-bench (Jimenez et al., 2024) |
-| PASS_TO_PASS | Os arquivos de teste que passavam antes da mudança precisam continuar passando, cada um rodado de novo na forma de antes | SWE-bench (Jimenez et al., 2024) |
-| `pass^k` | Parcela das tarefas resolvidas em todas as `k` rodadas. Cai quando a configuração tem sorte, mas não é confiável. Aparece como `(k=N)` | pass^k, τ-bench (Yao et al., 2024) |
-| Resolved | FAIL_TO_PASS passou e nenhum arquivo PASS_TO_PASS regrediu | SWE-bench |
-| Broke something | Rodadas cujo check oculto passou mas que quebraram um teste que passava antes | PASS_TO_PASS |
-| Recreated existing code | Rodadas que falharam num teste do check oculto cujo nome começa com `reuse: `. `—` quando nenhuma rodada foi checada para isso | cc-tiers |
-| Touched outside scope | Rodadas que mudaram um arquivo fora do escopo da tarefa: os arquivos da solução de referência, `scopeExtra` do JSON de tarefas e os diretórios de teste. `—` quando nenhuma rodada foi medida para isso | cc-tiers |
-| Tokens per resolved task | Tokens novos (entrada + escrita de cache + saída) divididos pelas tarefas resolvidas. Só para informação | cc-tiers |
-
-Testes que o modelo escreveu não contam para resolvida; o JSON bruto guarda como `ownTests`. Uma tarefa pode listar `changesTests`, os arquivos de teste originais que ela muda de propósito; eles ficam fora do PASS_TO_PASS. Abaixo da tabela por tarefa, **Where it made a difference** lista as tarefas em que uma configuração resolveu uma parcela de rodadas diferente da do só Opus.
-
-O escopo são os arquivos da solução de referência mais uma lista curta de permitidos, então uma correção alternativa legítima em outro arquivo pode contar como fora do escopo; o JSON bruto lista os arquivos para o leitor julgar. Legibilidade e qualidade de comentário não têm métrica determinística e não estão nas tabelas. As linhas abaixo são anteriores à coluna, por isso mostram `—`.
-
-**Duas suítes.**
-
-- `bench/tasks-login.json`, a suíte principal e o padrão: um pedido natural, `POST /login`, sem dicas, em `bench/fixture-login/`, uma API pequena. O próprio estado do projeto esconde o que o pedido não diz: uma armadilha de versão silenciosa (o dotenv 8.6.0 instalado corta a `PRIVATE_KEY` de várias linhas do `.env` na primeira linha), um helper de assinatura de tokens que já existe e comportamento existente que pode quebrar. O check oculto fica em `bench/checks-login/` e a referência em `bench/solutions-login/`.
-- `bench/tasks-hard.json`: doze relatos de bug e pedidos realistas em `bench/fixture-hard/`, um serviço Node de 1.600 linhas com estado compartilhado, fusos horários e reservas assíncronas. Os checks ocultos ficam em `bench/checks-hard/` e as referências em `bench/solutions-hard/`.
-
-O `npm test` confere os dois lados de cada check: falha na fixture e passa com a referência.
-
-**Como rodar.**
-
-```bash
-npm run bench -- --tasks-file bench/tasks-login.json --configs opus,sonnet,cc-tiers --repeat 2 --out bench/results/login.json
-npm run bench -- --tasks-file bench/tasks-hard.json --tasks traversal,race --configs opus,sonnet,cc-tiers --repeat 3 --out bench/results/hard-pair.json
-npm run bench -- --tasks-file bench/tasks-hard.json --tasks race,cancel,instances,traversal,date-filter,csv-escape,offboarding,recurring-pack --configs opus,cc-tiers --repeat 2 --out bench/results/verify-evidence.json
-npm run bench:table -- bench/results/login.json
-```
-
-> [!WARNING]
-> Uma rodada usa o seu login real do Claude Code, então no Pro ou no Max ela gasta a sua janela de uso. `npm run bench:table -- <arquivos de resultado>` imprime as tabelas a partir de resultados salvos.
-
-A suíte de login roda só em one-shot: a tarefa edita o servidor e a configuração, então o `--session` é recusado. O runner carrega só as configurações de projeto e locais, então seu CLAUDE.md, agentes e plugins ficam fora da medição. Ele desliga o `AskUserQuestion` em toda configuração, só Opus e só Sonnet incluídos: uma rodada headless nega a pergunta de qualquer jeito e ninguém responderia. Os prompts do cc-tiers mandam tomar a opção recomendada e registrá-la em `Assumed:` (`agents/orchestrator.md`, Specify). No cc-tiers o runner também lê, do transcript da sessão, as escalações que os hooks anunciaram e se cada tarefa foi roteada como este README diz. Para o cc-tiers, uma tabela de camadas de qualidade mostra o que o gate e a revisão fizeram: passes barrados pelo gate, comandos flaky, tarefas não validadas, achados descartados, rejeições sem evidência e rodadas de revisão por tarefa. O comando da suíte de verificação e evidência (as 8 tarefas não triviais da suíte difícil, Opus puro contra cc-tiers) é o último da lista acima.
-
-**Resultados**, como medidos, em one-shot. Os resultados abaixo são da 0.6, sem o gate e sem a revisão com evidência.
-
-Login (`bench/results/login.json`, k=2, cc-tiers no commit `18a1222` do plugin):
-
-| Configuration | pass@1 | Δ pass@1 vs Opus only | pass^k | Resolved | Broke something | Recreated existing code | Touched outside scope | Tokens per resolved task |
-| --- | --: | --: | --: | --: | --: | --: | --: | --: |
-| Opus only | 50% | — | 0% (k=2) | 1/2 | 0 | — | — | 50.2k |
-| Sonnet only | 50% | 0 pp | 0% (k=2) | 1/2 | 0 | — | — | 40.1k |
-| cc-tiers (Opus orchestrator) 18a1222 | 100% | +50 pp | 100% (k=2) | 2/2 | 0 | — | — | 202.4k |
-
-| Task | Opus only | Sonnet only | cc-tiers (Opus orchestrator) 18a1222 |
-| --- | --: | --: | --: |
-| `login` (hard) | 🟡 1/2 | 🟡 1/2 | ✅ 2/2 |
-
-**Where it made a difference** (resolved runs per task vs Opus only)
-
-| Task | Opus only | Sonnet only | cc-tiers (Opus orchestrator) 18a1222 |
-| --- | --: | --: | --: |
-| `login` | 1/2 | 1/2 | 2/2 |
-
-| Configuration | hard: pass@1 | Escalations | Routed as documented |
-| --- | --: | --: | --: |
-| Opus only | 50% | — | — |
-| Sonnet only | 50% | — | — |
-| cc-tiers (Opus orchestrator) 18a1222 | 100% | 1 | 2/2 |
-
-| Configuration | hard |
-| --- | --- |
-| cc-tiers (Opus orchestrator) 18a1222 | 2/2 (sonnet (+ Opus review)) |
-
-- O Opus puro e o Sonnet puro falharam cada um em uma de suas duas rodadas do mesmo jeito: o `/login` respondeu 500, porque o dotenv 8.6.0 tinha cortado a chave. O cc-tiers resolveu as duas rodadas; nas duas, o pesquisador achou o corte em `node_modules/dotenv` antes de qualquer código ser escrito.
-- `Recreated existing code` mostra `—` porque essas rodadas são anteriores à coluna; nenhuma das seis rodadas falhou no teste de reuso.
-- A amostra é pequena. O cc-tiers gastou cerca de 4× os tokens por tarefa resolvida do Opus puro (202.4k contra 50.2k) e cerca de 12× o tempo dele (646 s contra 54 s por rodada), em parte porque a revisão pediu um endurecimento que o pedido não pedia.
-
-Par difícil (`bench/results/hard-pair.json`, `traversal` e `race`, k=3, cc-tiers no commit `ef57726` do plugin):
-
-| Configuration | pass@1 | Δ pass@1 vs Opus only | pass^k | Resolved | Broke something | Recreated existing code | Touched outside scope | Tokens per resolved task |
-| --- | --: | --: | --: | --: | --: | --: | --: | --: |
-| Opus only | 100% | — | 100% (k=3) | 6/6 | 0 | — | — | 32.7k |
-| Sonnet only | 50% | −50 pp | 50% (k=3) | 3/6 | 0 | — | — | 38.5k |
-| cc-tiers (Opus orchestrator) | 100% | 0 pp | 100% (k=3) | 6/6 | 0 | — | — | 166.5k |
-
-| Task | Opus only | Sonnet only | cc-tiers (Opus orchestrator) |
-| --- | --: | --: | --: |
-| `race` (hard) | ✅ 3/3 | ✅ 3/3 | ✅ 3/3 |
-| `traversal` (hard) | ✅ 3/3 | ❌ 0/3 | ✅ 3/3 |
-
-**Where it made a difference** (resolved runs per task vs Opus only)
-
-| Task | Opus only | Sonnet only | cc-tiers (Opus orchestrator) |
-| --- | --: | --: | --: |
-| `traversal` | 3/3 | 0/3 | 3/3 |
-
-| Configuration | hard: pass@1 | Escalations | Routed as documented |
-| --- | --: | --: | --: |
-| Opus only | 100% | — | — |
-| Sonnet only | 50% | — | — |
-| cc-tiers (Opus orchestrator) | 100% | 1 | 6/6 |
-
-| Configuration | hard |
-| --- | --- |
-| cc-tiers (Opus orchestrator) | 6/6 (sonnet (+ Opus review)) |
-
-- O Opus puro e o cc-tiers resolveram todas as rodadas; o Sonnet puro falhou no `traversal` nas três. No cc-tiers o código é escrito pelo Sonnet, e o revisor Opus rejeitou a primeira correção de `traversal` dele em todas as rodadas.
-
-**O que os dados não mostram:** o cc-tiers vencendo o Opus puro em tarefas com as regras enunciadas. No par difícil, o Opus puro também resolveu todas as rodadas.
-
-**Gate e revisão com evidência (0.7), suíte difícil, k=2:** resultados pendentes. Empate com o Opus puro em qualidade é um resultado possível e será informado como tal.
-
----
-
 ## 📋 Requisitos
 
 - Claude Code **2.1.295+** (os seletores do `/config` usam `userConfig.options`, o hook PreToolUse usa `onFailure`, e a escada de effort usa o `effort` por chamada da 2.1.292).
@@ -837,7 +722,6 @@ claude --plugin-dir .
 | `hooks/workspace.mjs` | Fotos da árvore de trabalho, arquivos sensíveis e fora do escopo, e a validação do estado |
 | `hooks/telemetry.mjs`, `hooks/insights.mjs` | O log local de eventos e o auxiliar por trás do `/cc-tiers:insights` |
 | `hooks/redact.mjs` | A máscara de segredos antes da memória, da telemetria e da trilha de auditoria |
-| `bench/` | O benchmark: as suítes de login e difícil (tarefas, fixtures, checagens ocultas, referências), o executor e os resultados medidos |
 | `.github/workflows/ci.yml` | Testes no Linux, macOS e Windows, e `claude plugin validate` |
 | `CHANGELOG.md` | Notas da versão |
 

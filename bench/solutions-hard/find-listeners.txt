@@ -1,3 +1,0 @@
-Two modules listen for 'shift.claimed':
-- src/audit.js: startAudit() registers a listener for every type in TYPES, which includes 'shift.claimed'.
-- src/notify.js: startNotifier() calls on('shift.claimed', ...).

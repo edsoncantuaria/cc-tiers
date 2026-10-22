@@ -237,7 +237,7 @@ export function gateFailure(gate) {
   return gate.failure || gate.preexisting || null
 }
 
-/** The gate lines the benchmark greps, one per fact; commands join with '; ' since a command never holds one. */
+/** The gate lines, one per fact; commands join with '; ' since a command never holds one. */
 export function gateMessage(task, gate) {
   const prefix = `cc-tiers gate: ${task}`
   if (gate.status === 'missing') return `${prefix} reported pass without CC_TIERS_VERIFY`
@@ -381,7 +381,7 @@ export function judgeFindings(findings, { specText, allow, projectDir, timeoutS,
   return judged
 }
 
-/** The two review lines the benchmark greps, plus the notes list. */
+/** The two review lines, plus the notes list. */
 export function reviewMessage(task, judged, { failed = false } = {}) {
   const prefix = `cc-tiers review: ${task}`
   const lines = []

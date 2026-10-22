@@ -7,8 +7,6 @@
   "type": "module",
   "engines": { "node": ">=18" },
   "scripts": {
-    "test": "node --test tests/*.test.mjs",
-    "bench": "node bench/run.mjs",
-    "bench:table": "node bench/run.mjs --table"
+    "test": "node --test tests/*.test.mjs"
   }
 }

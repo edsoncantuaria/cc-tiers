@@ -2,7 +2,7 @@
 
 ### Opus plans, reviews, and builds the hard parts. Sonnet builds the rest. Haiku does the small stuff.
 
-A Claude Code plugin for Pro and Max subscribers who want work done right the first time. The point is your time and the code, not tokens. You make a short request and do not write the spec: cc-tiers researches the project and writes the acceptance criteria itself. The code follows the docs of the version you have installed and the conventions of your own project, reuses what already exists, and stays inside the task, without you asking for clean code or writing rules for it. The hooks re-run the tests before a pass counts, and a review counts only with a reproduced defect, so you do not have to ask again. Each task goes to the model it needs: Haiku for the simple stuff, Sonnet for normal work, Opus to plan, review, build the hard tasks (auth, payments, migrations, concurrency, architecture), and take what Sonnet could not finish, so Opus is not spent on a typo. On the clock a run takes longer than plain Opus; the [benchmark](#-benchmark) measures whether the result is better.
+A Claude Code plugin for Pro and Max subscribers who want work done right the first time. The point is your time and the code, not tokens. You make a short request and do not write the spec: cc-tiers researches the project and writes the acceptance criteria itself. The code follows the docs of the version you have installed and the conventions of your own project, reuses what already exists, and stays inside the task, without you asking for clean code or writing rules for it. The hooks re-run the tests before a pass counts, and a review counts only with a reproduced defect, so you do not have to ask again. Each task goes to the model it needs: Haiku for the simple stuff, Sonnet for normal work, Opus to plan, review, build the hard tasks (auth, payments, migrations, concurrency, architecture), and take what Sonnet could not finish, so Opus is not spent on a typo. On the clock a run takes longer than plain Opus.
 
 [![Claude Code](https://img.shields.io/badge/Claude_Code-2.1.295%2B-d97757?style=for-the-badge&logo=anthropic&logoColor=white)](https://claude.com/claude-code)
 [![Plugin](https://img.shields.io/badge/type-plugin-8a63d2?style=for-the-badge)](#-install)
@@ -673,121 +673,6 @@ The escalation order is fixed. Routing phrases and keywords, the retry limit, th
 
 ---
 
-## 📊 Benchmark
-
-> [!IMPORTANT]
-> **The benchmark measures quality only: whether the work comes out right the first time.** It does not measure cost. Tokens are shown in the last column, for information.
-
-A run is right the first time when the user would not have to ask again. They would when it does not work, it broke something that worked, it recreated code the project already had, or it is inconsistent across runs. `bench/` grades each run with hidden checks and reports:
-
-| Metric | Meaning | Where it comes from |
-| --- | --- | --- |
-| `pass@1` | Share of runs that resolve the task, averaged over tasks. `Δ pass@1 vs Opus only` is the difference from Opus only, in percentage points | pass@k, HumanEval (Chen et al., 2021) |
-| FAIL_TO_PASS | The hidden check fails on the untouched fixture and must pass after the change | SWE-bench (Jimenez et al., 2024) |
-| PASS_TO_PASS | Test files that passed before the change must still pass, each re-run in its before-form | SWE-bench (Jimenez et al., 2024) |
-| `pass^k` | Share of tasks resolved in all `k` runs. It drops when a configuration is lucky, not reliable. Shown as `(k=N)` | pass^k, τ-bench (Yao et al., 2024) |
-| Resolved | FAIL_TO_PASS passed and no PASS_TO_PASS file regressed | SWE-bench |
-| Broke something | Runs whose hidden check passed but that broke a test that passed before | PASS_TO_PASS |
-| Recreated existing code | Runs that failed a hidden-check test whose name starts with `reuse: `. `—` when no run was checked for it | cc-tiers |
-| Touched outside scope | Runs that changed a file outside the task's scope: the files of the reference solution, `scopeExtra` from the tasks JSON, and test directories. `—` when no run was measured for it | cc-tiers |
-| Tokens per resolved task | Fresh tokens (input + cache write + output) divided by resolved tasks. For information only | cc-tiers |
-
-Tests the model wrote do not count toward resolved; the raw JSON keeps them as `ownTests`. A task may list `changesTests`, the original test files it changes on purpose; they are left out of PASS_TO_PASS. Below the per-task table, **Where it made a difference** lists the tasks where a configuration resolved a different share of runs than Opus only.
-
-The scope is the reference solution's files plus a short allowance list, so a legitimate alternative fix in another file can count as touched outside scope; the raw JSON lists the files so a reader can judge. Readability and comment quality have no deterministic metric and are not in the tables. The rows below predate the column, so it shows `—`.
-
-**Two suites.**
-
-- `bench/tasks-login.json`, the main suite and the default: one natural request, `POST /login`, with no hints, on `bench/fixture-login/`, a small API. The project's own state hides what the request does not say: a silent version trap (the installed dotenv 8.6.0 cuts the multi-line `PRIVATE_KEY` in `.env` at its first line), an existing token signing helper, and existing behaviour that can break. The hidden check is in `bench/checks-login/` and the reference in `bench/solutions-login/`.
-- `bench/tasks-hard.json`: twelve realistic bug reports and requests on `bench/fixture-hard/`, a 1,600-line Node service with shared state, time zones, and async booking. The hidden checks are in `bench/checks-hard/` and the references in `bench/solutions-hard/`.
-
-`npm test` verifies both sides of every check: it fails on the fixture and passes with the reference.
-
-**Run it.**
-
-```bash
-npm run bench -- --tasks-file bench/tasks-login.json --configs opus,sonnet,cc-tiers --repeat 2 --out bench/results/login.json
-npm run bench -- --tasks-file bench/tasks-hard.json --tasks traversal,race --configs opus,sonnet,cc-tiers --repeat 3 --out bench/results/hard-pair.json
-npm run bench -- --tasks-file bench/tasks-hard.json --tasks race,cancel,instances,traversal,date-filter,csv-escape,offboarding,recurring-pack --configs opus,cc-tiers --repeat 2 --out bench/results/verify-evidence.json
-npm run bench:table -- bench/results/login.json
-```
-
-> [!WARNING]
-> A run uses your real Claude Code login, so on Pro or Max it spends your usage window. `npm run bench:table -- <result files>` prints the tables from saved results.
-
-The login suite is one-shot only: its task edits the server and the config, so `--session` is refused. The runner loads only project and local settings, so your own CLAUDE.md, agents, and plugins stay out of the measurement. It disables `AskUserQuestion` for every configuration, Opus only and Sonnet only included: a headless run denies it anyway and nobody would answer. cc-tiers's prompts tell it to take the recommended option and record it under `Assumed:` (`agents/orchestrator.md`, Specify). For cc-tiers the runner also reads, from the session transcript, the escalations the hooks announced and whether each task was routed as this README says. For cc-tiers, a quality layers table shows what the gate and the review did: passes blocked by the gate, flaky commands, tasks not validated, findings discarded, rejections without evidence, and review rounds per task. The command for the verify and evidence suite (the 8 non-trivial tasks of the hard suite, Opus only against cc-tiers) is the last one in the list above.
-
-**Results**, as measured, one-shot. The results below are from 0.6, before the gate and evidence-based review.
-
-Login (`bench/results/login.json`, k=2, cc-tiers at plugin commit `18a1222`):
-
-| Configuration | pass@1 | Δ pass@1 vs Opus only | pass^k | Resolved | Broke something | Recreated existing code | Touched outside scope | Tokens per resolved task |
-| --- | --: | --: | --: | --: | --: | --: | --: | --: |
-| Opus only | 50% | — | 0% (k=2) | 1/2 | 0 | — | — | 50.2k |
-| Sonnet only | 50% | 0 pp | 0% (k=2) | 1/2 | 0 | — | — | 40.1k |
-| cc-tiers (Opus orchestrator) 18a1222 | 100% | +50 pp | 100% (k=2) | 2/2 | 0 | — | — | 202.4k |
-
-| Task | Opus only | Sonnet only | cc-tiers (Opus orchestrator) 18a1222 |
-| --- | --: | --: | --: |
-| `login` (hard) | 🟡 1/2 | 🟡 1/2 | ✅ 2/2 |
-
-**Where it made a difference** (resolved runs per task vs Opus only)
-
-| Task | Opus only | Sonnet only | cc-tiers (Opus orchestrator) 18a1222 |
-| --- | --: | --: | --: |
-| `login` | 1/2 | 1/2 | 2/2 |
-
-| Configuration | hard: pass@1 | Escalations | Routed as documented |
-| --- | --: | --: | --: |
-| Opus only | 50% | — | — |
-| Sonnet only | 50% | — | — |
-| cc-tiers (Opus orchestrator) 18a1222 | 100% | 1 | 2/2 |
-
-| Configuration | hard |
-| --- | --- |
-| cc-tiers (Opus orchestrator) 18a1222 | 2/2 (sonnet (+ Opus review)) |
-
-- Plain Opus and plain Sonnet each failed one of their two runs the same way: `/login` answered 500, because dotenv 8.6.0 had cut the key. cc-tiers resolved both runs; in both, the researcher found the truncation in `node_modules/dotenv` before any code was written.
-- `Recreated existing code` shows `—` because these runs predate the column; none of the six runs failed the reuse test.
-- The sample is small. cc-tiers took about 4× the tokens per resolved task of plain Opus (202.4k vs 50.2k) and about 12× its wall time (646 s vs 54 s per run), partly because the review asked for hardening the request did not ask for.
-
-Hard pair (`bench/results/hard-pair.json`, `traversal` and `race`, k=3, cc-tiers at plugin commit `ef57726`):
-
-| Configuration | pass@1 | Δ pass@1 vs Opus only | pass^k | Resolved | Broke something | Recreated existing code | Touched outside scope | Tokens per resolved task |
-| --- | --: | --: | --: | --: | --: | --: | --: | --: |
-| Opus only | 100% | — | 100% (k=3) | 6/6 | 0 | — | — | 32.7k |
-| Sonnet only | 50% | −50 pp | 50% (k=3) | 3/6 | 0 | — | — | 38.5k |
-| cc-tiers (Opus orchestrator) | 100% | 0 pp | 100% (k=3) | 6/6 | 0 | — | — | 166.5k |
-
-| Task | Opus only | Sonnet only | cc-tiers (Opus orchestrator) |
-| --- | --: | --: | --: |
-| `race` (hard) | ✅ 3/3 | ✅ 3/3 | ✅ 3/3 |
-| `traversal` (hard) | ✅ 3/3 | ❌ 0/3 | ✅ 3/3 |
-
-**Where it made a difference** (resolved runs per task vs Opus only)
-
-| Task | Opus only | Sonnet only | cc-tiers (Opus orchestrator) |
-| --- | --: | --: | --: |
-| `traversal` | 3/3 | 0/3 | 3/3 |
-
-| Configuration | hard: pass@1 | Escalations | Routed as documented |
-| --- | --: | --: | --: |
-| Opus only | 100% | — | — |
-| Sonnet only | 50% | — | — |
-| cc-tiers (Opus orchestrator) | 100% | 1 | 6/6 |
-
-| Configuration | hard |
-| --- | --- |
-| cc-tiers (Opus orchestrator) | 6/6 (sonnet (+ Opus review)) |
-
-- Plain Opus and cc-tiers resolved every run; plain Sonnet failed `traversal` in all three. In cc-tiers the code is written by Sonnet, and the Opus reviewer rejected its first `traversal` fix in every run.
-
-**What the data does not show:** cc-tiers beating plain Opus on tasks with the rules spelled out. On the hard pair, plain Opus resolved every run too.
-
-**Gate and evidence-based review (0.7), hard suite, k=2:** results pending. A tie with plain Opus on quality is a possible result and will be reported as one.
-
----
-
 ## 📋 Requirements
 
 - Claude Code **2.1.295+** (the `/config` pickers use `userConfig.options`, the PreToolUse hook sets `onFailure`, and the effort ladder uses the per-call `effort` from 2.1.292).
@@ -837,7 +722,6 @@ claude --plugin-dir .
 | `hooks/workspace.mjs` | Working-tree snapshots, sensitive and out-of-scope files, and state validation |
 | `hooks/telemetry.mjs`, `hooks/insights.mjs` | The local event log and the helper behind `/cc-tiers:insights` |
 | `hooks/redact.mjs` | Secret masking before memory, telemetry, and the audit trail |
-| `bench/` | The benchmark: the login and hard suites (tasks, fixtures, hidden checks, references), the runner, and measured results |
 | `.github/workflows/ci.yml` | Tests on Linux, macOS, and Windows, and `claude plugin validate` |
 | `CHANGELOG.md` | Release notes |
 
