@@ -21,7 +21,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { TIERS, dollars, extractFiles, writeAtomic } from './base.mjs'
 import { BUDGET_OVERRIDE_RE, budgetMessage, budgetStatus, parseTaskBudget } from './budget.mjs'
-import { completion, evaluateCriteria, oneSpacing, parseContract, parseCriterionReports, weakenedCriteria } from './contract.mjs'
+import { completion, evaluateCriteria, oneSpacing, parseContract, parseCriterionReports, plural, weakenedCriteria } from './contract.mjs'
 import { diagnoseFailure, nextAction } from './diagnose.mjs'
 import { MEMORY_BEGIN, MEMORY_END, MEMORY_IGNORE, addRecord, formatRecall, loadMemory, memoryPath, recall, sanitize, saveMemory } from './memory.mjs'
 import { checkParallel, declaredFiles, pruneActive, registerActive, releaseActive } from './parallel.mjs'
@@ -1572,7 +1572,7 @@ function recordEvidence(state, task, reports, gate, preexisting = null) {
   state.evidence[task] = {
     reports,
     verified: gate ? [...gate.verified, ...gate.flaky] : [],
-    gate: gate ? { status: gate.status, verified: gate.verified, flaky: gate.flaky, unverified: gate.unverified } : null,
+    gate: gate ? { status: gate.status, verified: gate.verified, flaky: gate.flaky, unverified: gate.unverified, cached: gate.cached } : null,
     ...(preexisting ? { preexisting } : {}),
   }
 }
@@ -1616,7 +1616,8 @@ function rememberGate(state, gate) {
 function finishTask(state, task, routing, { reviewed, tier }) {
   const evidence = own(state.evidence, task) || {}
   const contract = own(state.contracts, task) || { criteria: [] }
-  const risk = own(state.log, task)?.risk || 'medium'
+  const entry = own(state.log, task)
+  const risk = entry?.risk || 'medium'
   const criteria = evaluateCriteria(contract, { reports: evidence.reports || [], verified: evidence.verified || [], reviewPassed: reviewed })
   const result = completion({
     criteria,
@@ -1632,9 +1633,13 @@ function finishTask(state, task, routing, { reviewed, tier }) {
   const { checks } = result
   const criteriaPart = result.criteria.total ? ` Criteria with evidence: ${result.criteria.evidenced}/${result.criteria.total}.` : ' No spec criteria.'
   const remaining = result.remaining.length ? ` Remaining: ${result.remaining.slice(0, 6).join('; ')}.` : ''
+  // A first-try pass with no reused check prints no extra words.
+  const retries = [[Number(entry?.failures) || 0, 'failed attempt'], [Number(entry?.escalations) || 0, 'escalation']].filter(([count]) => count > 0)
+  const after = retries.length ? ` after ${retries.map(([count, word]) => plural(count, word)).join(' and ')}` : ''
+  const reused = evidence.gate?.cached?.length ? ` (${evidence.gate.cached.length} reused)` : ''
   const line =
-    `cc-tiers completion: ${task} ${result.status} on ${tier}, ${risk} risk; confidence ${result.confidence.level} (${result.confidence.reasons.join('; ')}). ` +
-    `Checks run ${checks.run}, passed ${checks.passed}, failed ${checks.failed}, not run ${checks.notRun}.${criteriaPart}${remaining}`
+    `cc-tiers completion: ${task} ${result.status} on ${tier}${after}, ${risk} risk; confidence ${result.confidence.level} (${result.confidence.reasons.join('; ')}). ` +
+    `Checks run ${checks.run}${reused}, passed ${checks.passed}, failed ${checks.failed}, not run ${checks.notRun}.${criteriaPart}${remaining}`
   return { result: { status: result.status, confidence: result.confidence.level, risk }, line: criteria.length ? `${line}\n${criteriaTable(task, criteria)}` : line }
 }
 

@@ -125,7 +125,7 @@ function riskRank(risk) {
   return RISK_RANK[risk] ?? RISK_RANK.medium
 }
 
-function plural(count, word) {
+export function plural(count, word) {
   return `${count} ${word}${count === 1 ? '' : 's'}`
 }
 

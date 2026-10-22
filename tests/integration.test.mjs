@@ -850,3 +850,88 @@ test('foreground: a flaky pass is rerun on the same tree and keeps its flaky lab
     assert.ok(state.verifyCache[command('ok')], 'the clean pass is remembered')
   })
 })
+
+const completionLine = (message) => message.split('\n').find((line) => line.startsWith('cc-tiers completion:'))
+const plainTask = (task) => `${header(task, 'sonnet', 'implementer')}CC_TIERS_RESEARCH: none - x\nCC_TIERS_SPEC: none - x\nFix src/x.js`
+
+// Reports go through processReport so the task log counts earlier attempts as the hook does.
+function completionSession(overrides = {}) {
+  const ctx = { routing: routingWith({ review_policy: 'never', ...overrides }), ccCost: false, projectDir: '', dataDir: '' }
+  const state = tiers.emptyState('s')
+  const send = (id, role, tier, status, prompt, extra = {}) => {
+    const lines = status === 'pass' ? ['CC_TIERS_VERIFY: npm test'] : []
+    return tiers.processReport(ctx, state, event(id, role, report('tweak', role, tier, status, lines), prompt, extra))
+  }
+  return { ctx, state, send }
+}
+
+test('completion: a first-try pass prints the line as before, with no retry or reuse words', () => {
+  const { state, send } = completionSession()
+  const prompt = plainTask('tweak')
+  delegate(state, routingWith(), 'implementer', prompt)
+  const line = completionLine(send('c1', 'implementer', 'sonnet', 'pass', prompt, { gate: passGate() }))
+  assert.equal(line, 'cc-tiers completion: tweak verified on sonnet, low risk; confidence high (gate verified 1 command). Checks run 1, passed 1, failed 0, not run 0. No spec criteria.')
+})
+
+test('completion: a pass after a retry says how many attempts failed', () => {
+  const { state, send } = completionSession()
+  const prompt = plainTask('tweak')
+  delegate(state, routingWith(), 'implementer', prompt)
+  send('c1', 'implementer', 'sonnet', 'fail', prompt)
+  const line = completionLine(send('c2', 'implementer', 'sonnet', 'pass', prompt, { gate: passGate() }))
+  assert.match(line, /^cc-tiers completion: tweak verified on sonnet after 1 failed attempt, low risk; /)
+  assert.doesNotMatch(line, /escalation|reused/)
+})
+
+test('completion: a pass after an escalation counts the failed attempts and the escalation', () => {
+  const { state, send } = completionSession()
+  const prompt = plainTask('tweak')
+  delegate(state, routingWith(), 'implementer', prompt)
+  send('c1', 'implementer', 'sonnet', 'fail', prompt)
+  assert.equal(send('c2', 'implementer', 'sonnet', 'fail', prompt).includes('The next tier is opus'), true)
+  const line = completionLine(send('c3', 'orchestrator', 'opus', 'pass', '', { gate: passGate() }))
+  assert.match(line, /^cc-tiers completion: tweak verified on opus after 2 failed attempts and 1 escalation, low risk; /)
+})
+
+test('completion: a task that finishes on a review pass still counts the attempts that failed before', () => {
+  const { state, send } = completionSession({ review_policy: 'always' })
+  const prompt = plainTask('tweak')
+  delegate(state, routingWith(), 'implementer', prompt)
+  send('c1', 'implementer', 'sonnet', 'fail', prompt)
+  assert.equal(tiers.applyEvent(state, event('c2', 'implementer', report('tweak', 'implementer', 'sonnet', 'pass', ['CC_TIERS_VERIFY: npm test']), prompt, { gate: passGate() }), routingWith({ review_policy: 'always' })).meta.outcome, 'review')
+  tiers.releaseIdleWriters(state)
+  const reviewPrompt = `${header('tweak', 'sonnet', 'reviewer')}diff --git a/src/x.js`
+  assert.equal(delegate(state, routingWith(), 'reviewer', reviewPrompt).deny, '')
+  const line = completionLine(send('c3', 'reviewer', 'opus', 'pass', reviewPrompt))
+  assert.match(line, /^cc-tiers completion: tweak \w+ on opus after 1 failed attempt, /)
+})
+
+test('completion: a log entry that is missing or has no counters reads as no retries', () => {
+  const prompt = plainTask('tweak')
+  const pruned = completionSession()
+  delegate(pruned.state, routingWith(), 'implementer', prompt)
+  delete pruned.state.log.tweak
+  assert.doesNotMatch(completionLine(pruned.send('c1', 'implementer', 'sonnet', 'pass', prompt, { gate: passGate() })), /after/)
+  const bare = completionSession()
+  delegate(bare.state, routingWith(), 'implementer', prompt)
+  delete bare.state.log.tweak.failures
+  delete bare.state.log.tweak.escalations
+  assert.doesNotMatch(completionLine(bare.send('c2', 'implementer', 'sonnet', 'pass', prompt, { gate: passGate() })), /after/)
+})
+
+test('completion: a check reused from the verify cache is counted in the checks part', () => {
+  const { state, send } = completionSession()
+  const prompt = plainTask('tweak')
+  delegate(state, routingWith(), 'implementer', prompt)
+  const gate = { ...passGate(['npm test', 'npm run lint']), cached: ['npm run lint'] }
+  const line = completionLine(send('c1', 'implementer', 'sonnet', 'pass', prompt, { gate }))
+  assert.match(line, /Checks run 2 \(1 reused\), passed 2, failed 0, not run 0\./)
+  assert.doesNotMatch(line, /after/)
+})
+
+test('completion: a clean pass the gate reused for the same tree is counted as reused on the next task', async () => {
+  await withGateRepo(async ({ foreground }) => {
+    assert.doesNotMatch(completionLine(foreground('reuse-a', 'ok').message), /reused/)
+    assert.match(completionLine(foreground('reuse-b', 'ok').message), /Checks run 1 \(1 reused\), passed 1, failed 0, not run 0\./)
+  })
+})
