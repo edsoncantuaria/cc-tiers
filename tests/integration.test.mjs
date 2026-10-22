@@ -725,3 +725,128 @@ test('background order: a background launch records when it started, and a foreg
   const at = state.log.paging.reviewLaunched
   assert.ok(at <= Date.now() - 60000 && at >= before - 60000, 'a foreground review started its duration ago')
 })
+
+// A temp git repo whose step.mjs counts its runs in a file outside the tree; the mode picks the outcome (ok, fail, flaky, touch).
+async function withGateRepo(fn) {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-int-'))
+  try {
+    const project = path.join(dir, 'project')
+    mkdirSync(project)
+    const git = (...args) => spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd: project, encoding: 'utf8' })
+    writeFileSync(path.join(project, 'step.mjs'), [
+      "import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'",
+      'const [counter, mode] = process.argv.slice(2)',
+      "appendFileSync(counter, '.')",
+      "const run = readFileSync(counter, 'utf8').length",
+      "if (mode === 'fail' || (mode === 'flaky' && run % 2 === 1)) process.exit(1)",
+      "if (mode === 'touch') writeFileSync('generated.txt', String(run))",
+      '',
+    ].join('\n'))
+    git('init', '-q')
+    git('add', '.')
+    git('commit', '-q', '-m', 'init')
+    const ctx = { routing: routingWith({ verify_allow: 'node step.mjs' }), ccCost: false, projectDir: project, dataDir: '' }
+    const state = tiers.emptyState('s')
+    const command = (mode) => `node step.mjs ${path.join(dir, `runs-${mode}`)} ${mode}`
+    const runs = (mode) => (existsSync(path.join(dir, `runs-${mode}`)) ? readFileSync(path.join(dir, `runs-${mode}`), 'utf8').length : 0)
+    const text = (task, role, mode) => report(task, role, role === 'orchestrator' ? 'opus' : 'sonnet', 'pass', [`CC_TIERS_VERIFY: ${command(mode)}`, 'CC_TIERS_REVIEW: skip'])
+    // Stop: peek under the lock, gate outside it, count the report.
+    const stop = (task, mode) => {
+      const parked = [{ id: `row:${task}`, role: 'orchestrator', text: text(task, 'orchestrator', mode) }]
+      const peeks = tiers.peekParked(state, parked)
+      const [prepared] = tiers.prepareParked(ctx, parked, {}, { peeks })
+      return { peek: peeks.get(parked[0].id), gate: prepared.gate, message: tiers.processReport(ctx, state, prepared) }
+    }
+    // Foreground: the hook peeks the state, runs the gate, then counts the report.
+    const foreground = (task, mode) => {
+      const ev = event(`fg:${task}`, 'implementer', text(task, 'implementer', mode), writer(task))
+      const prepared = tiers.prepareReport(ctx, ev, {}, { peek: tiers.peekFor(state, ev) })
+      return { gate: prepared.gate, message: tiers.processReport(ctx, state, prepared) }
+    }
+    await fn({ project, state, ctx, command, runs, stop, foreground })
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+}
+
+test('Stop: a parked report whose command already passed on the same tree is reused; a changed tree reruns it', async () => {
+  await withGateRepo(async ({ project, state, ctx, command, runs, stop }) => {
+    const first = stop('stop-a', 'ok')
+    assert.equal(first.gate.status, 'pass')
+    assert.deepEqual(first.gate.cached, [])
+    assert.equal(runs('ok'), 1)
+
+    const same = stop('stop-b', 'ok')
+    assert.deepEqual(same.gate.cached, [command('ok')], 'the same tree reuses the earlier pass')
+    assert.equal(runs('ok'), 1, 'the command did not run again')
+    assert.match(same.message, /reused for the same tree/)
+
+    writeFileSync(path.join(project, 'feature.js'), 'export {}\n')
+    const changed = stop('stop-c', 'ok')
+    assert.deepEqual(changed.gate.cached, [], 'a changed tree reruns the command')
+    assert.equal(runs('ok'), 2)
+    assert.deepEqual(stop('stop-d', 'ok').gate.cached, [command('ok')], 'the new tree is remembered in turn')
+
+    delegate(state, ctx.routing, 'implementer', writer('other-writer'))
+    const parked = [{ id: 'row:stop-e', role: 'orchestrator', text: report('stop-e', 'orchestrator', 'opus', 'pass') }]
+    const peek = tiers.peekParked(state, parked).get('row:stop-e')
+    assert.deepEqual(peek.writing, ['other-writer'], 'another writer on the tree is still named')
+    assert.equal(peek.snapshot, undefined, 'a session role has no delegation snapshot')
+  })
+})
+
+test('Stop: a flaky pass is rerun on the same tree and keeps its flaky label', async () => {
+  await withGateRepo(async ({ state, command, runs, stop }) => {
+    const first = stop('flaky-a', 'flaky')
+    assert.deepEqual(first.gate.flaky, [command('flaky')], 'the retry passed, so the first gate is flaky')
+    assert.equal(runs('flaky'), 2)
+    assert.equal(state.verifyCache?.[command('flaky')], undefined, 'a flaky pass is not remembered')
+
+    const second = stop('flaky-b', 'flaky')
+    assert.deepEqual(second.gate.cached, [], 'the same tree does not reuse a flaky pass')
+    assert.deepEqual(second.gate.flaky, [command('flaky')], 'the rerun is flaky again')
+    assert.equal(runs('flaky'), 4)
+  })
+})
+
+test('Stop: a failed command is rerun on the same tree', async () => {
+  await withGateRepo(async ({ state, command, runs, stop }) => {
+    const first = stop('fail-a', 'fail')
+    assert.equal(first.gate.status, 'fail')
+    assert.equal(runs('fail'), 2, 'a failure is retried once')
+    assert.equal(state.verifyCache?.[command('fail')], undefined, 'a failure is not remembered')
+
+    const second = stop('fail-b', 'fail')
+    assert.equal(second.gate.status, 'fail')
+    assert.deepEqual(second.gate.cached, [])
+    assert.equal(runs('fail'), 4, 'the same tree reran the failing command')
+  })
+})
+
+test('Stop: a command that changes the tree is no evidence and is never reused', async () => {
+  await withGateRepo(async ({ state, command, runs, stop }) => {
+    const first = stop('touch-a', 'touch')
+    assert.deepEqual(first.gate.verified, [])
+    assert.match(first.gate.unverified[0].reason, /changed the tree/)
+    assert.equal(state.verifyCache?.[command('touch')], undefined, 'a tree-changing command is not remembered')
+
+    const second = stop('touch-b', 'touch')
+    assert.deepEqual(second.gate.cached, [])
+    assert.equal(runs('touch'), 2, 'the next Stop ran it again')
+  })
+})
+
+test('foreground: a flaky pass is rerun on the same tree and keeps its flaky label; a clean pass is reused', async () => {
+  await withGateRepo(async ({ state, command, runs, foreground }) => {
+    assert.deepEqual(foreground('fg-flaky-a', 'flaky').gate.flaky, [command('flaky')])
+    const again = foreground('fg-flaky-b', 'flaky')
+    assert.deepEqual(again.gate.cached, [])
+    assert.deepEqual(again.gate.flaky, [command('flaky')])
+    assert.equal(runs('flaky'), 4)
+
+    foreground('fg-ok-a', 'ok')
+    assert.deepEqual(foreground('fg-ok-b', 'ok').gate.cached, [command('ok')])
+    assert.equal(runs('ok'), 1)
+    assert.ok(state.verifyCache[command('ok')], 'the clean pass is remembered')
+  })
+})

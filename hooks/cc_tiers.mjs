@@ -1600,11 +1600,11 @@ function workspaceNote(task, workspace, others) {
   return lines.join('\n')
 }
 
-/** The gate's fresh passes, keyed by command, for reuse while the tree stays the same. */
+/** The gate's clean fresh passes, keyed by command, for reuse while the tree stays the same; a flaky pass reruns so it keeps its label. */
 function rememberGate(state, gate) {
   if (!gate?.tree) return
   const cache = state.verifyCache && typeof state.verifyCache === 'object' ? state.verifyCache : (state.verifyCache = {})
-  for (const raw of gate.verified) if (!(gate.cached || []).includes(raw)) cache[raw] = gate.tree
+  for (const raw of gate.verified) if (!(gate.cached || []).includes(raw) && !(gate.flaky || []).includes(raw)) cache[raw] = gate.tree
   const names = Object.keys(cache)
   names.slice(0, Math.max(0, names.length - MAX_CACHE)).forEach((name) => delete cache[name])
 }
@@ -3001,9 +3001,12 @@ export function prepareParked(ctx, parked, payload = {}, { now = Date.now, peeks
   })
 }
 
-/** The other writers on the shared tree for each parked report (read under the lock), so its gate skips the tree check like a foreground one. */
+/** The other writers on the shared tree and the verify cache for each parked report (read under the lock), so its gate behaves like a foreground one; no snapshot, a session role has no delegation. */
 export function peekParked(state, parked) {
-  return new Map(parked.map((report) => [report.id, { writing: peekFor(state, report).writing }]))
+  return new Map(parked.map((report) => {
+    const { writing, cache } = peekFor(state, report)
+    return [report.id, { writing, cache }]
+  }))
 }
 
 export function queueMessage(state, message) {
