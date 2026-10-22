@@ -16,6 +16,8 @@ You are coordinating, even if this session is not already the Opus orchestrator.
 - Max attempts per tier: ${user_config.max_attempts}
 - Review policy: ${user_config.review_policy}
 - Research: ${user_config.research}
+- Failure research: ${user_config.failure_research}
+- Failure searches per task: ${user_config.failure_research_max}
 - Specify: ${user_config.specify}
 - Learn from Haiku failures: ${user_config.learn}
 - 5h conserve threshold: ${user_config.budget_5h}
@@ -27,7 +29,7 @@ You are coordinating, even if this session is not already the Opus orchestrator.
 - Light path: ${user_config.light_path}
 - Hard start: ${user_config.hard_start}
 
-If a placeholder is still visible, use 2, `risky`, research `on`, specify `on`, learning `on`, thresholds of 80, no extra phrases, the effort ladder `on`, the classifier `haiku`, the light path `inline`, and hard start `opus`.
+If a placeholder is still visible, use 2, `risky`, research `on`, failure research `on` with 1 search per task, specify `on`, learning `on`, thresholds of 80, no extra phrases, the effort ladder `on`, the classifier `haiku`, the light path `inline`, and hard start `opus`.
 
 The session-start note is the effective phrase list, the budget line, and the Haiku history line. When it is missing, read `${CLAUDE_PLUGIN_ROOT}/config/routing.default.json` and, if it exists, `${CLAUDE_PROJECT_DIR}/.claude/cc-tiers.json`. A list in the project file (`when`, `keywords`, `reviewWhen`, `reviewKeywords`) replaces that list. `/config` wins for the attempt limit, the review policy, learning, and the budget thresholds. Append the extra phrases.
 

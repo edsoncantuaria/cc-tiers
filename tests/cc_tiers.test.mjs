@@ -3276,3 +3276,84 @@ test('a checker can neither be delegated nor finish a task whose failure was dec
   assert.equal(state.tasks['users-pagination'], undefined)
   assert.equal(call('checker', 'haiku').deny, '', 'once the task is finished nothing is declared')
 })
+
+test('failure research is a /config and project option: on by default, 1 search per task, 0 behaves like off', () => {
+  const defaults = tiers.loadJson(path.join(ROOT, 'config/routing.default.json'))
+  assert.equal(defaults.failureResearch, true)
+  assert.equal(defaults.failureResearchMax, 1)
+  const merged = tiers.mergeRouting(defaults)
+  assert.equal(merged.failureResearch, true)
+  assert.equal(merged.failureResearchMax, 1)
+  assert.equal(tiers.mergeRouting(defaults, { failureResearch: false }).failureResearch, false)
+  assert.equal(tiers.mergeRouting(defaults, { failureResearch: false }, { failure_research: 'on' }).failureResearch, true)
+  assert.equal(tiers.mergeRouting(defaults, null, { failure_research: 'off' }).failureResearch, false)
+  assert.equal(tiers.mergeRouting(defaults, { failureResearchMax: 3 }).failureResearchMax, 3)
+  assert.equal(tiers.mergeRouting(defaults, { failureResearchMax: 3 }, { failure_research_max: 2 }).failureResearchMax, 2)
+  assert.equal(tiers.mergeRouting(defaults, null, { failure_research_max: 9 }).failureResearchMax, 5)
+  assert.equal(tiers.mergeRouting(defaults, null, { failure_research_max: -1 }).failureResearchMax, 0)
+  assert.equal(tiers.mergeRouting(defaults, null, { failure_research_max: 'x' }).failureResearchMax, 1)
+  assert.deepEqual(
+    [{}, { failure_research: 'off' }, { failure_research_max: 0 }, { failure_research_max: 4 }].map((user) => tiers.failureSearchCap(tiers.mergeRouting(defaults, null, user))),
+    [1, 0, 0, 4],
+  )
+  assert.equal(tiers.failureSearchCap({}), 0, 'a routing built without the fields means off')
+  const env = tiers.userFromEnv({ CLAUDE_PLUGIN_OPTION_FAILURE_RESEARCH: 'off', CLAUDE_PLUGIN_OPTION_FAILURE_RESEARCH_MAX: '3' })
+  assert.equal(env.failure_research, 'off')
+  assert.equal(env.failure_research_max, '3')
+  assert.equal(tiers.userFromEnv({}).failure_research, null)
+  assert.equal(tiers.userFromEnv({}).failure_research_max, null)
+})
+
+test('the manifest declares failure_research and failure_research_max', () => {
+  const manifest = JSON.parse(readFileSync(path.join(ROOT, '.claude-plugin/plugin.json'), 'utf8'))
+  const toggle = manifest.userConfig.failure_research
+  assert.equal(toggle.type, 'string')
+  assert.deepEqual(toggle.options, ['on', 'off'])
+  assert.equal(toggle.default, 'on')
+  const max = manifest.userConfig.failure_research_max
+  assert.equal(max.type, 'number')
+  assert.equal(max.default, 1)
+  assert.equal(max.min, 0)
+  assert.equal(max.max, 5)
+  for (const option of [toggle, max]) assert.ok(option.title && option.description)
+})
+
+test('the session summary says failure research is on with its cap, or off', () => {
+  const defaults = tiers.loadJson(path.join(ROOT, 'config/routing.default.json'))
+  const summary = (user) => tiers.formatSessionContext(tiers.mergeRouting(defaults, null, user), 'not present', { ccCost: { installed: false } })
+  const on = summary({})
+  assert.ok(on.includes('Failure research: on, up to 1 per task.'))
+  assert.ok(on.indexOf('Failure research: on') > on.indexOf('Research: on'))
+  assert.ok(summary({ failure_research_max: 3 }).includes('Failure research: on, up to 3 per task.'))
+  assert.ok(summary({ failure_research: 'off' }).includes('Failure research: off. A failure note never asks for a web search.'))
+  assert.ok(summary({ failure_research_max: 0 }).includes('Failure research: off. A failure note never asks for a web search.'))
+})
+
+test('the orchestrator, dispatcher and tiers skill list both failure research options', () => {
+  for (const file of ['agents/orchestrator.md', 'agents/dispatcher.md', 'skills/tiers/SKILL.md']) {
+    const text = readFileSync(path.join(ROOT, file), 'utf8')
+    assert.ok(text.includes('- Failure research: ${user_config.failure_research}'), file)
+    assert.ok(text.includes('- Failure searches per task: ${user_config.failure_research_max}'), file)
+    assert.ok(text.includes('failure research `on` with 1 search per task'), file)
+  }
+})
+
+test('a review rejection with a blocking finding of a searchable category gets the failure search, one that is not gets none', async () => {
+  const block = (category) => `${report('reviewer', 'sonnet', 'fail', '', 'broken')}\n${findingBlock({ category, evidence: 'command', command: 'node bad.mjs' })}`
+  for (const [category, diagnosed] of [['api-usage', 'docs-version'], ['correctness', 'test'], ['regression', 'regression']]) {
+    const { applied } = await reviewFlow('reviewer', block(category), { probes: { 'bad.mjs': 1 } })
+    assert.equal(applied.meta.outcome, 'retry', category)
+    assert.match(applied.message, new RegExp(`Diagnosis: ${diagnosed} `), category)
+    assert.match(applied.message, /Failure research: run cc-tiers:researcher for users-pagination before the retry/, category)
+    assert.match(applied.message, /\nCC_TIERS_FAILURE: /, category)
+    assert.equal(applied.state.tasks['users-pagination'].searches, 1, category)
+  }
+  for (const category of ['security', 'scope']) {
+    const { applied } = await reviewFlow('reviewer', block(category), { probes: { 'bad.mjs': 1 } })
+    assert.equal(applied.meta.outcome, 'retry', category)
+    assert.equal(applied.message.includes('Failure research:'), false, category)
+    assert.equal(applied.state.tasks['users-pagination'].searches, undefined, category)
+  }
+  const off = await reviewFlow('reviewer', block('api-usage'), { probes: { 'bad.mjs': 1 }, routing: defaultRouting({ specify: 'off', verify: 'off', failure_research: 'off' }) })
+  assert.equal(off.applied.message.includes('Failure research:'), false)
+})

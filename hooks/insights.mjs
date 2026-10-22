@@ -25,9 +25,13 @@ function startRow() {
   return { tasks: 0, passed: 0, escalated: 0, finishedOn: {}, stopped: 0, afterBlocking: 0 }
 }
 
+function matchRow() {
+  return { searches: 0, tasks: 0, passed: 0 }
+}
+
 /** What happened to one task, folded from its events in order. */
 function journeyOf(journeys, task) {
-  if (!journeys.has(task)) journeys.set(task, { start: '', risk: '', escalated: false, blocking: false, passed: false, stopped: false, finish: '' })
+  if (!journeys.has(task)) journeys.set(task, { start: '', risk: '', escalated: false, blocking: false, passed: false, stopped: false, finish: '', matches: new Set() })
   return journeys.get(task)
 }
 
@@ -45,6 +49,7 @@ export function summarize(events, { minSample = 10 } = {}) {
     rework: { tasks: 0, total: 0 },
     confidence: {},
     hindsight: { byStart: {}, overRouted: 0 },
+    failureResearch: {},
     sample: 'small',
     notes: [],
   }
@@ -68,6 +73,12 @@ export function summarize(events, { minSample = 10 } = {}) {
         bump(summary.byCategory, event.category || 'unknown')
         if (event.task) reworked.add(event.task)
         break
+      case 'research.failure': {
+        const match = event.outcome || 'unknown'
+        slot(summary.failureResearch, match, matchRow).searches += 1
+        if (journey) journey.matches.add(match)
+        break
+      }
       case 'escalated':
         summary.escalations += 1
         bump(summary.escalationReasons, event.because || event.category || 'unknown')
@@ -96,6 +107,13 @@ export function summarize(events, { minSample = 10 } = {}) {
   }
   summary.tasks = tasks.size
   summary.rework = { tasks: reworked.size, total: tasks.size }
+  for (const journey of journeys.values()) {
+    for (const match of journey.matches) {
+      const row = slot(summary.failureResearch, match, matchRow)
+      row.tasks += 1
+      if (journey.passed && !journey.escalated) row.passed += 1
+    }
+  }
   for (const [task, journey] of journeys) {
     if (!journey.start) continue
     const row = slot(summary.hindsight.byStart, journey.start, startRow)
@@ -164,6 +182,10 @@ export function renderInsights(summary) {
       String(row.afterBlocking),
     ])
   lines.push(...table('Routing in hindsight', ['started on', 'tasks', 'passed there', 'escalated', 'escalated, finished on', 'stopped', 'passed after blocking review'], startRows))
+  const matchRows = Object.entries(summary.failureResearch)
+    .sort((a, b) => b[1].searches - a[1].searches || a[0].localeCompare(b[0]))
+    .map(([match, row]) => [match, String(row.searches), String(row.tasks), String(row.passed)])
+  lines.push(...table('Failure research by match', ['match', 'searches', 'tasks', 'passed later without escalating'], matchRows))
   if (summary.hindsight.overRouted > 0) {
     lines.push('', `Possibly over-routed: ${summary.hindsight.overRouted} task(s) started on opus at low or medium risk and passed with no escalation, failure or blocking finding. A hint to look at, not a verdict.`)
   }

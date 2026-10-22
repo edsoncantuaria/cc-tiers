@@ -337,3 +337,51 @@ test('the script prints the report for a data dir, or says there is no telemetry
   const viaEnv = spawnSync(process.execPath, [SCRIPT], { encoding: 'utf8', env: { ...process.env, CLAUDE_PLUGIN_DATA: dir } })
   assert.match(viaEnv.stdout, /## cc-tiers insights/)
 })
+
+test('research.failure is a known event type and keeps its match as text', (t) => {
+  assert.deepEqual(sanitizeEvent({ type: 'research.failure', task: 'a', outcome: 'partial', prompt: 'the failure text' }), { type: 'research.failure', task: 'a', outcome: 'partial' })
+  const file = telemetryPath(tempDir(t))
+  assert.equal(recordEvent(file, { type: 'research.failure', task: 'a', outcome: 'high' }), true)
+  assert.deepEqual(readEvents(file).map((event) => [event.type, event.outcome]), [['research.failure', 'high']])
+})
+
+test('summarize counts failure searches by match and the tasks that later passed without escalating', () => {
+  const summary = summarize([
+    { type: 'research.failure', task: 'a', outcome: 'high' },
+    { type: 'task.passed', task: 'a', tier: 'sonnet' },
+    { type: 'research.failure', task: 'b', outcome: 'high' },
+    { type: 'research.failure', task: 'b', outcome: 'high' },
+    { type: 'escalated', task: 'b', because: 'test' },
+    { type: 'task.passed', task: 'b', tier: 'opus' },
+    { type: 'research.failure', task: 'c', outcome: 'none' },
+    { type: 'research.failure', task: 'c', outcome: 'partial' },
+    { type: 'task.passed', task: 'c', tier: 'sonnet' },
+    { type: 'research.failure', task: 'd', outcome: 'none' },
+    { type: 'research.failure', task: 'e' },
+  ])
+  assert.deepEqual(summary.failureResearch, {
+    high: { searches: 3, tasks: 2, passed: 1 },
+    none: { searches: 2, tasks: 2, passed: 1 },
+    partial: { searches: 1, tasks: 1, passed: 1 },
+    unknown: { searches: 1, tasks: 1, passed: 0 },
+  })
+  assert.deepEqual(summarize([]).failureResearch, {})
+})
+
+test('renderInsights prints failure research by match with counts only, and nothing without a search', () => {
+  const summary = summarize([
+    { type: 'research.failure', task: 'a', outcome: 'none' },
+    { type: 'research.failure', task: 'b', outcome: 'high' },
+    { type: 'research.failure', task: 'b', outcome: 'high' },
+    { type: 'task.passed', task: 'b', tier: 'sonnet' },
+  ])
+  const text = renderInsights(summary)
+  const lines = text.split('\n')
+  const at = lines.findIndex((line) => line.includes('Failure research by match'))
+  assert.ok(at >= 0, text)
+  assert.match(text, /match\s*\|?\s*searches\s*\|?\s*tasks\s*\|?\s*passed later without escalating/)
+  const rows = lines.slice(at).filter((line) => /^\s*\|?\s*(high|none)\b/.test(line))
+  assert.match(rows[0], /high\D+2\D+1\D+1/)
+  assert.match(rows[1], /none\D+1\D+1\D+0/)
+  assert.equal(renderInsights(summarize([{ type: 'task.passed', task: 'z', tier: 'sonnet' }])).includes('Failure research by match'), false)
+})

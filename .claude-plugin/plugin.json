@@ -103,6 +103,21 @@
       "default": "on",
       "options": ["on", "off"]
     },
+    "failure_research": {
+      "type": "string",
+      "title": "Failure research",
+      "description": "on (default): after a counted failure diagnosed as a docs-version, type, integration, test or regression failure, the failure note asks the orchestrator to run cc-tiers:researcher on the failure message and the installed version before the retry, up to failure_research_max times per task. It never blocks: a note with no search, or a search with no match, never delays the retry or the escalation. off: a failure note never asks for a search.",
+      "default": "on",
+      "options": ["on", "off"]
+    },
+    "failure_research_max": {
+      "type": "number",
+      "title": "Failure searches per task",
+      "description": "How many times one task may be asked for a failure search, across all its tiers. 0 behaves like failure_research off. Default 1.",
+      "default": 1,
+      "min": 0,
+      "max": 5
+    },
     "specify": {
       "type": "string",
       "title": "Spec gate",

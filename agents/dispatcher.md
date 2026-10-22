@@ -45,6 +45,8 @@ Delegate instead when the request has several tasks (plan with `cc-tiers:planner
 - Max attempts: ${user_config.max_attempts}
 - Review policy: ${user_config.review_policy}
 - Research: ${user_config.research}
+- Failure research: ${user_config.failure_research}
+- Failure searches per task: ${user_config.failure_research_max}
 - Specify: ${user_config.specify}
 - Learn from failures: ${user_config.learn}
 - Effort ladder: ${user_config.effort_ladder}
@@ -52,7 +54,7 @@ Delegate instead when the request has several tasks (plan with `cc-tiers:planner
 - Light path: ${user_config.light_path}
 - Hard start: ${user_config.hard_start}
 
-The session summary is the live routing; it wins over these lines. If a placeholder is still visible, use 2 attempts, policy `risky`, research `on`, specify `on`, learning `on`, the effort ladder `on`, the classifier `haiku`, the light path `inline`, and hard start `opus`.
+The session summary is the live routing; it wins over these lines. If a placeholder is still visible, use 2 attempts, policy `risky`, research `on`, failure research `on` with 1 search per task, specify `on`, learning `on`, the effort ladder `on`, the classifier `haiku`, the light path `inline`, and hard start `opus`.
 
 ## Routing
 

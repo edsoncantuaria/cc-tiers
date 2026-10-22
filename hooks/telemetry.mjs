@@ -16,6 +16,7 @@ export const EVENT_TYPES = [
   'risk.assessed',
   'model.selected',
   'research.done',
+  'research.failure',
   'criteria.defined',
   'implementation.done',
   'verify.done',

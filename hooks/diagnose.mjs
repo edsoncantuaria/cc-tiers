@@ -3,6 +3,7 @@
  * Pure functions with no I/O, so the orchestrator can call them on any failure it holds.
  */
 
+import { clip } from './redact.mjs'
 import { fold } from './verify.mjs'
 
 export const FAILURE_CATEGORIES = [
@@ -232,6 +233,27 @@ const ACTIONS = {
   scope: ['retry', 'Revert what is outside the task and retry with only the files it names.'],
   unverifiable: ['report-partial', 'The repo cannot exercise this failure: do not move up a tier. Deliver the verifiable part, report the task as partial, and name the test setup that is missing.'],
   unknown: ['retry', 'Read the full output to find the cause, then retry.'],
+}
+
+/** Failures whose text names a library, an API or a version, so the web may explain them; the others come from the environment, the design or the task itself. */
+const SEARCHABLE = new Set(['docs-version', 'type', 'integration', 'test', 'regression'])
+const MAX_FAILURE_LINES = 3
+const FILE_URL_RE = /file:\/\/(?=\/|[A-Za-z]:)/g
+/** An absolute or home path, not the slash inside a URL, a ratio or a relative path. */
+const ABSOLUTE_PATH_RE = /(?<![\w:./<-])(?:~\w*|[A-Za-z]:)?[\\/][^\s'"`)]*/g
+
+/** One line a web search may use: redacted, absolute paths and CC_TIERS_ tokens gone, so it can never open or close a block or forge a header. */
+function searchable(text) {
+  // A token becomes a space, not nothing: the text around it must not join into a new token.
+  const plain = asText(text).replace(FILE_URL_RE, '').replace(ABSOLUTE_PATH_RE, '<path>').replace(/CC_TIERS_\w*/gi, ' ')
+  return clip(plain, MAX_SYMPTOM)
+}
+
+/** The CC_TIERS_FAILURE lines the researcher gets for a diagnosis: its symptom and evidence, at most three. Empty when the category is not searchable. */
+export function failureResearchLines(diagnosis) {
+  if (!SEARCHABLE.has(diagnosis?.category)) return []
+  const lines = [diagnosis.symptom, ...asText(diagnosis.evidence).split('\n')].map(searchable).filter(Boolean)
+  return [...new Set(lines)].slice(0, MAX_FAILURE_LINES).map((line) => `CC_TIERS_FAILURE: ${line}`)
 }
 
 export function nextAction(diagnosis, { tier, attemptsLeft } = {}) {

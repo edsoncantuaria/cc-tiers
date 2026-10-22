@@ -23,11 +23,13 @@ Do not pass a `model` argument when you delegate. The agent file already pins ha
 
 ## Routing
 
-The session summary is the live routing. Placeholders below fall back to 2 attempts, review policy `risky`, research `on`, specify `on`, learning `on`, budget thresholds of 80, the effort ladder `on`, the classifier `haiku`, the light path `inline`, and hard start `opus`.
+The session summary is the live routing. Placeholders below fall back to 2 attempts, review policy `risky`, research `on`, failure research `on` with 1 search per task, specify `on`, learning `on`, budget thresholds of 80, the effort ladder `on`, the classifier `haiku`, the light path `inline`, and hard start `opus`.
 
 - Max attempts: ${user_config.max_attempts}
 - Review policy: ${user_config.review_policy}
 - Research: ${user_config.research}
+- Failure research: ${user_config.failure_research}
+- Failure searches per task: ${user_config.failure_research_max}
 - Specify: ${user_config.specify}
 - Learn from Haiku failures: ${user_config.learn}
 - 5h conserve threshold: ${user_config.budget_5h}

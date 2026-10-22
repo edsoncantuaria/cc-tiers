@@ -22,7 +22,7 @@ import { fileURLToPath } from 'node:url'
 import { TIERS, dollars, extractFiles, writeAtomic } from './base.mjs'
 import { BUDGET_OVERRIDE_RE, budgetMessage, budgetStatus, parseTaskBudget } from './budget.mjs'
 import { completion, evaluateCriteria, oneSpacing, parseContract, parseCriterionReports, plural, weakenedCriteria } from './contract.mjs'
-import { declaresPackage, diagnoseFailure, missingPackage, nextAction } from './diagnose.mjs'
+import { declaresPackage, diagnoseFailure, failureResearchLines, missingPackage, nextAction } from './diagnose.mjs'
 import { MEMORY_BEGIN, MEMORY_END, MEMORY_IGNORE, addRecord, formatRecall, loadMemory, memoryPath, recall, sanitize, saveMemory } from './memory.mjs'
 import { checkParallel, declaredFiles, pruneActive, registerActive, releaseActive } from './parallel.mjs'
 import { availableChecks, parseProfile, profileSettings, reviewRequired, selectChecks } from './policy.mjs'
@@ -98,6 +98,7 @@ const HEADER_RE = /^CC_TIERS_([A-Z]+):\s*(.*?)\s*$/
 const RESEARCH_BEGIN = 'CC_TIERS_RESEARCH_BEGIN'
 const RESEARCH_END = 'CC_TIERS_RESEARCH_END'
 const RESEARCH_NONE_RE = /^none\s*-\s*\S/
+const FAILURE_MATCHES = ['high', 'partial', 'none']
 const SPEC_BEGIN = 'CC_TIERS_SPEC_BEGIN'
 const SPEC_END = 'CC_TIERS_SPEC_END'
 const SPEC_NONE_RE = /^none\s*-\s*\S/i
@@ -340,6 +341,8 @@ export function mergeRouting(defaults, project = null, user = null) {
   const hardStart = parseHardStart(config.hard_start, parseHardStart(defaults.hardStart))
   const showCost = parseLearn(config.show_cost, parseLearn(defaults.showCost, true))
   const research = parseLearn(config.research, parseLearn(source.research, parseLearn(defaults.research, true)))
+  const failureResearch = parseLearn(config.failure_research, parseLearn(source.failureResearch, parseLearn(defaults.failureResearch, true)))
+  const failureResearchMax = clampRange(config.failure_research_max, 0, 5, clampRange(source.failureResearchMax, 0, 5, clampRange(defaults.failureResearchMax, 0, 5, 1)))
   const specify = parseLearn(config.specify, parseLearn(source.specify, parseLearn(defaults.specify, true)))
   const verify = parseLearn(config.verify, parseLearn(defaults.verify, true))
   let verifyAllow = parseVerifyAllow(config.verify_allow)
@@ -390,6 +393,8 @@ export function mergeRouting(defaults, project = null, user = null) {
     hardStart,
     showCost,
     research,
+    failureResearch,
+    failureResearchMax,
     specify,
     verify,
     verifyAllow,
@@ -872,6 +877,20 @@ export function researchLine(routing) {
   )
 }
 
+/** How many failure searches one task may be asked for: none when the option is off or the cap is 0. */
+export function failureSearchCap(routing) {
+  return routing.failureResearch ? Number(routing.failureResearchMax) || 0 : 0
+}
+
+export function failureResearchLine(routing) {
+  const cap = failureSearchCap(routing)
+  if (!cap) return 'Failure research: off. A failure note never asks for a web search.'
+  return (
+    `Failure research: on, up to ${cap} per task. After a counted failure diagnosed as a docs-version, type, integration, test or regression failure, ` +
+    'the failure note gives CC_TIERS_FAILURE lines: run cc-tiers:researcher with them before the retry and paste its brief as a second research block. A suggestion is never mandatory.'
+  )
+}
+
 export function specifyLine(routing) {
   if (!routing.specify) return 'Specify: off. Code goes to cc-tiers:implementer or cc-tiers:architect without written acceptance criteria.'
   return (
@@ -901,6 +920,7 @@ export function formatSessionContext(routing, projectNote, snapshot = {}) {
     classifierLine(routing),
     hardStartLine(routing),
     researchLine(routing),
+    failureResearchLine(routing),
     specifyLine(routing),
     verifyLine(routing),
     ...policyLines(routing),
@@ -973,10 +993,10 @@ function coveredByReview(state, tasks, task, event) {
   return Boolean(launched && !own(tasks, task) && Number(own(state.log, task)?.reviewLaunched) > launched)
 }
 
-/** The skipped infra and pre-existing failures travel with the task across tiers, so MAX_INFRA_SKIPS and MAX_PREEXISTING_SKIPS bound the whole task. */
+/** The skipped infra and pre-existing failures and the failure searches suggested travel with the task across tiers, so their limits bound the whole task. */
 function infraKept(entry) {
   const kept = {}
-  for (const key of ['infra', 'preexisting']) if (Number(entry?.[key])) kept[key] = Number(entry[key])
+  for (const key of ['infra', 'preexisting', 'searches']) if (Number(entry?.[key])) kept[key] = Number(entry[key])
   return kept
 }
 
@@ -1657,6 +1677,7 @@ function criteriaTable(task, criteria) {
 function applyResearch(state, meta, task, headers, event) {
   meta.outcome = 'research'
   const status = event.kind === 'error' ? 'fail' : (headers.STATUS || '').toLowerCase()
+  if (Object.hasOwn(parseHeaders(event.prompt || ''), 'FAILURE')) return applyFailureResearch(state, meta, task, status, event)
   if (status !== 'pass') {
     return {
       state,
@@ -1675,6 +1696,15 @@ function applyResearch(state, meta, task, headers, event) {
   names.slice(0, Math.max(0, names.length - MAX_SEEN)).forEach((name) => delete researched[name])
   queueEvent(state, { type: 'research.done', task })
   return { state, meta, message: `cc-tiers marked ${slugs.join(', ')} as researched.` }
+}
+
+/** A failure search is no research for the task: it marks nothing and counts no attempt, and only how well its sources matched is kept, as a count. */
+function applyFailureResearch(state, meta, task, status, event) {
+  const reported = String(parseHeaders(event.text || '').MATCH || '').toLowerCase()
+  const match = FAILURE_MATCHES.includes(reported) ? reported : 'unknown'
+  queueEvent(state, { type: 'research.failure', task, outcome: match })
+  const result = status === 'pass' ? `reported match ${match}` : 'did not pass'
+  return { state, meta, message: `cc-tiers: failure research for ${task} ${result}. It counts no attempt and never delays the retry.` }
 }
 
 /** inherited: a checker cannot confirm a failure the writer declared pre-existing, so its pass leaves the task waiting for the Opus reviewer. */
@@ -1707,7 +1737,10 @@ function applyFailure(tasks, task, current, tier, role, reason, routing, detail 
   const history = [...carried, ...failures]
   const haikuFailure = tier === 'haiku'
 
-  const advice = diagnosisLines(diagnosis, tier, maxAttempts - failures.length)
+  // Opus failing its last attempt stops the task: no retry or next tier is left to research for.
+  const search = failures.length < maxAttempts || NEXT_TIER[tier] ? failureSearch(diagnosis, task, current, routing) : ''
+  if (search) current.searches = (Number(current.searches) || 0) + 1
+  const advice = diagnosisLines(diagnosis, tier, maxAttempts - failures.length, search)
   if (failures.length < maxAttempts) {
     tasks[task] = current
     const raised = tier === 'opus' ? '' : effortNote(routing, tier, failures.length)
@@ -1768,15 +1801,31 @@ function applyFailure(tasks, task, current, tier, role, reason, routing, detail 
         `The next tier is ${next} (${implementerFor(next)})${start}. ` +
           'Pass the failure notes in the delegation prompt. The new tier starts at zero failures.',
         history,
-      ) + advice,
+      ) + advice + (current.searches ? `\n${DOSSIER_LINE}` : ''),
   }
+}
+
+const DOSSIER_LINE =
+  'Research dossier: carry the research blocks (the original brief and the failure brief) into the next tier\'s prompt as the investigation dossier; ' +
+  'the next tier searches again only for a gap the dossier names.'
+
+/** The "Failure research:" line for a failure that a web search may explain; '' once the task used its searches or when the failure is not searchable. */
+function failureSearch(diagnosis, task, current, routing) {
+  if ((Number(current.searches) || 0) >= failureSearchCap(routing)) return ''
+  const lines = failureResearchLines(diagnosis)
+  if (!lines.length) return ''
+  return [
+    `Failure research: run cc-tiers:researcher for ${task} before the retry, with these lines in its prompt outside any block; paste its brief into the retry prompt as a second research block.`,
+    ...lines,
+  ].join('\n')
 }
 
 /**
  * What the failure looks like and what to try next, after the counter's own lines.
  * A repeated or architectural failure suggests moving up early; the counter follows an early escalation.
+ * A failure search replaces the older advice to research the installed version again.
  */
-function diagnosisLines(diagnosis, tier, attemptsLeft) {
+function diagnosisLines(diagnosis, tier, attemptsLeft, search = '') {
   const action = nextAction(diagnosis, { tier, attemptsLeft })
   const how = diagnosis.confirmed ? 'confirmed by the output' : 'suspected from the reason'
   const lines = [`Diagnosis: ${diagnosis.category} (${how}). ${diagnosis.hypothesis}`]
@@ -1784,9 +1833,10 @@ function diagnosisLines(diagnosis, tier, attemptsLeft) {
   if (action.action === 'escalate' && attemptsLeft > 0 && NEXT_TIER[tier]) {
     next += ` cc-tiers suggests moving it up now instead of retrying on ${tier}: delegate it to ${implementerFor(NEXT_TIER[tier])} with the notes.`
   }
-  if (action.action === 'retry-research') next += ' Run cc-tiers:researcher again for the installed version and pass the new brief.'
+  if (action.action === 'retry-research' && !search) next += ' Run cc-tiers:researcher again for the installed version and pass the new brief.'
   if (diagnosis.repeated) next += ' The same failure happened before on this task, so change the approach rather than repeat it.'
   lines.push(next)
+  if (search) lines.push(search)
   return `\n${lines.join('\n')}`
 }
 
@@ -2782,6 +2832,8 @@ export function userFromEnv(env = process.env) {
     hard_start: env.CLAUDE_PLUGIN_OPTION_HARD_START || null,
     show_cost: env.CLAUDE_PLUGIN_OPTION_SHOW_COST || null,
     research: env.CLAUDE_PLUGIN_OPTION_RESEARCH || null,
+    failure_research: env.CLAUDE_PLUGIN_OPTION_FAILURE_RESEARCH || null,
+    failure_research_max: env.CLAUDE_PLUGIN_OPTION_FAILURE_RESEARCH_MAX || null,
     specify: env.CLAUDE_PLUGIN_OPTION_SPECIFY || null,
     verify: env.CLAUDE_PLUGIN_OPTION_VERIFY || null,
     verify_allow: env.CLAUDE_PLUGIN_OPTION_VERIFY_ALLOW || '',
