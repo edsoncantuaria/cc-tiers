@@ -23,6 +23,7 @@ async function main(payload) {
     peekParked,
     prepareParked,
     processReport,
+    redoFromPrompt,
     releaseIdleWriters,
     takePending,
     withSession,
@@ -36,7 +37,7 @@ async function main(payload) {
     const message = withSession(ctx, payload, (state) => {
       const pending = takePending(state)
       const hint = lightHint(payload.prompt, ctx.routing, { history, conserve: ctx.routing.conserve === true, projectDir: ctx.projectDir })
-      return [pending, hint].filter(Boolean).join('\n\n')
+      return [pending, ...redoFromPrompt(state, payload.prompt), hint].filter(Boolean).join('\n\n')
     })
     if (message) process.stdout.write(`${JSON.stringify(hookOutput('UserPromptSubmit', message))}\n`)
     return

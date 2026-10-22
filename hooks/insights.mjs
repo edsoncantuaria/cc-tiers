@@ -34,7 +34,7 @@ function matchRow() {
 
 /** What happened to one task, folded from its events in order. */
 function journeyOf(journeys, task) {
-  if (!journeys.has(task)) journeys.set(task, { start: '', risk: '', escalated: false, blocking: false, passed: false, stopped: false, finish: '', matches: new Set() })
+  if (!journeys.has(task)) journeys.set(task, { start: '', risk: '', escalated: false, blocking: false, passed: false, stopped: false, finish: '', matches: new Set(), redone: 0, redoTier: '' })
   return journeys.get(task)
 }
 
@@ -52,6 +52,7 @@ export function summarize(events, { minSample = 10 } = {}) {
     rework: { tasks: 0, total: 0 },
     confidence: {},
     hindsight: { byStart: {}, overRouted: 0 },
+    redone: { tasks: 0, byTier: {} },
     failureResearch: {},
     sample: 'small',
     notes: [],
@@ -90,6 +91,12 @@ export function summarize(events, { minSample = 10 } = {}) {
       case 'verify.done':
         if (event.gate?.unverified > 0) bump(summary.unverified, event.reason || 'unspecified')
         break
+      case 'task.redone':
+        if (journey) Object.assign(journey, { redone: journey.redone + 1, redoTier: event.tier || 'unknown' })
+        break
+      case 'task.redo.undone':
+        if (journey) journey.redone = Math.max(0, journey.redone - 1)
+        break
       case 'task.passed':
       case 'task.stopped':
         if (event.type === 'task.passed') {
@@ -116,6 +123,11 @@ export function summarize(events, { minSample = 10 } = {}) {
       row.tasks += 1
       if (journey.passed && !journey.escalated) row.passed += 1
     }
+  }
+  for (const journey of journeys.values()) {
+    if (journey.redone <= 0) continue
+    summary.redone.tasks += 1
+    bump(summary.redone.byTier, journey.redoTier)
   }
   for (const [task, journey] of journeys) {
     if (!journey.start) continue
@@ -165,6 +177,7 @@ export function renderInsights(summary) {
     `Rework: ${summary.rework.tasks} of ${summary.rework.total} tasks had a diagnosed failure.`,
     `Sample: ${summary.sample}.`,
   ]
+  if (summary.redone.tasks) lines.splice(3, 0, `Sent back by the user: ${summary.redone.tasks} of ${summary.rework.total} tasks.`)
   lines.push(...table('Failures by category', ['category', 'count'], counts(summary.byCategory)))
   lines.push(...table('Escalation reasons', ['reason', 'count'], counts(summary.escalationReasons)))
   const costRows = Object.entries(summary.costByRisk)
@@ -185,6 +198,10 @@ export function renderInsights(summary) {
       String(row.afterBlocking),
     ])
   lines.push(...table('Routing in hindsight', ['started on', 'tasks', 'passed there', 'escalated', 'escalated, finished on', 'stopped', 'passed after blocking review'], startRows))
+  const redoneRows = Object.entries(summary.redone.byTier)
+    .sort((a, b) => tierRank(a[0]) - tierRank(b[0]) || a[0].localeCompare(b[0]))
+    .map(([tier, count]) => [tier, String(count)])
+  lines.push(...table('Sent back by the user, by the tier the task finished on', ['finished on', 'tasks'], redoneRows))
   const matchRows = Object.entries(summary.failureResearch)
     .sort((a, b) => b[1].searches - a[1].searches || a[0].localeCompare(b[0]))
     .map(([match, row]) => [match, String(row.searches), String(row.tasks), String(row.passed)])
@@ -204,7 +221,7 @@ function tierOf(value) {
 }
 
 function projectRow() {
-  return { tasks: 0, finishedOn: {}, clean: 0, usd: 0, opusUsd: 0 }
+  return { tasks: 0, finishedOn: {}, clean: 0, redone: 0, usd: 0, opusUsd: 0 }
 }
 
 /** The project folder Claude Code names after the working directory; used to group, never printed. */
@@ -220,6 +237,7 @@ export function summarizeSessions(states, { minSample = 10 } = {}) {
     sessions: 0,
     tasks: 0,
     done: 0,
+    redone: 0,
     startedOn: {},
     finishedOn: {},
     clean: 0,
@@ -271,6 +289,10 @@ export function summarizeSessions(states, { minSample = 10 } = {}) {
           summary.afterFailure += 1
         }
       }
+      if (done && Number(task.redo) > 0) {
+        summary.redone += 1
+        project.redone += 1
+      }
       if ((Number(task.escalations) || 0) > 0) {
         summary.escalated += 1
         if (done) summary.escalatedDone += 1
@@ -311,6 +333,7 @@ export function renderRealUse(summary) {
     '## Real use',
     '',
     `${summary.tasks} tasks in ${summary.sessions} sessions: ${summary.done} done, ${summary.tasks - summary.done} not done.`,
+    `${summary.redone} of the ${summary.done} done tasks were sent back by the user.`,
     `Sample: ${summary.sample}.`,
   ]
   const tierNames = [...new Set([...TIERS, ...Object.keys(summary.startedOn), ...Object.keys(summary.finishedOn)])]
@@ -327,11 +350,11 @@ export function renderRealUse(summary) {
   lines.push(...table('Verify', ['verify', 'tasks'], counts(summary.verify)))
   lines.push(...table('Completion', ['completion', 'tasks'], counts(summary.completion)))
   lines.push('', `Estimated cost: ${dollars(summary.usd)}. The same tokens at Opus rates: ${dollars(summary.opusUsd)}.`)
-  const projectRows = summary.projects.map((row) => [row.label, String(row.tasks), ...finishedList(row), String(row.clean), dollars(row.usd), dollars(row.opusUsd)])
-  lines.push(...table('Projects', ['project', 'tasks', ...TIERS.map((tier) => `finished on ${tier}`), 'done with no failure', 'estimated USD', 'at Opus rates USD'], projectRows))
+  const projectRows = summary.projects.map((row) => [row.label, String(row.tasks), ...finishedList(row), String(row.clean), String(row.redone), dollars(row.usd), dollars(row.opusUsd)])
+  lines.push(...table('Projects', ['project', 'tasks', ...TIERS.map((tier) => `finished on ${tier}`), 'done with no failure', 'sent back by the user', 'estimated USD', 'at Opus rates USD'], projectRows))
   lines.push(
     '',
-    'Not measured: how often you had to ask again, and what plain Opus would have spent. The Opus-rate column prices the same tokens, and plain Opus would not use exactly those.',
+    'Not measured: every re-ask. They count only when marked with /cc-tiers:redo or when your prompt names the task and complains about it, so the sent-back figures are a floor; nor what plain Opus would have spent. The Opus-rate column prices the same tokens, and plain Opus would not use exactly those.',
   )
   if (summary.notes.length) lines.push('', ...summary.notes.map((note) => `- ${note}`))
   return `${lines.join('\n')}\n`

@@ -27,11 +27,13 @@ export const EVENT_TYPES = [
   'task.stopped',
   'budget.warning',
   'state.recovered',
+  'task.redone',
+  'task.redo.undone',
 ]
 
-export const REDUCED_TYPES = ['escalated', 'failure.diagnosed', 'task.passed', 'task.stopped', 'budget.warning']
+export const REDUCED_TYPES = ['escalated', 'failure.diagnosed', 'task.passed', 'task.stopped', 'budget.warning', 'task.redone', 'task.redo.undone']
 
-const TEXT_KEYS = ['ts', 'type', 'session', 'task', 'tier', 'role', 'risk', 'because', 'category', 'outcome', 'status', 'confidence', 'effort']
+const TEXT_KEYS = ['ts', 'type', 'session', 'task', 'tier', 'role', 'risk', 'because', 'category', 'outcome', 'status', 'confidence', 'effort', 'source']
 const NUMBER_KEYS = ['attempt', 'costUsd', 'tokens', 'durationMs', 'calls']
 const FLAG_KEYS = ['confirmed', 'costEstimated']
 const GATE_KEYS = ['verified', 'failed', 'unverified', 'flaky']

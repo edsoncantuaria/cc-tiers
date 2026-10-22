@@ -55,6 +55,13 @@ test('sanitizeEvent keeps only whitelisted keys and shapes', () => {
   assert.equal(clean.risk.length, 80)
 })
 
+test('sanitizeEvent keeps the re-ask events, their source and a clipped redacted reason, and drops the prompt', () => {
+  const clean = sanitizeEvent({ type: 'task.redone', task: 'fix-login', tier: 'sonnet', source: 'prompt', reason: 'broken token=abc123', prompt: 'the whole prompt' })
+  assert.deepEqual(clean, { type: 'task.redone', task: 'fix-login', tier: 'sonnet', source: 'prompt', reason: 'broken token=[redacted]' })
+  assert.equal(sanitizeEvent({ type: 'task.redo.undone', task: 'a' }).type, 'task.redo.undone')
+  assert.ok(REDUCED_TYPES.includes('task.redone') && REDUCED_TYPES.includes('task.redo.undone'))
+})
+
 test('sanitizeEvent rejects unknown types and marks costs as estimated', () => {
   assert.equal(sanitizeEvent({ type: 'nope' }), null)
   assert.equal(sanitizeEvent(null), null)
@@ -386,6 +393,24 @@ test('renderInsights prints failure research by match with counts only, and noth
   assert.equal(renderInsights(summarize([{ type: 'task.passed', task: 'z', tier: 'sonnet' }])).includes('Failure research by match'), false)
 })
 
+test('summarize counts re-asked tasks net of undone ones and shows them by the tier they finished on', () => {
+  const summary = summarize([
+    { type: 'task.passed', task: 'a', tier: 'sonnet' },
+    { type: 'task.redone', task: 'a', tier: 'sonnet', source: 'command' },
+    { type: 'task.redone', task: 'a', tier: 'sonnet', source: 'prompt' },
+    { type: 'task.redone', task: 'b', tier: 'haiku', source: 'command' },
+    { type: 'task.redo.undone', task: 'b', tier: 'haiku' },
+    { type: 'task.redone', task: 'c', tier: 'opus', source: 'command' },
+    { type: 'task.redo.undone', task: 'zzz', tier: 'opus' },
+  ])
+  assert.deepEqual(summary.redone, { tasks: 2, byTier: { sonnet: 1, opus: 1 } })
+  const text = renderInsights(summary)
+  assert.match(text, /Sent back by the user: 2 of 4 tasks\./)
+  assert.match(text, /### Sent back by the user, by the tier the task finished on/)
+  assert.match(text, /\| sonnet \| 1 \|\n\| opus \| 1 \|/)
+  assert.ok(!renderInsights(summarize([{ type: 'task.passed', task: 'a', tier: 'sonnet' }])).includes('Sent back'))
+})
+
 const { renderRealUse, summarizeSessions } = insights
 
 function sessionState(id, project, log, cost = {}) {
@@ -425,6 +450,20 @@ test('summarizeSessions counts tasks per session and slug, and keeps orchestrati
   assert.equal(summary.opusUsd, 5)
   assert.equal(summary.sample, 'small')
   assert.match(summary.notes[0], /Fewer than 10 tasks/)
+})
+
+test('summarizeSessions counts done tasks sent back by the user, overall and per project', () => {
+  const states = [
+    sessionState('s1', 'p-a', { one: logEntry({ redo: 2 }), two: logEntry(), three: logEntry({ status: 'open', redo: 1 }) }),
+    sessionState('s2', 'p-b', { one: logEntry({ redo: 1 }) }),
+  ]
+  const summary = summarizeSessions(states)
+  assert.equal(summary.redone, 2)
+  assert.deepEqual(summary.projects.map((row) => [row.tasks, row.redone]), [[3, 1], [1, 1]])
+  const out = renderRealUse(summary)
+  assert.match(out, /2 of the 3 done tasks were sent back by the user\./)
+  assert.match(out, /\| done with no failure \| sent back by the user \|/)
+  assert.match(out, /\| project 1 \| 3 \| 3 \| 0 \| 0 \| 2 \| 1 \|/)
 })
 
 test('summarizeSessions skips non-object states and tolerates entries with missing fields', () => {
@@ -478,7 +517,7 @@ test('renderRealUse never prints a slug, session id, path, project folder or com
   assert.match(out, /## Real use/)
   assert.match(out, /project 1/)
   for (const secret of ['DISTINCT', 'secretproj', '/home/u', 'sess-', 'rm -rf']) assert.ok(!out.includes(secret), secret)
-  assert.match(out, /Not measured: how often you had to ask again, and what plain Opus would have spent/)
+  assert.match(out, /Not measured: every re-ask\. They count only when marked with \/cc-tiers:redo or when your prompt names the task/)
   assert.match(out, /Estimated cost: \$0\.5000\. The same tokens at Opus rates: \$2\.00\./)
   assert.equal(renderRealUse(summarizeSessions([])), '')
 })

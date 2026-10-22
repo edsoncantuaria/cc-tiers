@@ -3349,6 +3349,50 @@ export function logReport(state, meta) {
   } else entry.status = 'open'
 }
 
+/** A re-ask is the user sending back a task already counted as done; the entry keeps only the count and when. */
+export function markRedo(state, task, { source, reason = '', now = Date.now() }) {
+  const entry = own(state.log, task)
+  if (!entry) return null
+  entry.redo = (Number(entry.redo) || 0) + 1
+  entry.redoneAt = new Date(now).toISOString()
+  queueEvent(state, { type: 'task.redone', task, tier: entry.finished, reason: clip(reason, 200), source })
+  return entry
+}
+
+/** Removes one re-ask mark; null when the task is unknown or carries none. */
+export function undoRedo(state, task) {
+  const entry = own(state.log, task)
+  if (!entry || !(Number(entry.redo) > 0)) return null
+  entry.redo -= 1
+  if (!entry.redo) delete entry.redoneAt
+  queueEvent(state, { type: 'task.redo.undone', task, tier: entry.finished, source: 'command' })
+  return entry
+}
+
+const COMPLAINT = [
+  'ainda', 'n[ãa]o\\s+funciona', 'quebrou', 'voltou', 'de\\s+novo', 'continua', 'errado', 'deu\\s+erro',
+  'still', 'broken', 'again', "doesn['’]t\\s+work", 'not\\s+working', 'wrong', 'regressed',
+]
+const COMPLAINT_RE = new RegExp(`(?<![\\p{L}\\p{N}])(?:${COMPLAINT.join('|')})(?![\\p{L}\\p{N}])`, 'iu')
+
+/**
+ * A prompt that names a done task of this session and complains counts as a re-ask of it.
+ * A slash command is not one (/cc-tiers:redo marks on its own). The prompt text is never kept.
+ */
+export function redoFromPrompt(state, prompt) {
+  const text = String(prompt || '').trim()
+  if (!text || text.startsWith('/') || !COMPLAINT_RE.test(text)) return []
+  const found = []
+  for (const task of Object.keys(state.log || {})) {
+    if (own(state.log, task)?.status !== 'done' || slug(task) !== task) continue
+    // A slug holds only [a-z0-9-], so it is safe inside a pattern; a hyphen keeps it one word.
+    if (!new RegExp(`(?<![\\p{L}\\p{N}-])${task}(?![\\p{L}\\p{N}-])`, 'iu').test(text)) continue
+    markRedo(state, task, { source: 'prompt' })
+    found.push(`cc-tiers counted this as a re-ask of ${task}; if it is not, run /cc-tiers:redo --undo ${task}.`)
+  }
+  return found
+}
+
 export function logEffort(state, task, tier, level) {
   if (!task || !level) return
   logEntry(state, task).effort[tier] = level

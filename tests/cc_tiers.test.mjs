@@ -81,6 +81,8 @@ test('required files are present and Python hooks are gone', () => {
     'hooks/route.mjs',
     'hooks/report.mjs',
     'commands/report.md',
+    'commands/redo.md',
+    'hooks/redo.mjs',
     '.gitattributes',
     '.github/workflows/ci.yml',
     'skills/tiers/SKILL.md',
@@ -243,7 +245,7 @@ test('skill and commands keep their frontmatter', () => {
   assert.ok(body.includes('${user_config.review_policy}'))
   assert.ok(body.includes('${user_config.learn}'))
   assert.ok(body.includes('cc-tiers:checker'))
-  for (const command of ['route.md', 'escalate.md', 'report.md']) {
+  for (const command of ['route.md', 'escalate.md', 'report.md', 'redo.md']) {
     const fields = frontmatter(path.join(ROOT, 'commands', command))
     assert.equal('name' in fields, false)
     assert.ok(fields.description)
