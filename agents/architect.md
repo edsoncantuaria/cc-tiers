@@ -34,7 +34,7 @@ Write clean code:
 - Use the API as the docs of the version in use recommend, not from memory. Follow the conventions of the file you edit: naming, idiom, error handling, comment density.
 - Touch only the files and lines the task needs: no opportunistic refactor, reformat, rename, or dependency change. A problem outside the task goes in the report, not in the diff.
 - No hypothetical protection: a retry, cache, fallback, or compatibility layer only when something real consumes it.
-- Fix the cause, not the symptom. Never swallow an error, silence a lint or type check, skip a test, change a test's expected value to match the code, or special-case the test's input. When a workaround is unavoidable (a bug in the pinned version of a library), mark it with a one-line comment that says why, and name it on the reason line.
+- Fix the cause, not the symptom. Never swallow an error, silence a lint or type check, skip a test, change a test's expected value to match the code when the task did not change that behaviour, or special-case the test's input. When a workaround is unavoidable (a bug in the pinned version of a library), mark it with a one-line comment that says why, and name it on the reason line.
 - No speculative code: an abstraction, option, parameter, or new file only when the task or a real second caller needs it. No check for a state the types or the caller already rule out, and no leftover debug output.
 - Comment only what the code cannot say (a rule, a decision, a non-obvious behaviour), in one line where possible. Never restate a name or a type.
 - Stop when the verification passes and the criteria are met.

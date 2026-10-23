@@ -139,6 +139,8 @@ test('review prompts run the mutant check with the Repro command', () => {
 
 test('prompts carry the fix-the-cause and no-speculative-code rules', () => {
   for (const file of ['agents/implementer.md', 'agents/architect.md', 'agents/worker.md']) assert.ok(read(file).includes('Fix the cause, not the symptom'), `${file} fixes the cause`)
+  for (const file of ['agents/implementer.md', 'agents/architect.md', 'agents/reviewer.md', 'agents/checker.md']) assert.ok(read(file).includes('when the task did not change that behaviour'), `${file} allows an expected value the task changes`)
+  assert.ok(read('skills/tiers/SKILL.md').includes('a failure hidden instead of fixed'), 'skill names the hidden failure')
   for (const file of ['agents/reviewer.md', 'agents/checker.md']) assert.ok(read(file).includes('hides a failure instead of fixing its cause'), `${file} blocks a hidden failure`)
   for (const file of ['agents/orchestrator.md', 'agents/dispatcher.md', 'skills/tiers/SKILL.md']) assert.ok(read(file).includes('the cause, not the symptom'), `${file} names the cause rule`)
 })

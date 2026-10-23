@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- The fix-the-cause rule allows updating a test's expected value when the task changes that behaviour; only an update that hides a failure is blocked. The skill's summary of what the reviewer blocks names the hidden failure.
+
 ## 0.12.1 - 2026-10-23
 
 ### Added
