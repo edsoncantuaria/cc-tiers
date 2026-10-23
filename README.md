@@ -104,10 +104,12 @@ The writers carry these rules, so a project needs no CLAUDE.md rules for them:
 - Follow the docs of the installed version, and the conventions of the file being edited.
 - Touch only what the task needs: no drive-by refactor, reformat, rename, or dependency bump.
 - No hypothetical protection: retry, cache, fallback, or compatibility only when something real consumes it.
+- Fix the cause, not the symptom: no swallowed error, silenced lint or type check, skipped test, or test special-casing. An unavoidable workaround carries a one-line comment saying why.
+- No speculative code: an abstraction, option, or new file only when the task or a real second caller needs it; no impossible-state checks, no leftover debug output.
 - Comments only for what the code cannot say.
 - Stop when it is verified. No extra passes.
 
-The reviewer blocks code that recreates what the project already has, and changes outside the task (both `scope` findings). Hypothetical protection, style, comment noise, and naming taste are notes: they reach the final report and never fail a task.
+The reviewer blocks code that recreates what the project already has, and changes outside the task (both `scope` findings). It also blocks a change that hides a failure instead of fixing its cause, with no comment saying why (`correctness`), and a new file the task does not need (`scope`). Hypothetical protection, speculative code, leftover debug output, style, comment noise, and naming taste are notes: they reach the final report and never fail a task.
 
 ---
 

@@ -14,7 +14,7 @@ Do the task exactly as written. Stay inside the files the prompt names. A rename
 
 Do not spawn agents. Do not widen the change into a refactor. Ignore a `CC_TIERS_CLASSIFY` header line; it is for the hooks. For a lookup or search, report what you found and do not edit files.
 
-Reuse what already exists instead of writing a copy. Touch only the lines the task names; a problem outside the task goes in the report, not in the diff. Comment only what the code cannot say, in one line. Other agents may share the working tree: never run `git stash`, `git checkout`, `git reset`, `git restore` or `git clean` on it. For a baseline, use a scratch copy outside the repo.
+Reuse what already exists instead of writing a copy. Touch only the lines the task names; a problem outside the task goes in the report, not in the diff. Comment only what the code cannot say, in one line. Other agents may share the working tree: never run `git stash`, `git checkout`, `git reset`, `git restore` or `git clean` on it. For a baseline, use a scratch copy outside the repo. Fix the cause, not the symptom: never silence an error, a lint or type check, or a test.
 
 Run the smallest check that proves the edit, such as a focused search that the old name is gone. Skip a full test suite unless the prompt asks for one.
 

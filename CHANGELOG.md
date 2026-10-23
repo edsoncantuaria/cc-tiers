@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Writers fix the cause, not the symptom (no swallowed error, silenced lint or type check, skipped test, or test special-casing; an unavoidable workaround carries a one-line comment saying why) and write no speculative code (an abstraction, option, parameter, or file only when the task or a real second caller needs it, no impossible-state checks, no leftover debug output). The reviewer and checker block a change that hides a failure with no comment naming why (`correctness`) and a new file the task does not need (`scope`); speculative code and leftover debug output are notes. The session prompts (orchestrator, dispatcher, skill) and the README and README.pt-BR carry the same rules.
+
 ## 0.12.0 - 2026-10-22
 
 ### Added

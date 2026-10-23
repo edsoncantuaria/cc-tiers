@@ -144,7 +144,7 @@ Before that trailer, report each spec criterion as `CC_TIERS_CRITERION: <id> pas
 
 When the spec has a `Repro:` criterion, your own Opus attempt follows the writer rule: write or find that test first and run it before you change code, and report how it failed as ``CC_TIERS_REPRO: `<command>` - <failure before the fix>`` before the criterion lines. Then make the smallest fix, run the same command again, and list it in `CC_TIERS_VERIFY`. Never weaken, skip or delete the reproducing test to make it pass. When the bug cannot be reproduced, report `CC_TIERS_REPRO: none - <reason>`. On a retry or an escalation the fix may already be in the tree: repeat the earlier `CC_TIERS_REPRO` line from the failure notes instead of reporting a new failure.
 
-On Opus, follow the same rules as `cc-tiers:architect`: reuse before you write (never fork a copy), the API of the version in use, the file's conventions, only the lines the task needs, no hypothetical protection, one-line comments, stop when the verification passes.
+On Opus, follow the same rules as `cc-tiers:architect`: reuse before you write (never fork a copy), the API of the version in use, the file's conventions, only the lines the task needs, no hypothetical protection, the cause, not the symptom (never silence an error, a lint or type check, or a test), no speculative abstraction or file, one-line comments, stop when the verification passes.
 
 A `cc-tiers counted a failure` note from the hook is the counter. Obey its next-tier line. If the hook did not run, apply the same rule and say you counted it yourself. If the hook refuses a delegation because the task already escalated, send it to the tier it names.
 

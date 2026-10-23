@@ -104,10 +104,12 @@ Quem escreve já leva estas regras, então um projeto não precisa de regras no 
 - Seguir a documentação da versão instalada e as convenções do arquivo editado.
 - Mexer só no que a tarefa exige: sem refator, reformat, rename ou bump de dependência de passagem.
 - Sem proteção hipotética: retry, cache, fallback ou compatibilidade só quando algo real consome.
+- Corrigir a causa, não o sintoma: nada de erro engolido, lint ou tipo silenciado, teste pulado ou caso especial para a entrada do teste. Um contorno inevitável leva um comentário de uma linha dizendo o porquê.
+- Sem código especulativo: abstração, opção ou arquivo novo só quando a tarefa ou um segundo chamador real precisa; sem checagem de estado impossível, sem log de debug esquecido.
 - Comentário só para o que o código não consegue dizer.
 - Parar quando estiver verificado. Sem passes extras.
 
-O revisor bloqueia código que recria o que o projeto já tem e mudanças fora da tarefa (ambos achados de `scope`). Proteção hipotética, estilo, ruído de comentário e gosto de nome são notas: vão para o relatório final e nunca reprovam uma tarefa.
+O revisor bloqueia código que recria o que o projeto já tem e mudanças fora da tarefa (ambos achados de `scope`). Também bloqueia mudança que esconde uma falha em vez de corrigir a causa, sem comentário dizendo o porquê (`correctness`), e arquivo novo de que a tarefa não precisa (`scope`). Proteção hipotética, código especulativo, log de debug esquecido, estilo, ruído de comentário e gosto de nome são notas: vão para o relatório final e nunca reprovam uma tarefa.
 
 ---
 
