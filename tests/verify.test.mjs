@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, symlinkSync } from 'node:fs'
+import { existsSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -823,4 +823,133 @@ test('a Makefile target, a composer script and a syntax check the project declar
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
+})
+
+const inTmp = async (fn) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-verify-parent-'))
+  try {
+    await fn(dir)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+}
+
+test('a line with no cd is not run from a folder of repositories, and is not a failure', async () => {
+  await inTmp((dir) => {
+    mkdirSync(path.join(dir, 'api', '.git'), { recursive: true })
+    mkdirSync(path.join(dir, 'docs'))
+    const { run, calls } = scripted()
+    const result = verify.runGate('CC_TIERS_VERIFY: npm test\nCC_TIERS_VERIFY: cd api && npm test', { projectDir: dir, allow: ALLOW, timeoutS: 60, budgetS: 600, run })
+    assert.deepEqual(calls.map((call) => call.cmd.cwd), ['api'], 'only the line with a cd ran')
+    assert.equal(result.failure, null)
+    assert.deepEqual(result.verified, ['cd api && npm test'])
+    assert.deepEqual(result.unverified, [{ raw: 'npm test', reason: `npm test: the gate runs from ${dir}, a folder of repositories; write \`cd <repo dir> && npm test\`` }])
+    assert.match(verify.gateMessage('booking', result), /not validated: npm test: the gate runs from .*, a folder of repositories; write `cd <repo dir> && npm test` - not re-run/)
+
+    const alone = verify.runGate('CC_TIERS_VERIFY: npm test', { projectDir: dir, allow: ALLOW, timeoutS: 60, budgetS: 600, run })
+    assert.equal(alone.status, 'unverified')
+    assert.equal(alone.failure, null)
+    assert.equal(calls.length, 1)
+  })
+})
+
+test('a plain project with no git and no child repos runs a line with no cd, and a failing suite fails the gate', async () => {
+  await inTmp((dir) => {
+    mkdirSync(path.join(dir, 'src'))
+    const { run, calls } = scripted({ code: 1 }, { code: 1 })
+    const result = verify.runGate('CC_TIERS_VERIFY: npm test', { projectDir: dir, allow: ALLOW, timeoutS: 60, budgetS: 600, run })
+    assert.equal(calls.length, 2, 'it ran, and was retried once')
+    assert.equal(result.status, 'fail')
+    assert.equal(result.failure.raw, 'npm test')
+    assert.deepEqual(result.unverified, [])
+  })
+})
+
+test('a projectDir that does not exist is not a folder of repositories', () => {
+  const { run, calls } = scripted()
+  const result = verify.runGate('CC_TIERS_VERIFY: npm test', { projectDir: path.join(os.tmpdir(), 'cc-tiers-verify-missing'), allow: ALLOW, timeoutS: 60, budgetS: 600, run })
+  assert.equal(result.status, 'pass')
+  assert.equal(calls.length, 1)
+})
+
+test('a git repo, a dir inside one and a linked worktree run a line with no cd', async () => {
+  await inTmp(async (dir) => {
+    mkdirSync(path.join(dir, 'repo', '.git'), { recursive: true })
+    mkdirSync(path.join(dir, 'repo', 'src', 'deep'), { recursive: true })
+    mkdirSync(path.join(dir, 'linked'))
+    writeFileSync(path.join(dir, 'linked', '.git'), 'gitdir: ../repo/.git/worktrees/linked\n')
+    for (const projectDir of [path.join(dir, 'repo'), path.join(dir, 'repo', 'src', 'deep'), path.join(dir, 'linked')]) {
+      const { run, calls } = scripted()
+      const result = verify.runGate('CC_TIERS_VERIFY: npm test', { projectDir, allow: ALLOW, timeoutS: 60, budgetS: 600, run })
+      assert.equal(result.status, 'pass', projectDir)
+      assert.equal(calls.length, 1, projectDir)
+    }
+  })
+})
+
+test('the gate takes the lock before its first command and releases it after its last', () => {
+  const events = []
+  const lock = (waitS) => {
+    events.push(`lock ${waitS}`)
+    return () => events.push('release')
+  }
+  const run = (cmd) => {
+    events.push(`run ${cmd.raw}`)
+    return { code: 0, timedOut: false, tail: '', ms: 1000 }
+  }
+  const result = gate('CC_TIERS_VERIFY: npm test\nCC_TIERS_VERIFY: npx tsc', run, { lock })
+  assert.equal(result.status, 'pass')
+  assert.deepEqual(events, ['lock 600', 'run npm test', 'run npx tsc', 'release'])
+})
+
+test('the gate releases the lock after a failure and when a command throws', () => {
+  let released = 0
+  const lock = () => () => (released += 1)
+  assert.equal(gate('CC_TIERS_VERIFY: npm test', scripted({ code: 1 }, { code: 1 }).run, { lock }).status, 'fail')
+  assert.equal(released, 1)
+  assert.throws(() => gate('CC_TIERS_VERIFY: npm test', () => { throw new Error('boom') }, { lock }), /boom/)
+  assert.equal(released, 2)
+})
+
+test('a gate that cannot get the lock within its budget leaves its commands not validated, not failed', () => {
+  const { run, calls } = scripted()
+  const waits = []
+  const lock = (waitS) => {
+    waits.push(waitS)
+    return null
+  }
+  const result = gate('CC_TIERS_VERIFY: npm test\nCC_TIERS_VERIFY: none - by hand\nCC_TIERS_VERIFY: npx tsc', run, { lock })
+  assert.equal(calls.length, 0)
+  assert.deepEqual(waits, [600], 'it waits once, for the budget it has')
+  assert.equal(result.status, 'unverified')
+  assert.equal(result.failure, null)
+  assert.deepEqual(result.unverified.map((item) => item.reason), ['another cc-tiers gate was running: npm test', 'by hand', 'another cc-tiers gate was running: npx tsc'])
+  assert.match(verify.gateMessage('booking', result), /not validated: another cc-tiers gate was running: npm test - not re-run/)
+})
+
+test('the time spent waiting for the lock comes out of the budget', () => {
+  const { run, calls } = scripted()
+  let released = 0
+  const lock = () => {
+    const until = Date.now() + 60
+    while (Date.now() < until);
+    return () => (released += 1)
+  }
+  const result = gate('CC_TIERS_VERIFY: npm test', run, { lock, budgetS: 0.05 })
+  assert.equal(calls.length, 0)
+  assert.deepEqual(result.unverified, [{ raw: 'npm test', reason: 'budget exhausted: npm test' }])
+  assert.equal(released, 1)
+})
+
+test('a cached result, a refused line and a none line need no lock', () => {
+  const { run, calls } = scripted()
+  let taken = 0
+  const lock = () => {
+    taken += 1
+    return () => {}
+  }
+  const result = gate('CC_TIERS_VERIFY: npm test\nCC_TIERS_VERIFY: make test\nCC_TIERS_VERIFY: none - by hand', run, { lock, cached: (raw) => raw === 'npm test' })
+  assert.equal(taken, 0)
+  assert.equal(calls.length, 0)
+  assert.deepEqual(result.cached, ['npm test'])
 })

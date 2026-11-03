@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { spawn, spawnSync } from 'node:child_process'
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -1393,6 +1393,109 @@ test('writer: an Opus attempt with no delegation records the mode at its first c
     delegate(delegated, tiersCtx.routing, 'implementer', `${header('paging', 'sonnet', 'implementer')}Add pagination`)
     assert.equal(delegated.log.paging.writer, 'tiers')
     assert.equal(delegated.events.find((item) => item.type === 'model.selected').mode, 'tiers')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+// Mirrors GATE_LOCK_STALE_MS in hooks/cc_tiers.mjs, which does not export it.
+const GATE_LOCK_STALE_MS = 660000
+
+test('gateLock: one holder per project, free after release, other projects and no data dir not held up', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-int-'))
+  try {
+    const first = tiers.gateLock(dir, '/work/a')
+    const release = first(1)
+    assert.equal(typeof release, 'function')
+    const started = Date.now()
+    assert.equal(first(0.2), null, 'the project is held')
+    assert.ok(Date.now() - started >= 150, 'it waited the time it was given')
+    assert.equal(typeof tiers.gateLock(dir, '/work/b')(0), 'function', 'another project is free')
+    assert.equal(tiers.gateLock('', '/work/a'), null)
+    release()
+    assert.equal(typeof first(0), 'function', 'free after release')
+    assert.ok(readdirSync(dir).every((name) => /^gate-\w+\.lock$/.test(name)), 'only lock files, in the data dir')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('gateLock: a lock left by a dead gate is taken over, a live gate within its budget is not', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-int-'))
+  try {
+    const lock = tiers.gateLock(dir, '/work/a')
+    lock(0)
+    const file = path.join(dir, readdirSync(dir)[0])
+    const age = (ms) => utimesSync(file, new Date(Date.now() - ms), new Date(Date.now() - ms))
+    age(GATE_LOCK_STALE_MS - 60000)
+    assert.equal(lock(0), null, 'a gate still inside the hook timeout keeps its lock')
+    age(GATE_LOCK_STALE_MS + 5000)
+    assert.equal(typeof lock(0), 'function', 'past the hook timeout its process is gone')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('prepareReport: a gate that cannot get its project lock in its budget does not run the command, and counts no failure', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-int-'))
+  try {
+    const project = path.join(dir, 'project')
+    mkdirSync(project)
+    writeFileSync(path.join(project, 'fail.mjs'), 'process.exit(1)\n')
+    const ctx = { routing: routingWith({ verify_allow: 'node fail.mjs' }), ccCost: false, projectDir: project, dataDir: path.join(dir, 'data') }
+    const text = report('paging', 'implementer', 'sonnet', 'pass', ['CC_TIERS_VERIFY: node fail.mjs'])
+    const prepare = (budgetS) => tiers.prepareReport(ctx, event('m', 'implementer', text, writer('paging')), {}, { budgetS }).gate
+
+    const release = tiers.gateLock(ctx.dataDir, project)(0)
+    const blocked = prepare(0.1)
+    assert.equal(blocked.failure, null)
+    assert.deepEqual(blocked.unverified, [{ raw: 'node fail.mjs', reason: 'another cc-tiers gate was running: node fail.mjs' }])
+    release()
+    assert.equal(prepare(30).failure.raw, 'node fail.mjs', 'with the lock free the command runs and fails')
+
+    const other = tiers.gateLock(ctx.dataDir, path.join(dir, 'other'))(0)
+    assert.equal(prepare(30).failure.raw, 'node fail.mjs', 'the lock of another project does not hold it up')
+    other()
+    assert.deepEqual(readdirSync(project).sort(), ['fail.mjs'], 'the lock is not in the project tree')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('two gates of one project never run their commands at the same time', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-int-'))
+  try {
+    const project = path.join(dir, 'project')
+    mkdirSync(project)
+    const log = path.join(dir, 'probe.log')
+    writeFileSync(path.join(project, 'probe.mjs'), [
+      "import { appendFileSync } from 'node:fs'",
+      "appendFileSync(process.argv[2], 'start\\n')",
+      'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300)',
+      "appendFileSync(process.argv[2], 'end\\n')",
+      '',
+    ].join('\n'))
+    const runner = path.join(dir, 'gate.mjs')
+    writeFileSync(runner, [
+      "import { pathToFileURL } from 'node:url'",
+      "const tiers = await import(pathToFileURL(process.argv[2]).href)",
+      "const ctx = tiers.openContext({ session_id: 's' }, process.env)",
+      'const text = process.argv[3]',
+      "console.log(tiers.prepareReport(ctx, { kind: 'report', role: 'implementer', prompt: '', text }).gate.status)",
+      '',
+    ].join('\n'))
+    const env = { ...process.env, CLAUDE_PLUGIN_ROOT: ROOT, CLAUDE_PLUGIN_DATA: path.join(dir, 'data'), CLAUDE_PROJECT_DIR: project, CC_TIERS_CC_COST: '0', HOME: path.join(dir, 'home'), CLAUDE_PLUGIN_OPTION_VERIFY_ALLOW: 'node probe.mjs' }
+    const text = report('paging', 'implementer', 'sonnet', 'pass', [`CC_TIERS_VERIFY: node probe.mjs ${log}`])
+    const gate = () =>
+      new Promise((resolve) => {
+        const child = spawn(process.execPath, [runner, path.join(ROOT, 'hooks', 'cc_tiers.mjs'), text], { env, stdio: ['ignore', 'pipe', 'pipe'] })
+        let out = ''
+        child.stdout.on('data', (chunk) => (out += chunk))
+        child.stderr.on('data', (chunk) => (out += chunk))
+        child.on('close', () => resolve(out.trim()))
+      })
+    assert.deepEqual(await Promise.all([gate(), gate()]), ['pass', 'pass'], 'the second gate waited and ran')
+    assert.equal(readFileSync(log, 'utf8'), 'start\nend\nstart\nend\n')
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

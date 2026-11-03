@@ -101,6 +101,8 @@ const MAX_CACHE = 40
 const SCAN_FIRST_CAP = 32 * 1024 * 1024
 const LOCK_WAIT_MS = 3000
 const LOCK_STALE_MS = 10000
+/** A gate holds its lock for up to a verify budget; past the hook timeout in hooks.json its process is gone. */
+const GATE_LOCK_STALE_MS = 660000
 const HEADER_RE = /^CC_TIERS_([A-Z]+):\s*(.*?)\s*$/
 const RESEARCH_BEGIN = 'CC_TIERS_RESEARCH_BEGIN'
 const RESEARCH_END = 'CC_TIERS_RESEARCH_END'
@@ -1221,6 +1223,37 @@ function sleep(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
 }
 
+/** Creates the lock file, waiting up to waitMs; a lock older than staleMs is a crashed holder and is taken over. False when it was not taken. */
+function takeLock(lock, waitMs, staleMs) {
+  const deadline = Date.now() + waitMs
+  for (;;) {
+    try {
+      closeSync(openSync(lock, 'wx'))
+      return true
+    } catch (error) {
+      if (error.code !== 'EEXIST') return false
+      try {
+        if (Date.now() - statSync(lock).mtimeMs > staleMs) {
+          unlinkSync(lock)
+          continue
+        }
+      } catch {
+        continue
+      }
+      if (Date.now() > deadline) return false
+      sleep(25)
+    }
+  }
+}
+
+function dropLock(lock) {
+  try {
+    unlinkSync(lock)
+  } catch {
+    // Another hook already took over a stale lock.
+  }
+}
+
 /**
  * Run fn while holding `<file>.lock`. Parallel subagents fire hooks at the same
  * time, and without the lock their read-modify-write would drop counts.
@@ -1231,36 +1264,24 @@ export function withLock(file, fn) {
   if (!file) return fn()
   const lock = `${file}.lock`
   mkdirSync(path.dirname(lock), { recursive: true })
-  const deadline = Date.now() + LOCK_WAIT_MS
-  let held = false
-  while (!held) {
-    try {
-      closeSync(openSync(lock, 'wx'))
-      held = true
-    } catch (error) {
-      if (error.code !== 'EEXIST') break
-      try {
-        if (Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS) {
-          unlinkSync(lock)
-          continue
-        }
-      } catch {
-        continue
-      }
-      if (Date.now() > deadline) break
-      sleep(25)
-    }
-  }
+  const held = takeLock(lock, LOCK_WAIT_MS, LOCK_STALE_MS)
   try {
     return fn()
   } finally {
-    if (held) {
-      try {
-        unlinkSync(lock)
-      } catch {
-        // Another hook already took over a stale lock.
-      }
-    }
+    if (held) dropLock(lock)
+  }
+}
+
+/**
+ * The gate lock of one project, as runGate takes it: its commands share one test database, so two gates never run at once.
+ * The file sits in the plugin data dir, outside the tree the gate watches; with no data dir there is no lock.
+ */
+export function gateLock(dataDir, projectDir) {
+  if (!dataDir || !projectDir) return null
+  const lock = path.join(dataDir, `gate-${lineId(path.resolve(projectDir))}.lock`)
+  return (waitS) => {
+    mkdirSync(dataDir, { recursive: true })
+    return takeLock(lock, waitS * 1000, GATE_LOCK_STALE_MS) ? () => dropLock(lock) : null
   }
 }
 
@@ -3301,7 +3322,7 @@ export function prepareReport(ctx, event, payload = {}, { budgetS = ctx.routing.
   const writing = peek?.writing || []
   const snapshot = projectDir && !writing.length ? () => workspaceSnapshot(projectDir) : null
   const preexisting = declaredPreexisting(event.text)?.raw || ''
-  const options = { projectDir, allow: routing.verifyAllow, detected: detectedChecks(projectDir), timeoutS: routing.verifyTimeout, budgetS, cached, snapshot, preexisting }
+  const options = { projectDir, allow: routing.verifyAllow, detected: detectedChecks(projectDir), timeoutS: routing.verifyTimeout, budgetS, cached, snapshot, preexisting, lock: gateLock(ctx.dataDir, projectDir) }
   if (projectDir) {
     const treeCheck = writing.length ? { treeCheck: `skipped: ${writing.join(', ')} still writing` } : {}
     const gate = { ...runGate(event.text, options), tree, ...treeCheck }

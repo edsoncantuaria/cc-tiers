@@ -4,7 +4,7 @@
  */
 
 import { spawnSync } from 'node:child_process'
-import { existsSync, realpathSync } from 'node:fs'
+import { existsSync, readdirSync, realpathSync } from 'node:fs'
 import path from 'node:path'
 import { attemptChanges } from './workspace.mjs'
 
@@ -199,6 +199,24 @@ function insideProject(projectDir, cwd) {
   return rel === '' || (rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel))
 }
 
+/** Whether dir or a parent holds a .git entry: a directory, or a file in a linked worktree. */
+function inGitTree(dir) {
+  for (let current = path.resolve(dir); ; current = path.dirname(current)) {
+    if (existsSync(path.join(current, '.git'))) return true
+    if (current === path.dirname(current)) return false
+  }
+}
+
+/** A folder that is no repository itself but holds repositories, as a session started above them does. */
+function folderOfRepos(dir) {
+  if (inGitTree(dir)) return false
+  try {
+    return readdirSync(dir).some((name) => existsSync(path.join(dir, name, '.git')))
+  } catch {
+    return false // a projectDir that cannot be listed holds no repositories to point to
+  }
+}
+
 function lastLines(text, count) {
   const lines = text.replace(/\s+$/, '').split(/\r?\n/)
   return lines.slice(-count).join('\n')
@@ -236,74 +254,103 @@ export function runCommand(cmd, { projectDir, timeoutS }) {
  * snapshot() returns the tree state (null outside git): a command that changes it, retry included, is not evidence.
  * preexisting is the raw command the writer declared failing without its change: its failure is kept apart
  * in gate.preexisting and the other commands still run; any other failure is gate.failure and stops the gate.
+ * lock(waitS) takes the project's gate lock before the first command runs, waiting up to waitS, and returns its release or null:
+ * a gate that cannot get it within its budget leaves its commands not validated, so two gates of a project never run at once.
+ * A line with no cd is not run from a folder of repositories (outside git, with a repo among its children): it would run in the wrong place.
  */
-export function runGate(text, { projectDir, allow, detected = [], timeoutS, budgetS, run = runCommand, cached = null, snapshot = null, preexisting = '' }) {
+export function runGate(text, { projectDir, allow, detected = [], timeoutS, budgetS, run = runCommand, cached = null, snapshot = null, preexisting = '', lock = null }) {
   const gate = { status: 'unverified', verified: [], flaky: [], unverified: [], failure: null, cached: [] }
   const lines = parseVerify(text)
   if (!lines.length) return { ...gate, status: 'missing' }
   let remaining = budgetS
+  let release = null
+  let busy = false
+  const reposFolder = folderOfRepos(projectDir)
   const skip = (raw, reason) => gate.unverified.push({ raw, reason })
   const exhausted = (raw) => skip(raw, `budget exhausted: ${raw}`)
+  const waiting = (raw) => skip(raw, `another cc-tiers gate was running: ${raw}`)
   const attempt = (cmd) => {
     const seconds = Math.min(timeoutS, remaining)
     const result = run(cmd, { projectDir, timeoutS: seconds })
     remaining -= (result.ms || 0) / 1000
     return { ...result, seconds }
   }
-  for (const line of lines) {
-    if (gate.failure) break
-    if (line.kind === 'none' || line.kind === 'invalid') {
-      skip(line.raw, line.reason)
-      continue
-    }
-    if (!insideProject(projectDir, line.cwd)) {
-      skip(line.raw, `cd dir outside the project: ${line.raw}`)
-      continue
-    }
-    if (!gateAllows(line.argv, allow, detected, line.env)) {
-      if (Object.keys(line.env).length && wrappedCommand(line.argv)) {
-        skip(line.raw, `refused env on a docker exec line, which can choose what docker runs: ${line.raw}`)
+  try {
+    for (const line of lines) {
+      if (gate.failure) break
+      if (line.kind === 'none' || line.kind === 'invalid') {
+        skip(line.raw, line.reason)
         continue
       }
-      skip(line.raw, `outside verify_allow: ${line.raw} (add \`${allowPrefix(line.argv)}\` to verify_allow in /config, keeping the entries already there)`)
-      continue
-    }
-    if (cached && cached(line.raw)) {
-      gate.verified.push(line.raw)
-      gate.cached.push(line.raw)
-      continue
-    }
-    if (remaining <= 0) {
-      exhausted(line.raw)
-      continue
-    }
-    const before = snapshot?.() ?? null
-    let result = attempt(line)
-    if (result.spawnError) {
-      skip(line.raw, `could not start: ${line.raw} (${String(result.tail || '').trim().split(/\r?\n/).pop() || 'not found'})`)
-      continue
-    }
-    let retried = false
-    if (!result.timedOut && result.code !== 0 && remaining > 0) {
-      const retry = attempt(line)
-      // A retry cut short by the budget proves nothing, so the first failure stands; so does one with no budget left.
-      if (!(retry.timedOut && retry.seconds < timeoutS)) [result, retried] = [retry, true]
-    }
-    if (result.timedOut && result.seconds < timeoutS) {
-      exhausted(line.raw)
-    } else if (result.timedOut || result.code !== 0) {
-      const failure = { raw: line.raw, code: result.code, timedOut: result.timedOut, tail: result.tail, seconds: result.seconds }
-      if (preexisting && line.raw === preexisting) gate.preexisting = gate.preexisting || failure
-      else gate.failure = failure
-    } else {
-      const changed = before ? attemptChanges(before, snapshot()) : []
-      if (changed.length) {
-        skip(line.raw, `${TREE_CHANGED}: ${changed.slice(0, MAX_CHANGED).join(', ')}`)
-      } else {
+      if (!insideProject(projectDir, line.cwd)) {
+        skip(line.raw, `cd dir outside the project: ${line.raw}`)
+        continue
+      }
+      if (!gateAllows(line.argv, allow, detected, line.env)) {
+        if (Object.keys(line.env).length && wrappedCommand(line.argv)) {
+          skip(line.raw, `refused env on a docker exec line, which can choose what docker runs: ${line.raw}`)
+          continue
+        }
+        skip(line.raw, `outside verify_allow: ${line.raw} (add \`${allowPrefix(line.argv)}\` to verify_allow in /config, keeping the entries already there)`)
+        continue
+      }
+      if (!line.cwd && reposFolder) {
+        skip(line.raw, `${line.raw}: the gate runs from ${projectDir}, a folder of repositories; write \`cd <repo dir> && ${line.raw}\``)
+        continue
+      }
+      if (cached && cached(line.raw)) {
         gate.verified.push(line.raw)
-        if (retried) gate.flaky.push(line.raw)
+        gate.cached.push(line.raw)
+        continue
+      }
+      if (busy) {
+        waiting(line.raw)
+        continue
+      }
+      if (lock && !release && remaining > 0) {
+        const waitStarted = Date.now()
+        release = lock(remaining)
+        remaining -= (Date.now() - waitStarted) / 1000
+        if (!release) {
+          busy = true
+          waiting(line.raw)
+          continue
+        }
+      }
+      if (remaining <= 0) {
+        exhausted(line.raw)
+        continue
+      }
+      const before = snapshot?.() ?? null
+      let result = attempt(line)
+      if (result.spawnError) {
+        skip(line.raw, `could not start: ${line.raw} (${String(result.tail || '').trim().split(/\r?\n/).pop() || 'not found'})`)
+        continue
+      }
+      let retried = false
+      if (!result.timedOut && result.code !== 0 && remaining > 0) {
+        const retry = attempt(line)
+        // A retry cut short by the budget proves nothing, so the first failure stands; so does one with no budget left.
+        if (!(retry.timedOut && retry.seconds < timeoutS)) [result, retried] = [retry, true]
+      }
+      if (result.timedOut && result.seconds < timeoutS) {
+        exhausted(line.raw)
+      } else if (result.timedOut || result.code !== 0) {
+        const failure = { raw: line.raw, code: result.code, timedOut: result.timedOut, tail: result.tail, seconds: result.seconds }
+        if (preexisting && line.raw === preexisting) gate.preexisting = gate.preexisting || failure
+        else gate.failure = failure
+      } else {
+        const changed = before ? attemptChanges(before, snapshot()) : []
+        if (changed.length) {
+          skip(line.raw, `${TREE_CHANGED}: ${changed.slice(0, MAX_CHANGED).join(', ')}`)
+        } else {
+          gate.verified.push(line.raw)
+          if (retried) gate.flaky.push(line.raw)
+        }
       }
     }
+  } finally {
+    release?.()
   }
   if (gateFailure(gate)) gate.status = 'fail'
   else if (gate.verified.length) gate.status = 'pass'
