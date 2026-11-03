@@ -1675,7 +1675,7 @@ export function applyEvent(state, event, routing) {
     meta.outcome = applied.outcome
     // A rejection sticks to the writer attempt it judged: a pass from another review of that attempt must not clear it.
     if (['retry', 'escalate', 'stop'].includes(applied.outcome)) {
-      const judged = [...new Set([...(tasks[task]?.judged || []), ...parkedFor(state, task).map((item) => item.id)])].slice(-MAX_JUDGED)
+      const judged = [...new Set([...(tasks[task]?.judged || []), ...parkedFor(state, task, id).map((item) => item.id)])].slice(-MAX_JUDGED)
       tasks[task] = { ...tasks[task], rejected: true, ...(judged.length ? { judged } : {}) }
     }
     if (applied.outcome === 'review') meta.floor = reviewFloor(state, task, routing, flagged)
@@ -1884,9 +1884,11 @@ function stoppedAt(current, routing) {
 
 const MAX_JUDGED = 10
 
-/** The writer reports of a task that wait for the Stop gate, oldest first; a parked review verdict is not a writer attempt. */
-function parkedFor(state, task) {
-  return (state.awaiting || []).filter((item) => item?.id && !REVIEW_ROLES.has(item.role) && slug(parseHeaders(item.text || '').TASK || '') === task)
+/** The writer reports of a task that wait for the Stop gate, oldest first; a parked review verdict is not a writer attempt. With before, only those parked ahead of that report: a later one is a new attempt. */
+function parkedFor(state, task, before = '') {
+  const awaiting = state.awaiting || []
+  const end = before ? awaiting.findIndex((item) => item?.id === before) : -1
+  return (end < 0 ? awaiting : awaiting.slice(0, end)).filter((item) => item?.id && !REVIEW_ROLES.has(item.role) && slug(parseHeaders(item.text || '').TASK || '') === task)
 }
 
 /** The tier of the last writer attempt of a task: a session attempt still waiting for its gate, its counter, else its log; '' when none knows it. */
@@ -3349,7 +3351,7 @@ export function prepareReport(ctx, event, payload = {}, { budgetS = ctx.routing.
   const writing = peek?.writing || []
   const snapshot = projectDir && !writing.length ? () => workspaceSnapshot(projectDir) : null
   const preexisting = declaredPreexisting(event.text)?.raw || ''
-  const options = { projectDir, allow: routing.verifyAllow, detected: detectedChecks(projectDir), timeoutS: routing.verifyTimeout, budgetS, cached, snapshot, preexisting, lock: gateLock(ctx.dataDir, projectDir) }
+  const options = { projectDir, allow: routing.verifyAllow, detected: detectedChecks(projectDir), detectedIn: detectedChecks, timeoutS: routing.verifyTimeout, budgetS, cached, snapshot, preexisting, lock: gateLock(ctx.dataDir, projectDir) }
   if (projectDir) {
     const treeCheck = writing.length ? { treeCheck: `skipped: ${writing.join(', ')} still writing` } : {}
     const gate = { ...runGate(event.text, options), tree, ...treeCheck }

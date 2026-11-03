@@ -256,9 +256,11 @@ export function runCommand(cmd, { projectDir, timeoutS }) {
  * in gate.preexisting and the other commands still run; any other failure is gate.failure and stops the gate.
  * lock(waitS) takes the project's gate lock before the first command runs, waiting up to waitS, and returns its release or null:
  * a gate that cannot get it within its budget leaves its commands not validated, so two gates of a project never run at once.
- * A line with no cd is not run from a folder of repositories (outside git, with a repo among its children): it would run in the wrong place.
+ * detected is what the project dir declares; detectedIn(dir) is what a cd dir declares, which a line with a cd may also run.
+ * A line with no cd is not run from a folder of repositories (outside git, with a repo among its children): it would run in the wrong place,
+ * unless it is a one-file syntax check, which does not depend on where it runs. In such a folder a cd line runs what its own dir declares.
  */
-export function runGate(text, { projectDir, allow, detected = [], timeoutS, budgetS, run = runCommand, cached = null, snapshot = null, preexisting = '', lock = null }) {
+export function runGate(text, { projectDir, allow, detected = [], detectedIn = () => [], timeoutS, budgetS, run = runCommand, cached = null, snapshot = null, preexisting = '', lock = null }) {
   const gate = { status: 'unverified', verified: [], flaky: [], unverified: [], failure: null, cached: [] }
   const lines = parseVerify(text)
   if (!lines.length) return { ...gate, status: 'missing' }
@@ -266,6 +268,7 @@ export function runGate(text, { projectDir, allow, detected = [], timeoutS, budg
   let release = null
   let busy = false
   const reposFolder = folderOfRepos(projectDir)
+  const detectedFor = (cwd) => (cwd ? [...(reposFolder ? [] : detected), ...detectedIn(path.resolve(projectDir, cwd))] : detected)
   const skip = (raw, reason) => gate.unverified.push({ raw, reason })
   const exhausted = (raw) => skip(raw, `budget exhausted: ${raw}`)
   const waiting = (raw) => skip(raw, `another cc-tiers gate was running: ${raw}`)
@@ -286,16 +289,16 @@ export function runGate(text, { projectDir, allow, detected = [], timeoutS, budg
         skip(line.raw, `cd dir outside the project: ${line.raw}`)
         continue
       }
-      if (!gateAllows(line.argv, allow, detected, line.env)) {
+      if (!line.cwd && reposFolder && !isSyntaxCheck(line.argv)) {
+        skip(line.raw, `${line.raw}: the gate runs from ${projectDir}, a folder of repositories; write \`cd <repo dir> && ${line.raw}\``)
+        continue
+      }
+      if (!gateAllows(line.argv, allow, detectedFor(line.cwd), line.env)) {
         if (Object.keys(line.env).length && wrappedCommand(line.argv)) {
           skip(line.raw, `refused env on a docker exec line, which can choose what docker runs: ${line.raw}`)
           continue
         }
         skip(line.raw, `outside verify_allow: ${line.raw} (add \`${allowPrefix(line.argv)}\` to verify_allow in /config, keeping the entries already there)`)
-        continue
-      }
-      if (!line.cwd && reposFolder) {
-        skip(line.raw, `${line.raw}: the gate runs from ${projectDir}, a folder of repositories; write \`cd <repo dir> && ${line.raw}\``)
         continue
       }
       if (cached && cached(line.raw)) {

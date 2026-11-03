@@ -1462,6 +1462,24 @@ test('prepareReport: a gate that cannot get its project lock in its budget does 
   }
 })
 
+test('prepareReport: in a folder of repositories a cd line runs a check detected in that repo, and a bare one is told to cd', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-int-'))
+  try {
+    mkdirSync(path.join(dir, 'app', '.git'), { recursive: true })
+    writeFileSync(path.join(dir, 'app', 'package.json'), '{"scripts":{"test":"node --version"}}')
+    // npm test is not in verify_allow: only its detection in app lets the gate run it.
+    const ctx = { routing: routingWith({ verify_allow: 'node --test' }), ccCost: false, projectDir: dir }
+    const text = report('paging', 'implementer', 'sonnet', 'pass', ['CC_TIERS_VERIFY: cd app && npm test', 'CC_TIERS_VERIFY: npm test'])
+    const { gate } = tiers.prepareReport(ctx, event('m', 'implementer', text, writer('paging')), {}, { budgetS: 60 })
+    assert.deepEqual(gate.verified, ['cd app && npm test'])
+    assert.equal(gate.failure, null)
+    assert.deepEqual(gate.unverified.map((item) => item.raw), ['npm test'])
+    assert.match(gate.unverified[0].reason, /a folder of repositories; write `cd <repo dir> && npm test`$/)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('two gates of one project never run their commands at the same time', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-int-'))
   try {

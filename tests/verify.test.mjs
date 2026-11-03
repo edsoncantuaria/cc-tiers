@@ -853,6 +853,54 @@ test('a line with no cd is not run from a folder of repositories, and is not a f
   })
 })
 
+test('in a folder of repositories a cd line runs what its own repo declares, and a bare line is told to cd first', async () => {
+  await inTmp((dir) => {
+    mkdirSync(path.join(dir, 'api', '.git'), { recursive: true })
+    const asked = []
+    const detectedIn = (where) => {
+      asked.push(where)
+      return where === path.join(dir, 'api') ? [['make', 'test']] : []
+    }
+    const { run, calls } = scripted()
+    const result = verify.runGate('CC_TIERS_VERIFY: cd api && make test\nCC_TIERS_VERIFY: make test\nCC_TIERS_VERIFY: cd api && make lint', {
+      projectDir: dir, allow: [], detected: [['make', 'lint']], detectedIn, timeoutS: 60, budgetS: 600, run,
+    })
+    assert.deepEqual(calls.map((call) => [call.cmd.cwd, call.cmd.argv.join(' ')]), [['api', 'make test']])
+    assert.deepEqual(result.verified, ['cd api && make test'])
+    assert.deepEqual(asked, [path.join(dir, 'api'), path.join(dir, 'api')], 'detected from the cd dir, never from a line with no cd')
+    assert.deepEqual(result.unverified.map((item) => [item.raw, item.reason.split(':')[0]]), [['make test', 'make test'], ['cd api && make lint', 'outside verify_allow']])
+    assert.match(result.unverified[0].reason, /a folder of repositories; write `cd <repo dir> && make test`$/, 'the cd advice, not the verify_allow one')
+    assert.match(result.unverified[1].reason, /outside verify_allow: cd api && make lint/, 'what the folder itself declares does not cover a repo')
+  })
+})
+
+test('in a folder of repositories a bare one-file syntax check runs from the folder, any other bare line is told to cd', async () => {
+  await inTmp((dir) => {
+    mkdirSync(path.join(dir, 'app', '.git'), { recursive: true })
+    const { run, calls } = scripted()
+    const lines = ['php -l app/x.php', 'bash -n run.sh', 'node --check app/a.mjs', 'php -l app/x.txt', 'php -l a.php b.php']
+    const result = verify.runGate(lines.map((line) => `CC_TIERS_VERIFY: ${line}`).join('\n'), { projectDir: dir, allow: [], timeoutS: 60, budgetS: 600, run })
+    assert.deepEqual(calls.map((call) => [call.cmd.cwd, call.cmd.argv.join(' ')]), [['', 'php -l app/x.php'], ['', 'bash -n run.sh'], ['', 'node --check app/a.mjs']])
+    assert.deepEqual(result.verified, lines.slice(0, 3))
+    for (const item of result.unverified) assert.match(item.reason, /a folder of repositories; write `cd <repo dir> && /, item.raw)
+    assert.deepEqual(result.unverified.map((item) => item.raw), lines.slice(3))
+  })
+})
+
+test('outside a folder of repositories a cd line runs what the project declares and what its own dir declares', async () => {
+  await inTmp((dir) => {
+    mkdirSync(path.join(dir, 'sub'))
+    const { run, calls } = scripted()
+    const detectedIn = (where) => (where === path.join(dir, 'sub') ? [['make', 'lint']] : [])
+    const result = verify.runGate('CC_TIERS_VERIFY: cd sub && make test\nCC_TIERS_VERIFY: cd sub && make lint\nCC_TIERS_VERIFY: cd sub && make check\nCC_TIERS_VERIFY: make lint', {
+      projectDir: dir, allow: [], detected: [['make', 'test']], detectedIn, timeoutS: 60, budgetS: 600, run,
+    })
+    assert.deepEqual(result.verified, ['cd sub && make test', 'cd sub && make lint'])
+    assert.deepEqual(result.unverified.map((item) => item.raw), ['cd sub && make check', 'make lint'])
+    assert.equal(calls.length, 2)
+  })
+})
+
 test('a plain project with no git and no child repos runs a line with no cd, and a failing suite fails the gate', async () => {
   await inTmp((dir) => {
     mkdirSync(path.join(dir, 'src'))

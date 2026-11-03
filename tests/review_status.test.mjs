@@ -969,3 +969,28 @@ test('a reviewer rejection that arrives by the hand-back row is charged to the w
     assert.deepEqual(got, base, order)
   }
 })
+
+test('a review rejection counted from its parked row judges the writer attempts parked before it, not a new attempt parked after it', () => {
+  const routing = routingWith({ verify: 'on' })
+  const ctx = { routing, ccCost: false, projectDir: '' }
+  const state = tiers.emptyState('s')
+  const head = 'CC_TIERS_TASK: users-pagination\nCC_TIERS_TIER: opus'
+  const attempt = (reason) => `${head}\nCC_TIERS_ROLE: orchestrator\nCC_TIERS_VERIFY: none - x\nCC_TIERS_STATUS: pass\nCC_TIERS_REASON: ${reason}`
+  const prompt = 'CC_TIERS_TASK: users-pagination\nreview it'
+  const verdict = `${head}\nCC_TIERS_ROLE: reviewer\n${finding()}\nCC_TIERS_STATUS: fail\nCC_TIERS_REASON: off by one`
+  const { kind, ...review } = tiers.agentReport('R', { role: 'reviewer', prompt, at: 1 }, verdict)
+  state.background.R = { role: 'reviewer', prompt, at: 1 }
+  state.awaiting = [{ id: 'row:u1', role: 'orchestrator', text: attempt('first') }, review, { id: 'row:u3', role: 'orchestrator', text: attempt('fixed the off by one') }]
+  const [first, rejection, second] = tiers.prepareParked(ctx, tiers.peekAwaiting(state), {})
+  assert.equal(second.gate.status, 'unverified', 'the later attempt has its own gate')
+
+  assert.match(tiers.countParked(ctx, state, first), /Send the result to cc-tiers:reviewer/)
+  assert.match(tiers.countParked(ctx, state, rejection), /counted a failure for users-pagination/)
+  assert.deepEqual(state.tasks['users-pagination'].judged, ['row:u1'], 'only the attempt parked before the review')
+  const message = tiers.countParked(ctx, state, second)
+  assert.doesNotMatch(message, /not a new attempt/)
+  assert.match(message, /Send the result to cc-tiers:reviewer/)
+  assert.equal(state.tasks['users-pagination'].rejected, undefined, 'the new attempt clears the rejection')
+  assert.equal(state.tasks['users-pagination'].failures.length, 1)
+  assert.deepEqual(state.evidence['users-pagination'].gate.unverified.map((item) => item.reason), ['no project dir'], 'its gate is kept as evidence')
+})
