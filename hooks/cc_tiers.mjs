@@ -3152,6 +3152,27 @@ export function userFromEnv(env = process.env) {
 const ANSWER_NOTE =
   ' If it only asks for an answer, an explanation, a study or an opinion and changes nothing, answer it in this session: no slug, no spec, no implementer.'
 
+// A question or an analysis opens the prompt: a whole first word or a stem of it, so a later "review" in a change request does not count.
+const ASK_FIRST_WORDS = ['qual', 'quais', 'como', 'vale', 'what', 'why', 'how', 'which', 'should']
+const ASK_STEMS = ['analis', 'reanalis', 'estud', 'explic', 'expliq', 'compar', 'avali', 'revis', 'evaluat', 'analyz', 'explain', 'study', 'review']
+const ASK_OPENER_RE = /^(?:o\s+que|por\s+que|da\s+pra)\b/
+// All, in parts, or a numbered range or pair with a task label ("itens 1 e 2", "step 1-3") or "do 1 ao 6"; "de 5 a 10" or "#1a2b3c" is a value.
+const SEVERAL_TASKS_RE =
+  /\b(?:todos|todas|all|em partes|in parts)\b|\b(?:prioridade|priority|priorities|parte|part|item|itens|passo|step|etapa|tarefa|task)s?\s+\d{1,2}\s*(?:ao|a|e|and|to|-|,)\s*\d{1,2}\b|\bdo\s+\d{1,2}\s+ao\s+\d{1,2}\b/
+
+function asksOrAnalyzes(text) {
+  const head = fold(text).replace(/^[^a-z0-9]+/, '')
+  const first = head.match(/^[a-z0-9]+/)?.[0] ?? ''
+  if (ASK_FIRST_WORDS.includes(first) || ASK_STEMS.some((stem) => first.startsWith(stem)) || ASK_OPENER_RE.test(head)) return true
+  // "e o Muster": a short follow-up question; a longer "e atualize o rodapé" is a change.
+  return /^e\s+[oa]\b/.test(head) && head.split(/\s+/).length <= 4
+}
+
+// A question, an analysis or several tasks is not one small change. Unsure means no note: a missing hint costs nothing, a wrong one misroutes.
+function asksOrSpansTasks(text) {
+  return text.endsWith('?') || asksOrAnalyzes(text) || SEVERAL_TASKS_RE.test(fold(text))
+}
+
 /**
  * The note UserPromptSubmit adds for a one-task request: trivial (no plan, no checker) or small (no plan, no research, verify gate only),
  * each also saying that a request that only wants an answer is answered in the session. Empty otherwise.
@@ -3166,7 +3187,7 @@ export function lightHint(prompt, routing, { history = null, conserve = false, p
   if (assessComplexity(text, routing, { projectDir }).score > 0) return ''
   // Delegating would be refused in opus mode, so the session does the task itself.
   const inline = routing.light === 'inline' || (writerMode(routing) === 'opus' && !conserve)
-  if (decision.tier === 'sonnet' && ['default', 'history'].includes(decision.because) && !isRisky(text, routing, { waivable: false })) {
+  if (decision.tier === 'sonnet' && ['default', 'history'].includes(decision.because) && !isRisky(text, routing, { waivable: false }) && !asksOrSpansTasks(text)) {
     const small = 'cc-tiers small path: this request looks like one small change. Read the target first. If the change fits in about 20 lines of one file (its test file aside), has a clear expected result, and uses no library API you have not seen in the repo, '
     const risk = 'If it is bigger, touches risky code, or you are unsure, route it as usual.'
     if (inline && !conserve) {

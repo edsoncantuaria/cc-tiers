@@ -1727,22 +1727,35 @@ test('the light path keeps the small and trivial notes for a change request, how
   assert.ok(tiers.lightHint('Vamos fazer a Prioridade 1', routing).includes('cc-tiers small path'))
   assert.ok(tiers.lightHint('Add pagination to GET /users', routing).includes('cc-tiers small path'))
   assert.ok(tiers.lightHint('fix a typo in README', routing).includes('cc-tiers light path'))
-  // A question mark or a study word never changes the routing note of a change request.
+  // A change request keeps its note however it is phrased, unless it asks or names several tasks (next test).
   for (const change of [
-    'corrige isso?',
-    'arruma o teste que quebrou?',
-    'ajusta o layout do header?',
-    'muda a cor do botão?',
-    'commita isso?',
-    'pode subir a versão?',
-    'pode commitar, pushar e montar a release?',
-    'analise o erro e ajuste o código',
-    'revise o PR e mescle',
+    'corrige isso',
+    'arruma o teste que quebrou',
+    'ajusta o layout do header',
+    'muda a cor do botão',
+    'commita isso',
+    'pode subir a versão',
+    'pode commitar, pushar e montar a release',
     'veja se o teste passa e conserta',
-    'can you make the button blue?',
-    'can you bump the version to 1.2?',
-    'make the tests pass?',
-    'should we move the helper to utils? do it',
+    'can you make the button blue',
+    'can you bump the version to 1.2',
+    'make the tests pass',
+    'bump the version from 1.2 to 1.3',
+    'Allow empty names in the form',
+    'fix the date parsing for 2026-11-03',
+    'conserta o header e atualiza o rodapé',
+    'corrija o texto do botão salvar',
+    // An ask word that is not the first word, or only starts a longer first word, is no question.
+    'e atualize o rodapé',
+    'e adicione um teste para o parser',
+    'Fix comparison of dates in isExpired',
+    'Add review button to the PR page',
+    'Valeu, agora troque o rótulo',
+    'o queue worker deve reiniciar',
+    // A value change is no numbered range.
+    'Change the button color to #1a2b3c',
+    'change the retry count from 3 to 5',
+    'aumente o timeout de 5 a 10 segundos',
   ]) {
     for (const note of [tiers.lightHint(change, routing), tiers.lightHint(change, delegate), tiers.lightHint(change, routing, { conserve: true })]) {
       assert.ok(small(note), change)
@@ -1752,6 +1765,77 @@ test('the light path keeps the small and trivial notes for a change request, how
   for (const change of ['Estude a lib zod e migre a validação do formulário de cadastro para ela', 'Which file has the bug? Clean it up.', 'por que esse teste falha? deixa ele verde', 'when you get a chance, convert the config to yaml']) {
     const note = tiers.lightHint(change, routing)
     assert.ok(note === '' || note.startsWith('cc-tiers small path') || note.startsWith('cc-tiers light path'), change)
+  }
+})
+
+test('the small path note stays off a question, an analysis or several tasks', () => {
+  const routing = defaultRouting()
+  const delegate = defaultRouting({ light_path: 'delegate' })
+  const quiet = (prompt) => {
+    for (const note of [tiers.lightHint(prompt, routing), tiers.lightHint(prompt, delegate), tiers.lightHint(prompt, routing, { conserve: true })]) {
+      assert.equal(note, '', prompt)
+    }
+  }
+  // Real prompts that got the note.
+  for (const prompt of [
+    'pegando logs de uso, da pra ver se vale a pena ou nao usar o cc-tiers?',
+    'qual seria proxima mudanca?',
+    'reanalise com novos incidentes, e quais melhorias propoe? sabendo que ele nao é roteamento.',
+    'estude o CodeShell',
+    'e o Muster',
+    'vamos ajustar todos, do 1 ao 6, em partes conforme ordem sugerida.',
+    'Vamos fazer a Prioridade 1 e 2',
+  ]) quiet(prompt)
+  // A leading question or analysis word, in Portuguese or English.
+  for (const prompt of [
+    'Qual é o formato do payload',
+    'como funciona o gate',
+    'por que o teste falha',
+    'o que faz o hook',
+    'dá pra usar o cache aqui',
+    'vale a pena migrar o cache',
+    'analise o erro e ajuste o código',
+    'explique o fluxo do gate',
+    'compare as duas abordagens do cache',
+    'avalie esta mudança no cache',
+    'revise o PR e mescle',
+    'what does the cache do',
+    'why is the cache slow',
+    'how does the cache work',
+    'which cache is used',
+    'should we move the helper to utils',
+    'explain the cache',
+    'analyze the cache',
+    'study the cache',
+    'evaluate the cache',
+    'review the diff of the cache',
+    'review the button label and fix it',
+    'e o Muster agora',
+    'e a rota',
+  ]) quiet(prompt)
+  // A closing question mark, even when it is only politeness: unsure, so no note. The session still routes the request itself.
+  for (const prompt of ['pode trocar o rótulo do botão para Salvar?', 'can you make the button blue?', 'corrige isso?', 'muda a cor do botão?', 'make the tests pass?']) quiet(prompt)
+  // Several tasks: all, in parts, a numbered range or pair with a task label, or "do N ao M".
+  for (const prompt of [
+    'ajuste todos os botões',
+    'update all the buttons',
+    'all tests should pass after renaming fetchUser',
+    'ajuste o cache em partes',
+    'update the cache in parts',
+    'ajuste os itens 1 e 2',
+    'corrija do 1 ao 6',
+    'corrige as etapas 1 a 3',
+    'fix items 1-3',
+    'fix steps 1 and 2',
+    'fix tasks 1 to 3',
+    'do the priorities 1, 2',
+  ]) quiet(prompt)
+  // The same requests without the question or the span keep the note, and a lookup keeps the Haiku light-path note.
+  assert.ok(tiers.lightHint('pode trocar o rótulo do botão para Salvar', routing).includes('cc-tiers small path'))
+  assert.ok(tiers.lightHint('Vamos fazer a Prioridade 1', routing).includes('cc-tiers small path'))
+  for (const lookup of ['where is fetchUser defined?', 'onde fica o AcessoDAO?']) {
+    assert.ok(tiers.lightHint(lookup, delegate).includes('cc-tiers light path'), lookup)
+    assert.ok(tiers.lightHint(lookup, routing).includes('cc-tiers light path'), lookup)
   }
 })
 
