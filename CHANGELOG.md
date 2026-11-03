@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.13.0 - 2026-11-03
+
+### Added
+
+- A review of a task with no writer attempt on record is not counted, charges no tier, and asks for no retry: the hook says that no writer attempt was recorded for the task. `final-gate`, which reviews the whole integrated diff, is exempt.
+- The Opus attempt trailer is read from a Bash heredoc: `cat <<'CC_TIERS_ATTEMPT'` opens it and a line `CC_TIERS_ATTEMPT` closes it, open before the first edit and closed by a second heredoc with the same lines plus `CC_TIERS_CRITERION`, `CC_TIERS_REPRO`, `CC_TIERS_VERIFY`, `CC_TIERS_STATUS`, and `CC_TIERS_REASON`. The transcript of this Claude Code version does not keep the orchestrator's text safely, so a trailer written only there was lost. Any other Bash command is never read as a trailer, a trailer in text is still read, the same trailer in text and in a heredoc in one response counts once, and a later response that repeats the lines counts as another attempt. The dispatcher uses the heredoc too, and the orchestrator, dispatcher, and skill prompts and the hook messages describe it.
+- The verify gate runs a one-file syntax check without a `verify_allow` entry: `php -l` on a `.php`, `.phtml`, or `.inc` file, `bash -n` or `sh -n` on a `.sh` or `.bash` file, and `node --check` on a `.js`, `.mjs`, or `.cjs` file. It takes exactly one file argument; any option (`+n` included), a second file, or another word makes it a plain command again.
+- The checks cc-tiers detects now include `make test`, `make check`, and `make lint` when the project's `Makefile`, `makefile`, or `GNUmakefile` has that target (a `.PHONY` line, a `:=` assignment, and a recipe line are not a rule), and `composer test`, `composer lint`, `composer analyse`, and `composer analyze` for the scripts the `composer.json` declares. They are matched exactly, so `make test VAR=x` still needs an entry.
+- A command the gate did not re-run ends its not-validated line with ` - not re-run: the writer's own run stands only as declared evidence` (not for `none`, a missing project, or a command that changed the tree).
+- In a folder of repositories (outside git, with a child that holds `.git`), a line with no `cd` is not re-run, and the line says what to write: `<line>: the gate runs from <projectDir>, a folder of repositories; write \`cd <repo dir> && <line>\``. It is not a failure, and it comes before the advice about `verify_allow`. A one-file syntax check runs without the `cd`.
+- Two gates of the same project never run at the same time: a lock file `gate-<hash>.lock` in the plugin data directory, stale after 660 s, taken within the remaining `verify_budget`. A gate that cannot take it does not re-run, says `another cc-tiers gate was running: <command>`, and counts no failure. A cached result takes no lock, and different projects do not wait for each other.
+- The failure category `data`, the sixteenth: a seed, fixture, or test data with a fault word on the same line (`lacks`, `missing`, `gap`, `empty`, `incomplete`, `already holds`, `not seeded`, `faltam`, `vazio`). It comes after `infra` and before `test`. The next step is `retry`: fix the seed or fixture in the repo (changing it is allowed), ask for the data when the repo cannot supply it, or fix the code when it mishandles that missing or empty data. A `data` failure is not sent to a failure search.
+- An agent that stops with no `CC_TIERS_STATUS`, of any role, stays registered, and its next stop after a `SendMessage` counts. The registry of finished agents keeps the last 50, oldest dropped first.
+- The hand-back row that a background agent leaves in the main transcript counts as a report when SubagentStop did not count it first: a research report counts at once, a reviewer or writer report is parked and judged or gated at Stop. A writer resumed by `SendMessage` is a new attempt, the same report arriving by both paths counts once, and a rejection goes to the tier of the writer.
+
+### Changed
+
+- A risk keyword alone gives risk `high`, no longer `critical`, and the review stays mandatory (`risk keyword`, or `risk keyword, no sensitive file named` when the files are named). `critical` comes only from a sensitive path among the files the task edits: the `CC_TIERS_FILES` entries first, and the text paths that an entry covers (`.`, a directory, or a glob); without the header, the paths the text names. `contract_approval: critical` no longer asks for a task that has only a keyword. The hard start and the effort level are unchanged.
+- Tests are detected in a `Test/` directory in any letter case, a `Makefile`, `makefile`, or `GNUmakefile` with a `test:` rule, and a `composer.json` `scripts.test` (a string or a non-empty list), besides what was detected before.
+- The gate's suggested `verify_allow` entry drops trailing paths and `NAME=value` words.
+- In a folder of repositories a `cd <repo dir> && <check>` line runs the checks its `cd` directory declares (in a normal project, the project's plus the subdirectory's), so `cd <repo> && make test` runs as detected.
+- Re-asks count only prompts a person typed. Subagent hand-backs (`[Subagent hand-back]`), `<agent-message`, `<task-notification>`, `[SYSTEM NOTIFICATION`, and any prompt whose origin is not `human` are no longer taken for a complaint.
+- A 5xx in the output of a check (`5xx`, `HTTP 5xx`, `status 5xx`) alone is no longer `infra`: it may be the system under test answering 500. The rest of the infra rule (machine signatures, out of memory, rate limit, overloaded, the Docker daemon) is the same, and a subagent error that is an API or network error (overloaded, rate limit, 5xx) is still not a failure.
+- The hypothesis and the advice for `unknown` are neutral: `cc-tiers could not tell the cause from the report, so it has no advice for this attempt`, no longer to read the full output and retry.
+- The small path note is left out when the prompt ends in `?`, opens with a question or analysis word (only the first word counts, such as `qual`, `como`, `what`, `how`, `should`, `analisar`, `explain`, `review`, `o que`, `por que`, or a short `e o X` follow-up), or names several tasks (`todos`, `all`, `em partes`, a labeled range or pair such as `prioridade 1 e 2` or `step 1-3`, `do 1 ao 6`). An ordinary change request and the light path of a consultation are unchanged.
+
+### Fixed
+
+- A `cc-tiers:*` call that failed before an agent started (`cannot create agent worktree`) is not a failure of the writer: the hook says the Agent call failed before an agent started, to fix what the error names, and to delegate the same tier again.
+- A reviewer rejection parked until Stop marked as judged a writer attempt made after it in the same turn; now it marks only the attempts parked before it. A rejection that was not parked marks as before.
+- The report of a background agent was lost when it stopped without a status (turn limit, resumed by `SendMessage`), arrived only as a hand-back row, or came from a writer resumed after a rejection.
+- The gate of a session started in a folder of repositories ran the check outside the repo and counted the error as a failure of the writer.
+- The reviewer's approval of a re-review no longer turns into `retry` when the Opus attempt trailer was lost with the orchestrator's text.
+
 ## 0.12.2 - 2026-10-23
 
 ### Changed
