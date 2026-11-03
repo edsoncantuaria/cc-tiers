@@ -55,6 +55,38 @@ test('a review with no status and a blocking finding counts as a failure of the 
   }
 })
 
+test('a review of a task with no writer attempt on record says so, charges no tier and asks no retry', () => {
+  for (const role of ['reviewer', 'checker']) {
+    for (const status of ['pass', 'fail']) {
+      const state = tiers.emptyState('s')
+      const prepared = agentEvent('r', role, `${trailer(role, status)}\n${finding()}`)
+      const applied = tiers.applyEvent(state, prepared, routingWith())
+      const label = `${role} ${status}`
+      assert.equal(applied.meta.outcome, 'uncounted', label)
+      assert.equal(applied.meta.tier, '', label)
+      assert.match(applied.message, /no writer attempt was recorded for users-pagination/, label)
+      assert.match(applied.message, /writer must record its attempt .*CC_TIERS_ATTEMPT/, label)
+      assert.match(applied.message, /delegated implementer or worker is recorded through its Agent call, and your own attempt through a Bash heredoc/, label)
+      assert.doesNotMatch(applied.message, /retry|Retry|passed .* review/, label)
+      assert.deepEqual(state.tasks, {}, label)
+    }
+  }
+})
+
+test('a review of a task whose writer attempt is parked, counted or logged is charged to that writer', () => {
+  const parked = tiers.emptyState('s')
+  parked.awaiting = [{ id: 'row:1', role: 'orchestrator', text: trailer('orchestrator', 'pass') }]
+  const counted = tiers.emptyState('s')
+  counted.tasks = { 'users-pagination': { tier: 'sonnet', failures: [], carried: [] } }
+  const logged = tiers.emptyState('s')
+  logged.log = { 'users-pagination': { tiers: ['haiku'], attempts: 1, failures: 0, escalations: 0, reviews: [], effort: {}, status: 'done', finished: 'haiku' } }
+  for (const [name, state] of Object.entries({ parked, counted, logged })) {
+    const applied = tiers.applyEvent(state, agentEvent('r', 'reviewer', `${trailer('reviewer', 'pass')}`), routingWith())
+    assert.notEqual(applied.meta.outcome, 'uncounted', name)
+    assert.doesNotMatch(applied.message, /no writer attempt was recorded/, name)
+  }
+})
+
 test('a review with no status and no blocking finding counts nothing and asks for the verdict', async () => {
   for (const text of [trailer('reviewer', ''), `${trailer('reviewer', '')}\n${finding({ severity: 'note' })}`]) {
     const { applied } = await reviewFlow('reviewer', text)
@@ -189,11 +221,20 @@ function hookEnv(dir) {
   return env
 }
 
+/** users-pagination already has a Sonnet writer attempt on record, so its reviews are charged to it. */
+function recordWriter(dir) {
+  const file = tiers.sessionPath(path.join(dir, 'data'), 'sess-1')
+  const state = tiers.loadState(file, 'sess-1')
+  state.log['users-pagination'] = { tiers: ['sonnet'], attempts: 1, failures: 0, escalations: 0, reviews: [], effort: {}, status: 'in review', finished: '' }
+  tiers.saveState(file, state)
+}
+
 const run = (script, payload, env) => spawnSync(process.execPath, [path.join(ROOT, 'hooks', script)], { input: JSON.stringify(payload), encoding: 'utf8', env })
 
 /** A background reviewer launched with `prompt`, whose verdict arrives only through SubagentHandback. */
 function backgroundReview(dir, { prompt, handback, last = '' }) {
   const env = hookEnv(dir)
+  recordWriter(dir)
   run(
     'after_agent.mjs',
     {
@@ -285,6 +326,7 @@ test('a foreground reviewer that ended with no status is counted when its follow
   const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-status-'))
   try {
     const env = hookEnv(dir)
+    recordWriter(dir)
     const launched = run(
       'after_agent.mjs',
       {
@@ -595,6 +637,7 @@ test('a peer hand-back row in the main transcript counts as its agent\'s report'
   const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-status-'))
   try {
     const env = { ...hookEnv(dir), CLAUDE_PLUGIN_OPTION_VERIFY: 'off' }
+    recordWriter(dir)
     const transcript = path.join(dir, 'main.jsonl')
     writeFileSync(transcript, '')
     launchAgent(env, 'agent-r', 'researcher', RESEARCH_PROMPT)
@@ -806,6 +849,7 @@ test('a stop with no status after its row counted or parked the report adds no m
   const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-status-'))
   try {
     const env = { ...hookEnv(dir), CLAUDE_PLUGIN_OPTION_VERIFY: 'off' }
+    recordWriter(dir)
     const transcript = path.join(dir, 'main.jsonl')
     writeFileSync(transcript, '')
     launchAgent(env, 'agent-r', 'researcher', RESEARCH_PROMPT)

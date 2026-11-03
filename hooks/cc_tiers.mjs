@@ -58,8 +58,11 @@ export const ROLES = {
   dispatcher: 'sonnet',
   researcher: 'sonnet',
 }
-/** Session agents count their own attempts from a trailer in their text, since there is no Agent call. */
+/** Session agents count their own attempts from a trailer in their text or in a marked Bash heredoc, since there is no Agent call. */
 export const SESSION_ROLES = new Set(['orchestrator', 'dispatcher'])
+const ATTEMPT_MARKER = 'CC_TIERS_ATTEMPT'
+const ATTEMPT_OPEN = `cat <<'${ATTEMPT_MARKER}'`
+const FINAL_GATE = 'final-gate'
 export const REVIEW_ROLES = new Set(['reviewer', 'checker'])
 /** Roles whose run writes the change and so counts an attempt at its tier. */
 export const WRITER_ROLES = new Set(['worker', 'implementer', 'architect', 'dispatcher'])
@@ -901,7 +904,7 @@ export function hardStartLine(routing) {
   return (
     'Hard start: opus. A task that matches an Opus review keyword (auth, payments, migrations, schema, security, concurrency), ' +
     'or needs an architecture decision with trade-offs, a bug fix with no clear reproduction or across modules, or an investigation with competing hypotheses, ' +
-    'starts on Opus: the orchestrator implements it with the Opus attempt trailer (in light mode, cc-tiers:architect), after research and the spec, and it is reviewed as usual. ' +
+    `starts on Opus: the orchestrator implements it and marks the attempt with a Bash heredoc that starts with ${ATTEMPT_OPEN} (in light mode, cc-tiers:architect), after research and the spec, and it is reviewed as usual. ` +
     'When every file the delegation names is ordinary by its path, a keyword only in the text starts on Sonnet one effort level up instead, and its Opus review cannot be skipped. ' +
     'While budget routing conserves, it starts on Sonnet one effort level up.'
   )
@@ -987,7 +990,7 @@ export function formatSessionContext(routing, projectNote, snapshot = {}) {
     ...policyLines(routing),
     `A Haiku-looking task with a complexity score of ${COMPLEX_THRESHOLD} or more (several steps, many files, design or investigation wording, a long brief) starts on Sonnet.`,
     routing.light === 'inline'
-      ? 'Light path: inline. When a request is one trivial task, cc-tiers says so as it arrives: do it yourself in this session, with no delegation and no checker. When a request is one small change, cc-tiers says so too: if it fits in about 20 lines of one file, do it yourself with your attempt trailer and CC_TIERS_REVIEW: skip, so the verify gate checks it.'
+      ? `Light path: inline. When a request is one trivial task, cc-tiers says so as it arrives: do it yourself in this session, with no delegation and no checker. When a request is one small change, cc-tiers says so too: if it fits in about 20 lines of one file, do it yourself and mark the attempt with the ${ATTEMPT_OPEN} Bash heredoc and CC_TIERS_REVIEW: skip, so the verify gate checks it.`
       : routing.light === 'delegate'
         ? 'Light path: delegate. When a request is one trivial task, cc-tiers says so as it arrives: skip the written plan and delegate it in one call. When a request is one small change: one cc-tiers:implementer call with research none, a short CC_TIERS_SPEC block, and CC_TIERS_REVIEW: skip.'
         : 'Light path: off.',
@@ -1005,7 +1008,7 @@ export function formatSessionContext(routing, projectNote, snapshot = {}) {
       'Opus is the last tier: the orchestrator then stops and reports the notes to the user.',
   )
   lines.push(
-    'At the Opus ceiling, open the attempt with CC_TIERS_TASK, CC_TIERS_TIER: opus, and CC_TIERS_ROLE: orchestrator on their own lines, and close it with the same lines plus CC_TIERS_STATUS and CC_TIERS_REASON. cc-tiers counts that trailer.',
+    `At the Opus ceiling, open the attempt with a Bash tool call whose command is a heredoc that starts with ${ATTEMPT_OPEN} and holds CC_TIERS_TASK, CC_TIERS_TIER: opus, and CC_TIERS_ROLE: orchestrator on their own lines, and close it with another heredoc with the same lines plus CC_TIERS_STATUS and CC_TIERS_REASON, ending on a line CC_TIERS_ATTEMPT. cc-tiers counts that trailer. Write it only in the heredoc and do not repeat its lines in your message.`,
   )
   lines.push(...guidance(routing, snapshot.budget, snapshot.history))
   lines.push(snapshot.ccCost?.installed ? ccCostLine(snapshot) : 'cc-cost: not installed. Per-task spend is omitted.')
@@ -1130,7 +1133,7 @@ export function formatTaskSpend(task, tiers) {
 }
 
 function freshCursor() {
-  return { file: '', offset: 0, task: '', ids: [], limits: {} }
+  return { file: '', offset: 0, task: '', ids: [], trailers: [], limits: {} }
 }
 
 /** Per-slug maps are plain objects: a slug like `constructor` must not read an inherited property. */
@@ -1178,6 +1181,7 @@ export function loadState(file, sessionId) {
     }
     if (!data.cursor || typeof data.cursor !== 'object') data.cursor = base.cursor
     if (!Array.isArray(data.cursor.ids)) data.cursor.ids = []
+    if (!Array.isArray(data.cursor.trailers)) data.cursor.trailers = []
     if (!data.cursor.limits || typeof data.cursor.limits !== 'object') data.cursor.limits = {}
     data.session_id = sessionId
     // Entries that cannot be trusted are dropped, not resumed, and the drop is audited and told once.
@@ -1423,8 +1427,9 @@ export function applyEvent(state, event, routing) {
   const defaultTier = role === 'checker' ? 'haiku' : role === 'reviewer' ? 'sonnet' : ROLES[role]
   if (!TIERS.includes(tier)) tier = defaultTier
   // A writer's tier is its agent file's; a review is charged to the tier that wrote the diff, which the state knows better than the header.
+  const written = REVIEW_ROLES.has(role) ? writerTier(state, task) : ''
   if (!REVIEW_ROLES.has(role)) tier = ROLES[role]
-  else tier = writerTier(state, task) || tier
+  else tier = written || tier
 
   if (event.kind === 'error' && isInfraError(event.error)) {
     meta.tier = tier
@@ -1457,6 +1462,17 @@ export function applyEvent(state, event, routing) {
         (REVIEW_ROLES.has(role)
           ? ' The task stays in review: ask that reviewer for its verdict with SendMessage to the same agent (run the review again if it cannot answer).'
           : ''),
+    }
+  }
+
+  // final-gate reviews the whole integrated diff, so it has no writer attempt of its own.
+  if (REVIEW_ROLES.has(role) && !written && task !== FINAL_GATE) {
+    return {
+      state,
+      meta,
+      message:
+        `cc-tiers: no writer attempt was recorded for ${task}, so this review was not counted and no tier was charged. ` +
+        `The writer must record its attempt before the review: a delegated implementer or worker is recorded through its Agent call, and your own attempt through a Bash heredoc that starts with ${ATTEMPT_OPEN} and holds your CC_TIERS_ trailer lines. Then send the task to review again.`,
     }
   }
 
@@ -2143,7 +2159,7 @@ export function checkDelegation(state, toolInput, routing, { history = null, pro
     if ((role === 'worker' || role === 'implementer') && decision.because === 'writer') {
       return refuse(
         `cc-tiers: writer mode is opus, so ${task} is implemented as an Opus attempt: ${implementerFor('opus')}, not ${scoped}. ` +
-          'Research it and write its spec as usual, then open the attempt with the Opus trailer; review stays as usual.',
+          `Research it and write its spec as usual, then open the attempt with a Bash heredoc that starts with ${ATTEMPT_OPEN}; review stays as usual.`,
       )
     }
     if (role === 'worker' && ['history', 'risky', 'complex', 'risk'].includes(decision.because)) {
@@ -2820,11 +2836,52 @@ function lineId(line) {
   return `h${hash.toString(36)}`
 }
 
+/** The CC_TIERS_ header lines of a report, trimmed: the same trailer reads the same with prose, a fence or CRLF around it. */
+const headerLines = (text) =>
+  stripBriefs(text)
+    .split(/\n/)
+    .map((line) => line.trim())
+    .filter((line) => HEADER_RE.test(line))
+    .join('\n')
+
+/** The trailer lines of a Bash heredoc opened with the attempt marker; null for any other command. */
+function attemptHeredoc(command) {
+  if (typeof command !== 'string' || !command.startsWith(ATTEMPT_OPEN)) return null
+  const lines = command.slice(ATTEMPT_OPEN.length).split('\n').slice(1)
+  const end = lines.findIndex((line) => line.trim() === ATTEMPT_MARKER)
+  return (end < 0 ? lines : lines.slice(0, end)).join('\n')
+}
+
+/**
+ * Read a session trailer, from a text block or an attempt heredoc: an opening sets the task for spend, a closing pass or fail
+ * is pushed as a report. True for a closing. The same trailer lines twice in one response (text and heredoc) are pushed once.
+ */
+function foldTrailer(text, owner, reportId, cursor, sink) {
+  const headers = parseHeaders(text)
+  if (!headers.TASK) return false
+  if (headers.TASK.toLowerCase() === 'none') {
+    cursor.task = ''
+    return false
+  }
+  const role = (headers.ROLE || '').toLowerCase()
+  if (!SESSION_ROLES.has(role)) return false
+  cursor.task = slug(headers.TASK)
+  const status = (headers.STATUS || '').toLowerCase()
+  if (!cursor.task || (status !== 'pass' && status !== 'fail')) return false
+  const token = reportToken(owner, headerLines(text))
+  if (!cursor.trailers.includes(token)) {
+    cursor.trailers = [...cursor.trailers, token].slice(-MAX_MESSAGE_IDS)
+    sink.reports.push({ id: reportId, text, role })
+  }
+  return true
+}
+
 /**
  * Fold one main-transcript row into the cursor.
- * - The session agent's own text opens a task with CC_TIERS_TASK + CC_TIERS_ROLE: orchestrator
+ * - The session agent's own trailer opens a task with CC_TIERS_TASK + CC_TIERS_ROLE: orchestrator
  *   (the Opus ceiling) or dispatcher (Sonnet doing a task itself) and closes it with
- *   CC_TIERS_STATUS. That closing trailer is a report.
+ *   CC_TIERS_STATUS. That closing trailer is a report. It is the agent's text, or the body of a Bash
+ *   heredoc opened with `cat <<'CC_TIERS_ATTEMPT'` (the transcript does not always keep the text).
  * - An Agent call whose prompt carries CC_TIERS_TASK charges that one message to the task.
  * - Every other main-chain message is orchestration overhead.
  * - A peer hand-back row is the report of the background agent it names, pushed as a report with its agent_id.
@@ -2844,27 +2901,21 @@ function foldRow(row, line, cursor, sink, routing = null) {
   }
   if (row.type !== 'assistant') return
   const message = row.message && typeof row.message === 'object' ? row.message : {}
+  const reportId = `row:${row.uuid || lineId(line)}`
+  const owner = message.id || row.uuid || lineId(line)
   let delegated = ''
   let closing = false
   for (const block of messageBlocks(message)) {
     if (!block || typeof block !== 'object') continue
     if (block.type === 'text') {
-      const headers = parseHeaders(block.text)
-      if (!headers.TASK) continue
-      if (headers.TASK.toLowerCase() === 'none') {
-        cursor.task = ''
-        continue
+      if (foldTrailer(block.text, owner, reportId, cursor, sink)) closing = true
+    } else if (block.type === 'tool_use' && block.input && typeof block.input === 'object') {
+      const heredoc = block.name === 'Bash' ? attemptHeredoc(block.input.command) : null
+      if (heredoc !== null) {
+        if (foldTrailer(heredoc, owner, reportId, cursor, sink)) closing = true
+      } else if (!delegated) {
+        delegated = slug(parseHeaders(String(block.input.prompt || '')).TASK || '')
       }
-      const role = (headers.ROLE || '').toLowerCase()
-      if (!SESSION_ROLES.has(role)) continue
-      cursor.task = slug(headers.TASK)
-      const status = (headers.STATUS || '').toLowerCase()
-      if (cursor.task && (status === 'pass' || status === 'fail')) {
-        sink.reports.push({ id: `row:${row.uuid || lineId(line)}`, text: block.text, role })
-        closing = true
-      }
-    } else if (block.type === 'tool_use' && block.input && typeof block.input === 'object' && !delegated) {
-      delegated = slug(parseHeaders(String(block.input.prompt || '')).TASK || '')
     }
   }
   const id = message.id || row.uuid || ''
@@ -3095,7 +3146,7 @@ export function lightHint(prompt, routing, { history = null, conserve = false, p
       return (
         `${small}do it yourself in this session: no plan, no research, no subagent, and the spec is one to three criteria in a line of your message. ` +
         'A bug fix adds or extends the test that reproduces it when the file has tests. ' +
-        'Open and close it with your attempt trailer (CC_TIERS_ROLE: orchestrator, or dispatcher in light mode) with CC_TIERS_REVIEW: skip and your CC_TIERS_VERIFY lines, so the verify gate checks it without a review pass. ' +
+        `Open and close it with a Bash heredoc that starts with ${ATTEMPT_OPEN} (CC_TIERS_ROLE: orchestrator, or dispatcher in light mode) with CC_TIERS_REVIEW: skip and your CC_TIERS_VERIFY lines, so the verify gate checks it without a review pass. ` +
         risk +
         ANSWER_NOTE
       )

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -9,6 +9,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const tiers = await import(pathToFileURL(path.join(ROOT, 'hooks', 'cc_tiers.mjs')).href)
+const { parseContract } = await import(pathToFileURL(path.join(ROOT, 'hooks', 'contract.mjs')).href)
 
 const MODELS = new Set(['haiku', 'sonnet', 'opus'])
 const RESERVED_PREFIXES = ['claude-', 'anthropic-', 'anthropics-', 'cc-plugin-']
@@ -677,6 +678,186 @@ test('an Opus ceiling trailer is counted as a report', () => {
   assert.ok(message.includes('Retry on opus'))
   assert.ok(message.includes('opus/orchestrator: still red'))
   assert.equal(tiers.processReport(ctx, state, { kind: 'report', id: 'row:u1', role: 'orchestrator', prompt: '', text }), '')
+})
+
+const attempt = (text) => ({ type: 'tool_use', name: 'Bash', input: { command: `cat <<'CC_TIERS_ATTEMPT'\n${text}\nCC_TIERS_ATTEMPT` } })
+const ATTEMPT_OPEN = 'CC_TIERS_TASK: users-pagination\nCC_TIERS_TIER: opus\nCC_TIERS_ROLE: orchestrator'
+const ATTEMPT_CLOSE = `${ATTEMPT_OPEN}\nCC_TIERS_CRITERION: C1 pass - page size is 20\nCC_TIERS_REPRO: none - no bug\nCC_TIERS_VERIFY: npm test\nCC_TIERS_STATUS: pass\nCC_TIERS_REASON: done`
+
+/** Appends rows to a transcript file and scans it into state like the hooks do; returns what that scan found. */
+function scanMore(file, state, rows) {
+  appendFileSync(file, `${rows.join('\n')}\n`)
+  return tiers.scanTranscript(state, file)
+}
+
+test('a Bash attempt heredoc opens and closes a session task like a trailer text block', () => {
+  const opus = (input) => ({ input_tokens: input, output_tokens: 0, cache_read_input_tokens: 9999 })
+  const rows = [
+    assistantRow('claude-opus-4-5', opus(30), [{ type: 'text', text: 'summary' }], { id: 'm3' }),
+    assistantRow('claude-opus-4-5', opus(40), [attempt(ATTEMPT_OPEN)], { id: 'm4' }),
+    assistantRow('claude-opus-4-5', opus(50), [{ type: 'text', text: 'editing' }], { id: 'm5' }),
+    assistantRow('claude-opus-4-5', opus(60), [attempt(ATTEMPT_CLOSE)], { id: 'm6', uuid: 'u6' }),
+    assistantRow('claude-opus-4-5', opus(70), [{ type: 'text', text: 'after' }], { id: 'm7' }),
+  ]
+  const spend = tiers.attributeTranscript(rows.join('\n'))
+  assert.equal(spend['users-pagination'].opus, 150)
+  assert.equal(spend[tiers.OVERHEAD].opus, 100)
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const file = path.join(dir, 'main.jsonl')
+    const sink = scanMore(file, tiers.emptyState('s'), rows)
+    // The report is the heredoc body: its criterion, repro and verify lines are the trailer's.
+    assert.deepEqual(sink.reports, [{ id: 'row:u6', text: ATTEMPT_CLOSE, role: 'orchestrator' }])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a Bash command or an Agent prompt without the attempt marker is not a trailer', () => {
+  const closing = `${ATTEMPT_CLOSE}\nCC_TIERS_FILES: a.js`
+  const bash = (command) => ({ type: 'tool_use', name: 'Bash', input: { command } })
+  const rows = [
+    assistantRow('claude-opus-4-5', { input_tokens: 1 }, [bash(`cat <<'EOF'\n${closing}\nEOF`)], { id: 'a1', uuid: 'ua1' }),
+    assistantRow('claude-opus-4-5', { input_tokens: 2 }, [bash(`echo '${closing.replaceAll('\n', ' ')}'`)], { id: 'a2', uuid: 'ua2' }),
+    assistantRow('claude-opus-4-5', { input_tokens: 4 }, [bash(`git status && cat <<'CC_TIERS_ATTEMPT'\n${closing}\nCC_TIERS_ATTEMPT`)], { id: 'a3', uuid: 'ua3' }),
+    assistantRow('claude-opus-4-5', { input_tokens: 8 }, [{ type: 'tool_use', name: 'Agent', input: { subagent_type: 'cc-tiers:reviewer', prompt: `cat <<'CC_TIERS_ATTEMPT'\n${closing}\nCC_TIERS_ATTEMPT` } }], { id: 'a4', uuid: 'ua4' }),
+    // A writer role in a marked heredoc is not a session role either.
+    assistantRow('claude-opus-4-5', { input_tokens: 16 }, [attempt(closing.replace('orchestrator', 'implementer'))], { id: 'a5', uuid: 'ua5' }),
+    assistantRow('claude-opus-4-5', { input_tokens: 32 }, [{ type: 'text', text: 'after' }], { id: 'a6' }),
+  ]
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const state = tiers.emptyState('s')
+    const sink = scanMore(path.join(dir, 'main.jsonl'), state, rows)
+    assert.deepEqual(sink.reports, [])
+    assert.equal(state.cursor.task, '')
+    // None of them opened a session task: the last message is overhead, never the task the lines name.
+    assert.equal(state.spend[tiers.OVERHEAD].opus, 1 + 2 + 4 + 16 + 32)
+    assert.equal(state.spend['users-pagination'].opus, 8)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('the same trailer as a text block and as a heredoc in one response is counted once', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const row = (blocks, extra) => assistantRow('claude-opus-4-5', { input_tokens: 5 }, blocks, extra)
+    const text = { type: 'text', text: ATTEMPT_CLOSE }
+    const state = tiers.emptyState('s')
+    const file = path.join(dir, 'main.jsonl')
+    // Both blocks in one row.
+    assert.equal(scanMore(file, state, [row([text, attempt(ATTEMPT_CLOSE)], { id: 'm1', uuid: 'u1' })]).reports.length, 1)
+    // One row per block of the same response, in either order and across two scans.
+    assert.equal(scanMore(file, state, [row([text], { id: 'm2', uuid: 'u2' })]).reports.length, 1)
+    assert.equal(scanMore(file, state, [row([attempt(`${ATTEMPT_CLOSE}\n`)], { id: 'm2', uuid: 'u3' })]).reports.length, 0)
+    assert.equal(scanMore(file, state, [row([attempt(ATTEMPT_CLOSE)], { id: 'm3', uuid: 'u4' })]).reports.length, 1)
+    assert.equal(scanMore(file, state, [row([text], { id: 'm3', uuid: 'u5' })]).reports.length, 0)
+    // Another response with the same words is another attempt.
+    assert.equal(scanMore(file, state, [row([attempt(ATTEMPT_CLOSE)], { id: 'm4', uuid: 'u6' })]).reports.length, 1)
+    // The closing ended the task each time: the spend after it is overhead.
+    assert.equal(state.cursor.task, '')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a trailer in a text block with prose or a fence and the same trailer in a heredoc of one response is counted once', () => {
+  const wraps = {
+    prose: (trailer) => `The last page still fails.\n\n${trailer}`,
+    fence: (trailer) => `\`\`\`\n${trailer}\n\`\`\``,
+    crlf: (trailer) => trailer.replaceAll('\n', '\r\n'),
+  }
+  const closing = (status) => `${ATTEMPT_OPEN}\nCC_TIERS_VERIFY: npm test\nCC_TIERS_STATUS: ${status}\nCC_TIERS_REASON: tests fail`
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    let count = 0
+    for (const [name, wrap] of Object.entries(wraps)) {
+      for (const status of ['fail', 'pass']) {
+        const row = (blocks, id, uuid) => assistantRow('claude-opus-4-5', { input_tokens: 5 }, blocks, { id, uuid })
+        const text = { type: 'text', text: wrap(closing(status)) }
+        const heredoc = attempt(closing(status))
+        const label = `${name} ${status}`
+        const seen = (rows) => {
+          const state = tiers.emptyState('s')
+          const file = path.join(dir, `main-${count++}.jsonl`)
+          return rows.map((one) => scanMore(file, state, [one]).reports.length).reduce((a, b) => a + b, 0)
+        }
+        assert.equal(seen([row([text, heredoc], 'm1', 'u1')]), 1, `${label}: one row`)
+        assert.equal(seen([row([text], 'm1', 'u1'), row([heredoc], 'm1', 'u2')]), 1, `${label}: a row per block, text first`)
+        assert.equal(seen([row([heredoc], 'm1', 'u1'), row([text], 'm1', 'u2')]), 1, `${label}: a row per block, heredoc first`)
+        // Another response with the same words is another attempt.
+        assert.equal(seen([row([text, heredoc], 'm1', 'u1'), row([heredoc], 'm2', 'u3')]), 2, `${label}: another response`)
+      }
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a failing attempt shown as text and as heredoc in one response is one failure', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const closing = `${ATTEMPT_OPEN}\nCC_TIERS_VERIFY: npm test\nCC_TIERS_STATUS: fail\nCC_TIERS_REASON: tests fail`
+    const row = (blocks, uuid) => assistantRow('claude-opus-4-5', { input_tokens: 5 }, blocks, { id: 'm1', uuid })
+    const transcript = path.join(dir, 'main.jsonl')
+    writeFileSync(transcript, `${row([{ type: 'text', text: `The last page still fails.\n\n${closing}` }], 'u1')}\n${row([attempt(closing)], 'u2')}\n`)
+    const ctx = { routing: defaultRouting({ verify: 'off' }), file: path.join(dir, 's.json'), sessionId: 's', env: {}, projectDir: '', ccCost: false }
+    const state = tiers.withSession(ctx, { transcript_path: transcript }, (s) => s)
+    assert.deepEqual(state.tasks['users-pagination'].failures, ['opus/orchestrator: tests fail'])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a heredoc attempt reaches the gate, the evidence and the completion line like a text trailer', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const project = ceilingProject(dir)
+    writeFileSync(path.join(project, 'ok.mjs'), 'process.exit(0)\n')
+    const routing = defaultRouting({ verify_allow: 'node ok.mjs' })
+    const contract = parseContract('Criteria:\n- the page size is 20 (request)\nChecks:\n- `node ok.mjs` passes (repo: package.json)')
+    const body = (skip) =>
+      `${ATTEMPT_OPEN}\nCC_TIERS_CRITERION: C1 pass - page size 20 asserted\nCC_TIERS_CRITERION: C2 pass - ran it\nCC_TIERS_REPRO: none - no bug\nCC_TIERS_VERIFY: node ok.mjs\nCC_TIERS_STATUS: pass\n${skip ? 'CC_TIERS_REVIEW: skip\n' : ''}CC_TIERS_REASON: done`
+    const run = (name, block, text) => {
+      const transcript = path.join(dir, `${name}.jsonl`)
+      writeFileSync(transcript, `${assistantRow('claude-opus-4-5', { input_tokens: 5 }, [block(text)], { id: 'm1', uuid: 'u1' })}\n`)
+      const ctx = { routing, file: path.join(dir, `${name}-session.json`), sessionId: 's', env: {}, projectDir: project, ccCost: false }
+      const parked = tiers.withSession(ctx, { transcript_path: transcript }, (state) => {
+        state.contracts = { 'users-pagination': structuredClone(contract) }
+        return tiers.peekAwaiting(state)
+      })
+      assert.equal(parked.length, 1, name)
+      const [prepared] = tiers.prepareParked(ctx, parked, {})
+      const message = tiers.withSession(ctx, { transcript_path: transcript }, (state) => {
+        const counted = tiers.countParked(ctx, state, prepared)
+        tiers.dropAwaiting(state, [prepared.id])
+        return counted
+      })
+      const state = tiers.withSession(ctx, {}, (s) => s)
+      delete state.log['users-pagination']?.updated
+      return { gate: prepared.gate, message, tasks: state.tasks, evidence: state.evidence, log: state.log, awaiting: state.awaiting }
+    }
+    const asText = (text) => ({ type: 'text', text })
+    for (const skip of [true, false]) {
+      const viaText = run(`text-${skip}`, asText, body(skip))
+      const viaHeredoc = run(`heredoc-${skip}`, attempt, body(skip))
+      assert.equal(viaHeredoc.gate.status, 'pass')
+      assert.deepEqual(viaHeredoc.gate.verified, ['node ok.mjs'])
+      assert.deepEqual(viaHeredoc, viaText)
+    }
+    const finished = run('completion', attempt, body(true))
+    assert.match(finished.message, /cc-tiers gate: users-pagination verified: node ok\.mjs/)
+    assert.match(finished.message, /cc-tiers completion: users-pagination \w+ on opus/)
+    assert.match(finished.message, /\| C1 the page size is 20 \| pass \| declared \|/)
+    assert.match(finished.message, /\| C2 `node ok\.mjs` passes \| pass \| node ok\.mjs \|/)
+    const reviewed = run('evidence', attempt, body(false))
+    assert.deepEqual(reviewed.evidence['users-pagination'].reports.map((item) => item.id), ['C1', 'C2'])
+    assert.deepEqual(reviewed.evidence['users-pagination'].verified, ['node ok.mjs'])
+    assert.deepEqual(reviewed.evidence['users-pagination'].repro, [{ command: '', evidence: 'no bug' }])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('budget routing keeps Opus for the ceiling and for planning', () => {
@@ -2140,7 +2321,9 @@ test('writer pass without VERIFY counts a failure', () => {
   assert.equal(applied.meta.gate.status, 'missing')
   const missing = tiers.applyEvent(tiers.emptyState('s'), gateEvent('b', report('implementer', 'sonnet', 'pass'), { ...GATE_BASE, status: 'missing' }), defaultRouting())
   assert.equal(missing.meta.outcome, 'retry')
-  const review = apply(tiers.emptyState('s'), defaultRouting(), 'c', 'checker', report('checker', 'haiku', 'pass'))
+  const written = tiers.emptyState('s')
+  written.tasks = { 'users-pagination': { tier: 'haiku', failures: [], carried: [] } }
+  const review = apply(written, defaultRouting(), 'c', 'checker', report('checker', 'haiku', 'pass'))
   assert.equal(review.meta.outcome, 'pass')
   assert.equal(review.message.includes('cc-tiers gate'), false)
 })

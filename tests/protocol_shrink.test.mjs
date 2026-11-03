@@ -81,7 +81,7 @@ test('a review is charged to the tier that wrote the diff, not to its TIER heade
     assert.equal(checked.meta.tier, 'haiku')
   }))
 
-test('a review of a task cc-tiers never saw uses its TIER header, then the default', () =>
+test('a final-gate review has no writer of its own: it uses its TIER header, then the default', () =>
   inTemp(async (dir) => {
     const routing = routingWith({ specify: 'off' })
     const pass = (tier) => `CC_TIERS_TASK: final-gate\n${tier ? `CC_TIERS_TIER: ${tier}\n` : ''}CC_TIERS_STATUS: pass\nCC_TIERS_REASON: ok`
@@ -152,9 +152,10 @@ test("a review of the session's own Opus attempt, still waiting for its gate, is
     const rejected = step(state, routing, dir, 'r1', 'reviewer', text, 'CC_TIERS_TASK: gate-env\nReview.')
     assert.equal(rejected.meta.tier, 'opus')
     assert.match(state.tasks['gate-env'].failures[0], /^opus\/reviewer: /)
-    // Another task's parked attempt does not decide this one.
+    // Another task's parked attempt does not decide this one: it has no writer attempt on record, so no tier is charged.
     const other = step(state, routing, dir, 'r2', 'reviewer', text.replaceAll('gate-env', 'users-pagination'), 'CC_TIERS_TASK: users-pagination\nReview.')
-    assert.equal(other.meta.tier, 'sonnet')
+    assert.equal(other.meta.tier, '')
+    assert.equal(other.meta.outcome, 'uncounted')
   }))
 
 test('a review that rejects the session attempt parked for Stop keeps its rejection when that parked report is counted', () =>
@@ -183,3 +184,21 @@ test('a review that rejects the session attempt parked for Stop keeps its reject
     assert.equal(state.tasks['gate-env'].rejected, undefined)
     assert.equal(state.tasks['gate-env'].judged, undefined)
   }))
+
+test('session prompts and hook messages name the Bash heredoc as the way to mark an attempt', () => {
+  for (const file of ['agents/orchestrator.md', 'agents/dispatcher.md', 'skills/tiers/SKILL.md']) {
+    const text = readFileSync(path.join(ROOT, file), 'utf8')
+    assert.ok(text.includes("cat <<'CC_TIERS_ATTEMPT'"), `${file} shows the heredoc`)
+    assert.ok(/Bash (?:tool )?call/.test(text), `${file} says it is a Bash call`)
+    assert.ok(text.includes('do not repeat its lines in your message'), `${file} says not to repeat the trailer in the message`)
+    assert.doesNotMatch(text, /both ways/, file)
+  }
+  const routing = routingWith({ specify: 'off' })
+  const context = tiers.formatSessionContext(routing, 'none', {})
+  assert.match(context, /At the Opus ceiling, .*CC_TIERS_ATTEMPT/)
+  assert.match(context, /Light path: inline.*CC_TIERS_ATTEMPT/)
+  assert.match(tiers.hardStartLine(routing), /CC_TIERS_ATTEMPT/)
+  const refused = delegate(tiers.emptyState('s'), routingWith({ writer: 'opus', research: 'off', specify: 'off' }), 'implementer', 'CC_TIERS_TASK: paging\nAdd pagination to src/users.js')
+  assert.match(refused.deny, /writer mode is opus.*CC_TIERS_ATTEMPT/)
+  assert.match(tiers.lightHint('Add pagination to GET /users', routing), /CC_TIERS_ATTEMPT/)
+})
