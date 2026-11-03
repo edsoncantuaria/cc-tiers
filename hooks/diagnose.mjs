@@ -20,6 +20,7 @@ export const FAILURE_CATEGORIES = [
   'infra',
   'flaky',
   'scope',
+  'data',
   'unverifiable',
   'unknown',
 ]
@@ -52,6 +53,10 @@ const UNVERIFIABLE_RE = new RegExp(
     'sem (?:como|jeito de) (?:testar|reproduzir)',
   ].join('|'),
 )
+/** A seed, fixture or test data with a fault word on the same line; an empty table or "no rows" alone is as often a code bug, so it does not count. */
+const DATA_SUBJECT = '\\b(?:seeds?|sementes?|fixtures?|test data|sample data|dados de teste)\\b'
+const DATA_FAULT = '\\b(?:lacks?|lacking|missing|gaps?|empty|incomplete|absent|faltam?|faltando|vazi[oa]s?)\\b|already (?:holds?|has|contains?|present)|not seeded'
+const DATA_RE = new RegExp(`^(?=.*${DATA_SUBJECT})(?=.*(?:${DATA_FAULT}))`)
 const SECURITY_RE = /security|injection|\bxss\b|\bcsrf\b|\bleak|exposure|seguranca/
 /** Words that make a failure security-like even when the security rule does not name it; such a failure is never reported as partial. */
 const SENSITIVE_RE = new RegExp(
@@ -93,8 +98,10 @@ const RULES = [
     category: 'infra',
     guard: 'line',
     machine: INFRA_MACHINE,
-    re: new RegExp(`${INFRA_MACHINE.source}|out of memory|rate limit|\\b5xx\\b|\\bhttp 5\\d\\d\\b|status(?: code)? 5\\d\\d|overloaded|docker daemon`),
+    re: new RegExp(`${INFRA_MACHINE.source}|out of memory|rate limit|overloaded|docker daemon`),
   },
+  // After infra: a down database explains an empty seed. Before test: missing data explains the failures that follow.
+  { category: 'data', guard: 'line', re: DATA_RE },
   { category: 'flaky', re: /flaky|intermittent|non-?determinis|passed on retry/ },
   // Before test: a regression report usually also says that a test is failing.
   { category: 'regression', re: /regress|previously passing|broke existing|quebrou/ },
@@ -139,10 +146,11 @@ const HYPOTHESES = {
   architecture: 'The failure comes from how the parts are arranged, not from one line.',
   security: 'The change opens a security hole or exposes data.',
   infra: 'The environment failed (network, port, disk, memory, rate limit or service), not the code.',
+  data: 'The test data the check needs is missing or wrong: a seed or fixture lacks rows, or already holds one the scenario needs absent.',
   flaky: 'The failure is intermittent and may pass on a rerun.',
   scope: 'The change touches files or behavior outside the task.',
   unverifiable: 'The repo has no way to exercise this failure, so another attempt cannot be checked.',
-  unknown: 'The text does not show a cause; read the full output before changing code.',
+  unknown: 'cc-tiers could not tell the cause from the report.',
 }
 
 function asText(value) {
@@ -231,8 +239,9 @@ const ACTIONS = {
   security: ['escalate', 'A security finding needs a stronger tier to fix.'],
   integration: ['retry', 'Check the contract on both sides, then retry.'],
   scope: ['retry', 'Revert what is outside the task and retry with only the files it names.'],
+  data: ['retry', "If the seed or fixture lacks the data, fix it in the repo (changing it is allowed) or ask for the data when the repo cannot supply it; if the code mishandles that missing or empty data, fix the code. Then retry."],
   unverifiable: ['report-partial', 'The repo cannot exercise this failure: do not move up a tier. Deliver the verifiable part, report the task as partial, and name the test setup that is missing.'],
-  unknown: ['retry', 'Read the full output to find the cause, then retry.'],
+  unknown: ['retry', 'cc-tiers could not tell the cause from the report, so it has no advice for this attempt.'],
 }
 
 /** Failures whose text names a library, an API or a version, so the web may explain them; the others come from the environment, the design or the task itself. */

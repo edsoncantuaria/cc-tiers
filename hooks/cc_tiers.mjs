@@ -1349,6 +1349,11 @@ export function isInfraError(text) {
   return INFRA_RE.test(String(text || ''))
 }
 
+/** The Agent call itself failed before any agent started, so the tier never ran. */
+export function neverStarted(text) {
+  return /cannot create agent worktree/i.test(String(text || ''))
+}
+
 /** Who implements a tier, as the orchestrator should read it. */
 export function implementerFor(tier) {
   return tier === 'opus' ? OPUS_CEILING : SCOPED[IMPLEMENTERS[tier]]
@@ -1452,14 +1457,15 @@ export function applyEvent(state, event, routing) {
   if (!REVIEW_ROLES.has(role)) tier = ROLES[role]
   else tier = written || tier
 
-  if (event.kind === 'error' && isInfraError(event.error)) {
+  const notStarted = event.kind === 'error' && neverStarted(event.error)
+  if (notStarted || (event.kind === 'error' && isInfraError(event.error))) {
     meta.tier = tier
+    const stopped = notStarted ? 'did not run: the Agent call failed before an agent started' : 'stopped on an API or network error'
+    const again = notStarted ? 'Fix what the error names, then delegate the same tier again.' : 'Run the same tier again when the API answers.'
     return {
       state,
       meta,
-      message:
-        `Task ${task} on ${SCOPED[role]} stopped on an API or network error (${String(event.error).slice(0, 160)}). ` +
-        'cc-tiers did not count it as a failure. Run the same tier again when the API answers.',
+      message: `Task ${task} on ${SCOPED[role]} ${stopped} (${String(event.error).slice(0, 160)}). cc-tiers did not count it as a failure. ${again}`,
     }
   }
 

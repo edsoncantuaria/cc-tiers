@@ -9,8 +9,9 @@ const { FAILURE_CATEGORIES, declaresPackage, diagnoseFailure, failureResearchLin
 const fromDetail = (detail) => diagnoseFailure({ detail })
 const fromReason = (reason) => diagnoseFailure({ reason })
 
-test('exports the fifteen categories', () => {
-  assert.equal(FAILURE_CATEGORIES.length, 15)
+test('exports the sixteen categories (changed: data was added)', () => {
+  assert.equal(FAILURE_CATEGORIES.length, 16)
+  assert.ok(FAILURE_CATEGORIES.includes('data'))
   assert.equal(FAILURE_CATEGORIES.at(-1), 'unknown')
 })
 
@@ -82,8 +83,6 @@ const PROSE_CASES = [
   ['dependency', 'package not found: foo'],
   ['dependency', 'Módulo não encontrado: yaml'],
   ['infra', 'API error: rate limit exceeded'],
-  ['infra', 'upstream returned HTTP 503'],
-  ['infra', 'got a 5xx from the server'],
   ['infra', 'Anthropic API overloaded'],
   ['infra', 'the job ran out of memory'],
 ]
@@ -102,6 +101,15 @@ test('prose about the environment in a detail is not confirmed', () => {
     assert.equal(diagnosis.category, 'unknown', text)
     assert.equal(diagnosis.confirmed, false, text)
   }
+})
+
+test('an HTTP 5xx alone is no longer infra (changed: it was infra), it needs an environment sign', () => {
+  for (const text of ['upstream returned HTTP 503', 'got a 5xx from the server', 'tira11 fails with an undiagnosed NI HTTP 500 on POST /enviarResultado', 'server answered with status code 502']) {
+    assert.equal(fromReason(text).category, 'unknown', text)
+    assert.equal(fromDetail(text).category, 'unknown', text)
+  }
+  assert.equal(fromReason('upstream returned HTTP 503 after connect ECONNREFUSED 127.0.0.1:5432').category, 'infra')
+  assert.equal(fromReason('HTTP 503 because the API is overloaded').category, 'infra')
 })
 
 test('detail outranks the reason', () => {
@@ -254,6 +262,7 @@ test('nextAction maps each category', () => {
     security: 'escalate',
     integration: 'retry',
     scope: 'retry',
+    data: 'retry',
     unverifiable: 'report-partial',
     unknown: 'retry',
   }
@@ -667,12 +676,72 @@ test('declaresPackage reads requirements lines, PEP 621 and Poetry tables for a 
   for (const name of ['setuptools', 'myapp', 'private', 'classifiers', 'Programming', 'bcrypt']) assert.equal(inPyproject(name), false, name)
 })
 
-test('failureResearchLines: only a docs-version, type, integration, test or regression diagnosis is searchable', () => {
+// Real failure notes from an e2e task: the fix was the repo's seed, not the environment.
+const DATA_NOTES = [
+  'seed lacks public.part_form and public.part_rodada_modulo (8012/2026/129/4) and the geral.lista_resposta, lista_resposta_grupo, analito_sa_resposta, exame_cad_analito_resposta and exame_cad_analito_resposta_codigo rows for BIL (all 0 rows); tira11 also fails with an undiagnosed NI HTTP 500 on POST /enviarResultado; hard rule says stop and report',
+  '[enviarResultado] NI 500 "Exam code CID:48134 not found inside form" (AmostraValidation.php:216): public.item_ensaio_det is empty in the subset, so DeterminacaoRepository::getDeterminForm (model_bundle:139-143) returns nothing; 4 seed gaps already patched with synthesized rows (some guessed), this fifth is not',
+  'sysmex-etiqueta stops in resetar because the seed\'s public.respostas_det already holds 2236_335 = "67,1" for EP-21-214 (id_part 8012, …); the orchestrator must pick another sample, clear that row in the seed, or loosen the guard.',
+]
+
+test('missing or wrong test data is data, from a reason or a detail', () => {
+  for (const note of DATA_NOTES) {
+    assert.equal(fromReason(note).category, 'data', note)
+    assert.equal(fromDetail(note).category, 'data', note)
+    assert.equal(fromReason(note).confirmed, false)
+  }
+  for (const text of ['the fixture is empty', 'test data missing for the scenario', 'a semente esta vazia', 'faltam dados de teste']) {
+    assert.equal(fromReason(text).category, 'data', text)
+  }
+})
+
+test('a code bug about empty input or no rows is not data', () => {
+  for (const text of ['Error: no rows returned by findById, the query uses the wrong column', 'the reducer crashes on an empty dataset; I did not handle length 0', 'psql: (0 rows)', 'a tabela esta vazia']) {
+    assert.notEqual(fromReason(text).category, 'data', text)
+  }
+})
+
+test('a data diagnosis says the test data is missing or wrong and allows a code change in the seed or fixture', () => {
+  const diagnosis = fromReason(DATA_NOTES[0])
+  assert.match(diagnosis.hypothesis, /test data the check needs is missing or wrong/)
+  const next = nextAction(diagnosis, { tier: 'sonnet', attemptsLeft: 2 })
+  assert.equal(next.action, 'retry')
+  assert.match(next.note, /seed or fixture/)
+  assert.match(next.note, /ask for the data/)
+  assert.match(next.note, /fix the code/)
+  assert.doesNotMatch(next.note, /do not change code/i)
+})
+
+test('an environment sign outranks data, and a failed assertion that quotes data words is still a test', () => {
+  assert.equal(fromReason('connect ECONNREFUSED 127.0.0.1:5432, so the seed is empty').category, 'infra')
+  const tap = ["not ok 1 - loads the seed", "  error: |-", "    Expected values to be strictly equal:", "    + 'fixture is empty'", "    - 'ok'", "  code: 'ERR_ASSERTION'"].join('\n')
+  assert.equal(fromDetail(tap).category, 'test')
+  assert.equal(fromDetail('not ok 2 - seeds the dataset').category, 'test')
+})
+
+test('the legacy-DB note stays out of data, and its next step does not forbid code changes', () => {
+  const note =
+    'step gerarRequisicao, Site login fatal \'relação "public.acesso_" não existe\' (legacy site DB absent in e2e, qualicheck UsuarioPartAutenticacaoAction.php:519 / AcessoDAO.php:208); needs a decision on the environment, so I stopped without a green run or a commit'
+  const diagnosis = fromReason(note)
+  assert.notEqual(diagnosis.category, 'data')
+  assert.doesNotMatch(nextAction(diagnosis, { tier: 'sonnet', attemptsLeft: 2 }).note, /do not change code/i)
+})
+
+test('unknown says cc-tiers could not tell the cause and suggests no fix (changed: it said to read the output and retry)', () => {
+  const diagnosis = fromReason('something odd happened')
+  assert.equal(diagnosis.category, 'unknown')
+  assert.match(diagnosis.hypothesis, /could not tell the cause from the report/)
+  const next = nextAction(diagnosis, { tier: 'sonnet', attemptsLeft: 2 })
+  assert.equal(next.action, 'retry', 'the attempt counter still applies')
+  assert.match(next.note, /could not tell the cause from the report/)
+  assert.doesNotMatch(`${diagnosis.hypothesis} ${next.note}`, /read the full output|fix|retry/i)
+})
+
+test('failureResearchLines: only a docs-version, type, integration, test or regression diagnosis is searchable, data is not', () => {
   const symptom = 'something failed in the build'
   for (const category of ['docs-version', 'type', 'integration', 'test', 'regression']) {
     assert.deepEqual(failureResearchLines({ category, symptom }), [`CC_TIERS_FAILURE: ${symptom}`], category)
   }
-  for (const category of ['dependency', 'infra', 'flaky', 'unverifiable', 'scope', 'requirement', 'architecture', 'security', 'syntax', 'unknown']) {
+  for (const category of ['dependency', 'infra', 'flaky', 'unverifiable', 'scope', 'requirement', 'architecture', 'security', 'syntax', 'unknown', 'data']) {
     assert.deepEqual(failureResearchLines({ category, symptom }), [], category)
   }
   assert.deepEqual(failureResearchLines(null), [])

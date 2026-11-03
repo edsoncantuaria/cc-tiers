@@ -1612,6 +1612,25 @@ test('an API or network error is not counted as a failure', () => {
   assert.equal(crash.state.tasks['users-pagination'].failures.length, 1)
 })
 
+test('an Agent call that never started an agent is not counted as a failure, and the orchestrator is told why', () => {
+  const routing = defaultRouting()
+  const error =
+    'Cannot create agent worktree: not in a git repository and no WorktreeCreate hooks are configured. Configure WorktreeCreate/WorktreeRemove hooks in settings.json to use worktree isolation with other VCS systems.'
+  for (const role of ['implementer', 'worker']) {
+    const raw = event('w1', role, '', HEADER('users-pagination', 'sonnet', role), true)
+    raw.error = error
+    const applied = tiers.applyEvent(tiers.emptyState('s'), tiers.normalizeEvent(raw), routing)
+    assert.equal(applied.state.tasks['users-pagination'], undefined, role)
+    assert.equal(applied.meta.outcome, 'uncounted', role)
+    assert.ok(applied.message.includes('did not run'), applied.message)
+    assert.ok(applied.message.includes('Cannot create agent worktree'), applied.message)
+    assert.ok(applied.message.includes('did not count it as a failure'), applied.message)
+    assert.ok(!applied.message.includes('API or network'), applied.message)
+  }
+  assert.equal(tiers.neverStarted(error), true)
+  assert.equal(tiers.neverStarted('agent crashed'), false)
+})
+
 test('the planner is orchestration: no header, no count, spend to (orchestration)', () => {
   const routing = defaultRouting()
   assert.equal(tiers.checkDelegation(tiers.emptyState('s'), { subagent_type: 'cc-tiers:planner', prompt: 'plan this' }, routing).deny, '')
