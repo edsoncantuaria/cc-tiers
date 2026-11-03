@@ -237,6 +237,19 @@ test('redoFromPrompt ignores a missing complaint word, a task not done, a substr
   assert.equal(tiers.redoFromPrompt(state, 'constructor is broken').length, 1)
 })
 
+test('redoFromPrompt ignores a subagent hand-back, a task notification and a non-human origin', () => {
+  const state = stateWith({ 'fix-login': entry() })
+  const handback = 'Another Claude session sent a message:\n<agent-message from="a1">\n[Subagent hand-back] The report follows:\n  fix-login is still broken in one case'
+  assert.deepEqual(tiers.redoFromPrompt(state, handback), [])
+  assert.deepEqual(tiers.redoFromPrompt(state, '<system-reminder>x</system-reminder>\n<task-notification>\nfix-login still broken\n</task-notification>'), [])
+  assert.deepEqual(tiers.redoFromPrompt(state, '[SYSTEM NOTIFICATION - NOT USER INPUT] fix-login still broken'), [])
+  assert.deepEqual(tiers.redoFromPrompt(state, 'fix-login is still broken', { kind: 'peer' }), [])
+  assert.equal(state.events.length, 0)
+  // The user still counts, with or without an origin.
+  assert.equal(tiers.redoFromPrompt(state, 'fix-login is still broken', { kind: 'human' }).length, 1)
+  assert.equal(tiers.redoFromPrompt(state, 'fix-login is still broken').length, 1)
+})
+
 test('the UserPromptSubmit hook adds the re-ask line and marks the session', (t) => {
   const dir = tempDir(t)
   const file = writeSession(dir, 's1', { 'fix-login': entry() })

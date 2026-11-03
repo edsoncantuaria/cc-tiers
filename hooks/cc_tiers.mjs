@@ -3574,13 +3574,17 @@ const COMPLAINT = [
 ]
 const COMPLAINT_RE = new RegExp(`(?<![\\p{L}\\p{N}])(?:${COMPLAINT.join('|')})(?![\\p{L}\\p{N}])`, 'iu')
 
+// A subagent hand-back, a task notification or a system notice arrives as a prompt but was not typed by the user.
+const NOT_HUMAN_RE = /<agent-message\b|\[Subagent hand-back\]|<task-notification>|\[SYSTEM NOTIFICATION\b/
+
 /**
  * A prompt that names a done task of this session and complains counts as a re-ask of it.
  * A slash command is not one (/cc-tiers:redo marks on its own). The prompt text is never kept.
  */
-export function redoFromPrompt(state, prompt) {
+export function redoFromPrompt(state, prompt, origin = null) {
   const text = String(prompt || '').trim()
-  if (!text || text.startsWith('/') || !COMPLAINT_RE.test(text)) return []
+  if (origin && typeof origin === 'object' && origin.kind && origin.kind !== 'human') return []
+  if (!text || text.startsWith('/') || NOT_HUMAN_RE.test(text) || !COMPLAINT_RE.test(text)) return []
   const found = []
   for (const task of Object.keys(state.log || {})) {
     if (own(state.log, task)?.status !== 'done' || slug(task) !== task) continue
