@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.13.1 - 2026-11-03
+
+### Changed
+
+- The description in `package.json`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` and the GitHub About says what the plugin is for: work done right the first time (research of the installed versions, acceptance criteria written for you, an Opus review in a fresh context, checks re-run before a pass counts), with the model per task as a detail. The README and README.pt-BR subtitle and opening paragraph say the same.
+
 ## 0.13.0 - 2026-11-03
 
 ### Added
