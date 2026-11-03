@@ -1,6 +1,6 @@
 # 🎚️ cc-tiers
 
-### O Opus planeja, revisa e constrói o difícil. O Sonnet constrói o resto. O Haiku faz o simples.
+### Você pede. Ele pesquisa, escreve a spec, manda revisar e roda os testes de novo antes de dar por pronto.
 
 Um plugin do Claude Code para assinantes Pro e Max que querem o trabalho certo da primeira vez. O ponto é o seu tempo e o código, não tokens. Você faz um pedido curto e não escreve a spec: o cc-tiers pesquisa o projeto e escreve os critérios de aceite sozinho. O código segue a documentação da versão instalada e as convenções do seu próprio projeto, reaproveita o que já existe e fica dentro da tarefa, sem você precisar pedir código limpo nem escrever regras para isso. Os hooks rodam os testes de novo antes de um pass valer, e uma revisão só conta com um defeito reproduzido, então você não precisa pedir de novo. Cada tarefa vai para o modelo de que precisa: Haiku para o simples, Sonnet para o trabalho normal, Opus para planejar, revisar, construir as tarefas difíceis (auth, pagamento, migration, concorrência, arquitetura) e pegar o que o Sonnet não terminou, para o Opus não ser gasto num typo. No relógio, uma execução demora mais que o Opus sozinho.
 
