@@ -1,68 +1,68 @@
 #!/usr/bin/env node
 /**
  * SubagentStop hook. Counts the report of a cc-tiers agent that ran in the
- * background, using the agent id the PostToolUse launch recorded. Foreground
- * runs are counted by PostToolUse instead. The message waits in the session
- * state until the next hook that can reach the orchestrator.
+ * background, using the agent id the PostToolUse launch recorded, including a
+ * later stop of the same agent after SendMessage. The hand-back row in the main
+ * transcript is the fallback: research it counts at once, any other verdict waits
+ * for Stop unless this hook counts the report first (and drops the row), and a report
+ * the row already counted only has its spend charged here. Foreground runs are
+ * counted by PostToolUse instead. The message waits in the session state until
+ * the next hook that can reach the orchestrator.
  */
 
 import { runHook } from './integrity.mjs'
 
 async function main(payload) {
   const {
+    agentEntry,
     agentHandbackReport,
+    agentReport,
     agentTranscriptUsage,
+    chargeAgentSpend,
+    claimTwin,
+    dropAwaitingAgent,
     matchRole,
     openContext,
     parseHeaders,
     peekFor,
     prepareReport,
-    processReport,
+    processAgentReport,
     queueMessage,
     withSession,
   } = await import('./cc_tiers.mjs')
   const agentId = String(payload.agent_id || '')
   if (!agentId) return
   const ctx = openContext(payload)
-
-  // Read the launch first, run the gate with no lock held, then count under the lock.
-  const { launched, peek } = withSession(ctx, payload, (state) => {
-    const found = state.background?.[agentId]
-    return { launched: found, peek: found ? peekFor(state, { prompt: found.prompt || '' }) : null }
-  })
-  if (!launched) return
-  const role = launched.role || matchRole(payload.agent_type)
   // A background agent delivers its report through the SubagentHandback tool, so the last message is not the trailer.
   let text = String(payload.last_assistant_message || '')
   if (!parseHeaders(text).STATUS) text = agentHandbackReport(payload.agent_transcript_path) || text
-  const event = role
-    ? prepareReport(
-        ctx,
-        {
-          kind: 'report',
-          // A reviewer asked for its verdict stops again under the same agent id.
-          id: launched.stops ? `agent:${agentId}:${launched.stops}` : `agent:${agentId}`,
-          agent_id: agentId,
-          stops: launched.stops,
-          role,
-          prompt: launched.prompt || '',
-          launchedAt: launched.at,
-          text,
-          error: '',
-        },
-        payload,
-        { peek },
-      )
-    : null
+
+  // Read the launch first, run the gate with no lock held, then count under the lock.
+  const { launched, peek, twin } = withSession(ctx, payload, (state) => {
+    const found = agentEntry(state, agentId)
+    return { launched: found, peek: found ? peekFor(state, { prompt: found.prompt || '' }) : null, twin: found ? claimTwin(state, agentId, 'stop', text) : false }
+  })
+  if (!launched) return
+  const role = launched.role || matchRole(payload.agent_type)
+  // The main-transcript row already brought this report: it is not judged or counted again.
+  const event = role && !twin ? prepareReport(ctx, agentReport(agentId, { ...launched, role }, text), payload, { peek }) : null
 
   withSession(ctx, payload, (state) => {
-    // Another SubagentStop for the same agent may have counted it while the gate ran.
-    if (!state.background?.[agentId]) return
-    delete state.background[agentId]
-    if (!event) return
+    if (!event && !twin) {
+      delete state.background[agentId]
+      return
+    }
     const { totals, cost } = agentTranscriptUsage(payload.agent_transcript_path, ctx.routing)
-    const message = processReport(ctx, state, event, { key: agentId, totals, cost })
-    if (message) queueMessage(state, message)
+    const usage = { key: agentId, totals, cost }
+    const current = agentEntry(state, agentId)
+    // Another SubagentStop, or the row, may have counted it while the gate ran.
+    if (event && current && (current.stops || 0) === (launched.stops || 0)) {
+      const message = processAgentReport(ctx, state, event, usage)
+      dropAwaitingAgent(state, agentId)
+      if (message) queueMessage(state, message)
+    } else if (twin || claimTwin(state, agentId, 'stop', text)) {
+      chargeAgentSpend(ctx, state, launched, text, usage)
+    }
   })
 }
 

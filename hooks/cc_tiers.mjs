@@ -1146,6 +1146,7 @@ export function emptyState(sessionId) {
     log: {},
     spent: [],
     background: {},
+    finished: {},
     researched: {},
     pending: [],
     awaiting: [],
@@ -1172,7 +1173,7 @@ export function loadState(file, sessionId) {
     if (!data || typeof data !== 'object' || !data.tasks || typeof data.tasks !== 'object') return emptyState(sessionId)
     const base = emptyState(sessionId)
     for (const key of ['seen', 'spent', 'pending', 'awaiting', 'events', 'audit']) if (!Array.isArray(data[key])) data[key] = base[key]
-    for (const key of ['spend', 'cost', 'log', 'background', 'researched', 'contracts', 'evidence', 'snapshots', 'verifyCache', 'active']) {
+    for (const key of ['spend', 'cost', 'log', 'background', 'finished', 'researched', 'contracts', 'evidence', 'snapshots', 'verifyCache', 'active']) {
       if (!data[key] || typeof data[key] !== 'object' || Array.isArray(data[key])) data[key] = base[key]
     }
     if (!data.cursor || typeof data.cursor !== 'object') data.cursor = base.cursor
@@ -1346,13 +1347,19 @@ const TIER_RANK = { haiku: 0, sonnet: 1, opus: 2 }
 
 const MAX_BACKGROUND = 50
 
-/** Agents whose next SubagentStop cc-tiers counts: a background launch, or a review that ended with no verdict. The oldest drop first. */
-function registerAgent(state, agentId, entry) {
-  const registry = state.background && typeof state.background === 'object' ? state.background : (state.background = {})
+/** Agents whose next SubagentStop cc-tiers counts: a background launch, or an agent that stopped with no report ('background'), and agents whose report was counted and may be resumed ('finished'). The oldest drop first. */
+function registerAgent(state, agentId, entry, key = 'background') {
+  const registry = state[key] && typeof state[key] === 'object' ? state[key] : (state[key] = {})
   delete registry[agentId]
   registry[agentId] = entry
   const names = Object.keys(registry)
   names.slice(0, Math.max(0, names.length - MAX_BACKGROUND)).forEach((name) => delete registry[name])
+}
+
+/** A background agent that stopped with no verdict is asked for it with SendMessage: its next stop is counted like its report. */
+function awaitReport(state, event) {
+  if (!event.agent_id) return
+  registerAgent(state, event.agent_id, { role: event.role, prompt: event.prompt || '', tool_use_id: event.tool_use_id || '', at: launchTime(event), stops: (Number(event.stops) || 0) + 1 })
 }
 
 export function applyEvent(state, event, routing) {
@@ -1440,10 +1447,7 @@ export function applyEvent(state, event, routing) {
   }
   if (status !== 'pass' && status !== 'fail') {
     meta.tier = tier
-    // The reviewer is asked for its verdict with SendMessage: its next stop is counted like a review.
-    if (REVIEW_ROLES.has(role) && event.agent_id) {
-      registerAgent(state, event.agent_id, { role, prompt: event.prompt || '', tool_use_id: event.tool_use_id || '', at: launchTime(event), stops: (Number(event.stops) || 0) + 1 })
-    }
+    awaitReport(state, event)
     return {
       state,
       meta,
@@ -1795,6 +1799,7 @@ function applyResearch(state, meta, task, headers, event) {
   meta.outcome = 'research'
   const status = event.kind === 'error' ? 'fail' : (headers.STATUS || '').toLowerCase()
   if (Object.hasOwn(parseHeaders(event.prompt || ''), 'FAILURE')) return applyFailureResearch(state, meta, task, status, event)
+  if (status !== 'pass' && status !== 'fail') awaitReport(state, event)
   if (status !== 'pass') {
     return {
       state,
@@ -1836,9 +1841,9 @@ function stoppedAt(current, routing) {
 
 const MAX_JUDGED = 10
 
-/** The session's own reports of a task that wait for the Stop gate, oldest first. */
+/** The writer reports of a task that wait for the Stop gate, oldest first; a parked review verdict is not a writer attempt. */
 function parkedFor(state, task) {
-  return (state.awaiting || []).filter((item) => item?.id && slug(parseHeaders(item.text || '').TASK || '') === task)
+  return (state.awaiting || []).filter((item) => item?.id && !REVIEW_ROLES.has(item.role) && slug(parseHeaders(item.text || '').TASK || '') === task)
 }
 
 /** The tier of the last writer attempt of a task: a session attempt still waiting for its gate, its counter, else its log; '' when none knows it. */
@@ -2822,6 +2827,7 @@ function lineId(line) {
  *   CC_TIERS_STATUS. That closing trailer is a report.
  * - An Agent call whose prompt carries CC_TIERS_TASK charges that one message to the task.
  * - Every other main-chain message is orchestration overhead.
+ * - A peer hand-back row is the report of the background agent it names, pushed as a report with its agent_id.
  * Sidechain rows are skipped: subagent usage comes from the Agent result or its own transcript.
  * Rows that repeat a message id (one row per content block) are counted once.
  */
@@ -2829,7 +2835,14 @@ function foldRow(row, line, cursor, sink, routing = null) {
   const limits = extractLimitEntries(row)
   if (limits.five_hour) cursor.limits.five_hour = limits.five_hour
   if (limits.seven_day) cursor.limits.seven_day = limits.seven_day
-  if (row.type !== 'assistant' || row.isSidechain === true) return
+  if (row.isSidechain === true) return
+  const origin = row.origin && typeof row.origin === 'object' ? row.origin : {}
+  if (row.type === 'user' && origin.kind === 'peer' && origin.handback === true && typeof origin.handbackReportText === 'string') {
+    const agent = String(origin.from || '')
+    if (agent) sink.reports.push({ id: `handback:${row.uuid || lineId(line)}`, agent_id: agent, text: origin.handbackReportText })
+    return
+  }
+  if (row.type !== 'assistant') return
   const message = row.message && typeof row.message === 'object' ? row.message : {}
   let delegated = ''
   let closing = false
@@ -3155,9 +3168,9 @@ export function openContext(payload, env = process.env) {
 
 /**
  * Load the session state under its lock, catch up on the transcript, count any
- * ceiling trailers, run fn, and save. fn receives (state, { budget }).
- * A ceiling pass waits in state.awaiting while verify is on: its gate runs commands,
- * which only the Stop hook does, outside this lock.
+ * ceiling trailers and agent hand-back rows, run fn, and save. fn receives (state, { budget }).
+ * A ceiling pass waits in state.awaiting while verify is on, and so does a hand-back verdict (other than research):
+ * its gate or judgment runs commands, which only the Stop hook does, outside this lock.
  */
 export function withSession(ctx, payload, fn) {
   return withLock(ctx.file, () => {
@@ -3167,6 +3180,10 @@ export function withSession(ctx, payload, fn) {
     const budget = budgetDecision(collectLimits({ payload, cursor: state.cursor, env: ctx.env }), ctx.routing)
     ctx.routing.conserve = budget.conserve
     for (const report of scan.reports) {
+      if (report.agent_id) {
+        countHandback(ctx, state, report)
+        continue
+      }
       const role = report.role || 'orchestrator'
       if (ctx.routing.verify && (parseHeaders(report.text).STATUS || '').toLowerCase() === 'pass') {
         parkReport(state, { id: report.id, role, text: report.text })
@@ -3290,9 +3307,9 @@ export function peekFor(state, event) {
   return { snapshot: task ? own(state.snapshots, task) || null : null, cache: { ...(state.verifyCache || {}) }, writing }
 }
 
-/** At Stop no foreground agent can still run: only background writers stay registered (a reviewer waiting for its verdict is not a writer). */
+/** At Stop no foreground agent can still run: only background writers stay registered (an agent that stopped with no report, such as a reviewer waiting for its verdict, is not a writer). */
 export function releaseIdleWriters(state) {
-  const writers = Object.values(state.background || {}).filter((launch) => !REVIEW_ROLES.has(launch?.role))
+  const writers = Object.values(state.background || {}).filter((launch) => !REVIEW_ROLES.has(launch?.role) && !launch?.stops)
   const running = new Set(writers.map((launch) => slug(parseHeaders(launch?.prompt || '').TASK || '')))
   for (const task of Object.keys(state.active || {})) if (!running.has(task)) releaseActive(state, task)
 }
@@ -3314,6 +3331,77 @@ function parkReport(state, report) {
   state.awaiting = [...awaiting, report].slice(-MAX_PENDING)
 }
 
+const reportToken = (via, text) => `${via}:${lineId(String(text).replace(/\s+/g, ' ').trim())}`
+
+export const agentEntry = (state, agentId) => own(state.background, agentId) || own(state.finished, agentId)
+
+/** The report of a background agent's stop; its id changes with each stop, so an agent asked again counts again. */
+export function agentReport(agentId, entry, text) {
+  return {
+    kind: 'report',
+    id: entry.stops ? `agent:${agentId}:${entry.stops}` : `agent:${agentId}`,
+    agent_id: agentId,
+    stops: entry.stops,
+    role: entry.role,
+    prompt: entry.prompt || '',
+    launchedAt: entry.at,
+    text,
+    error: '',
+  }
+}
+
+/** The agent's counted report is remembered, so its next stop after SendMessage is a new attempt; the token pairs the same report arriving by its other path. */
+function rememberFinished(state, event, via) {
+  registerAgent(state, event.agent_id, { role: event.role, prompt: event.prompt || '', at: launchTime(event), stops: (Number(event.stops) || 0) + 1, reported: reportToken(via, event.text) }, 'finished')
+}
+
+/**
+ * The same report seen by its other path is not a new attempt. A stop is a twin when the row counted its text, when it has no
+ * status of its own and the row counted (its hand-back was not in the agent transcript yet), or when that row waits at Stop.
+ */
+export function claimTwin(state, agentId, via, text) {
+  const silent = via === 'stop' && !parseHeaders(text).STATUS
+  if (silent && (state.awaiting || []).some((item) => item.agent_id === agentId)) return true
+  const entry = own(state.finished, agentId)
+  const other = via === 'row' ? 'stop' : 'row'
+  if (!entry?.reported || !(entry.reported === reportToken(other, text) || (silent && entry.reported.startsWith('row:')))) return false
+  delete entry.reported
+  return true
+}
+
+/** Counts a background agent's report, whichever path brought it, and remembers the agent unless it still owes a report. */
+export function processAgentReport(ctx, state, event, usage = null, via = 'stop') {
+  delete state.background[event.agent_id]
+  delete state.finished[event.agent_id]
+  const message = processReport(ctx, state, event, usage)
+  if (!own(state.background, event.agent_id)) rememberFinished(state, event, via)
+  return message
+}
+
+/**
+ * A hand-back row is the report of the launched agent it names. Research counts at once; any other verdict is parked for Stop,
+ * which judges or gates it outside this lock, unless the agent's SubagentStop counts it first. A row with no verdict waits for the agent's stop.
+ */
+function countHandback(ctx, state, row) {
+  const entry = agentEntry(state, row.agent_id)
+  const status = (parseHeaders(row.text).STATUS || '').toLowerCase()
+  if (!entry?.role || (status !== 'pass' && status !== 'fail') || claimTwin(state, row.agent_id, 'row', row.text)) return
+  const event = agentReport(row.agent_id, entry, row.text)
+  if (entry.role !== 'researcher') {
+    parkReport(state, event)
+    return
+  }
+  const message = processAgentReport(ctx, state, event, null, 'row')
+  if (message) queueMessage(state, message)
+}
+
+/** Counts a parked report once its gate ran: an agent's only while its row is still parked, since its SubagentStop drops the row when it counts the report itself. */
+export function countParked(ctx, state, event) {
+  if (!event.agent_id) return processReport(ctx, state, event)
+  if (!(state.awaiting || []).some((item) => item.id === event.id)) return ''
+  return processAgentReport(ctx, state, event, null, 'row')
+}
+
 /** A copy of the parked list; it stays parked until dropAwaiting, so a Stop killed mid-gate leaves it for the next one. */
 export function peekAwaiting(state) {
   return [...(state.awaiting || [])]
@@ -3323,20 +3411,24 @@ export function dropAwaiting(state, ids) {
   state.awaiting = (state.awaiting || []).filter((item) => !ids.includes(item.id))
 }
 
+export function dropAwaitingAgent(state, agentId) {
+  state.awaiting = (state.awaiting || []).filter((item) => item.agent_id !== agentId)
+}
+
 /** Gates the parked passes of one Stop on one shared verify_budget, so together they fit the hook timeout. */
 export function prepareParked(ctx, parked, payload = {}, { now = Date.now, peeks = new Map() } = {}) {
   const started = now()
   return parked.map((report) => {
     const budgetS = Math.max(0, ctx.routing.verifyBudget - (now() - started) / 1000)
-    return prepareReport(ctx, { kind: 'report', id: report.id, role: report.role, prompt: '', text: report.text }, payload, { budgetS, peek: peeks.get(report.id) })
+    return prepareReport(ctx, { kind: 'report', prompt: '', ...report }, payload, { budgetS, peek: peeks.get(report.id) })
   })
 }
 
-/** The other writers on the shared tree and the verify cache for each parked report (read under the lock), so its gate behaves like a foreground one; no snapshot, a session role has no delegation. */
+/** The other writers on the shared tree and the verify cache for each parked report (read under the lock), so its gate behaves like a foreground one; only an agent's has a snapshot, a session role has no delegation. */
 export function peekParked(state, parked) {
   return new Map(parked.map((report) => {
-    const { writing, cache } = peekFor(state, report)
-    return [report.id, { writing, cache }]
+    const { snapshot, writing, cache } = peekFor(state, report)
+    return [report.id, report.agent_id ? { snapshot, writing, cache } : { writing, cache }]
   }))
 }
 
@@ -3350,6 +3442,23 @@ export function takePending(state) {
   return pending.join('\n\n')
 }
 
+/** Adds one subagent run's usage to its task, once per usage key. */
+function chargeSpend(ctx, state, task, usage) {
+  if (!task || !usage?.key) return
+  state.spent = state.spent || []
+  if (state.spent.includes(usage.key)) return
+  state.spent = [...state.spent, usage.key].slice(-MAX_SEEN)
+  if (ctx.ccCost && usage.totals) mergeSpend(state.spend, { [task]: usage.totals })
+  else if (ctx.ccCost && usage.tier && usage.tokens) addSpend(state.spend, task, usage.tier, usage.tokens)
+  if (usage.cost) mergeCost(state.cost || (state.cost = {}), { [task]: usage.cost })
+}
+
+/** The agent's report was counted from its other path: only its spend is new. */
+export function chargeAgentSpend(ctx, state, entry, text, usage) {
+  const headers = { ...parseHeaders(entry.prompt || ''), ...parseHeaders(text) }
+  chargeSpend(ctx, state, entry.role === 'planner' ? OVERHEAD : slug(headers.TASK || ''), usage)
+}
+
 /**
  * Count one finished report: the attempt counter, subagent spend, and Haiku history.
  * usage is { key, tier, tokens } or { key, totals } for a subagent run; key dedupes it.
@@ -3360,15 +3469,7 @@ export function processReport(ctx, state, event, usage = null) {
   if (applied.meta.duplicate) return ''
   let message = applied.message
   const task = applied.meta.planner ? OVERHEAD : applied.meta.task
-  if (task && usage?.key) {
-    state.spent = state.spent || []
-    if (!state.spent.includes(usage.key)) {
-      state.spent = [...state.spent, usage.key].slice(-MAX_SEEN)
-      if (ctx.ccCost && usage.totals) mergeSpend(state.spend, { [task]: usage.totals })
-      else if (ctx.ccCost && usage.tier && usage.tokens) addSpend(state.spend, task, usage.tier, usage.tokens)
-      if (usage.cost) mergeCost(state.cost || (state.cost = {}), { [task]: usage.cost })
-    }
-  }
+  chargeSpend(ctx, state, task, usage)
   if (!applied.meta.planner && applied.meta.outcome !== 'research') logReport(state, applied.meta, writerMode(ctx.routing))
   if (task && Number(event.durationMs) > 0 && !applied.meta.planner) {
     const entry = logEntry(state, task)

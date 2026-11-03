@@ -4,7 +4,8 @@
  * Opus ceiling trailer) and delivers reports that are still waiting. On
  * UserPromptSubmit it also adds the light-path note for a one-task trivial request.
  * On Stop it also runs the verification gate of ceiling and dispatcher passes
- * parked by the scan (outside the session lock, the commands can take minutes)
+ * parked by the scan, and the judgment of a background agent's hand-back row
+ * (outside the session lock, the commands can take minutes)
  * and asks the orchestrator to continue once, so a retry or an escalation is
  * not dropped at the end of the turn.
  */
@@ -18,11 +19,11 @@ async function main(payload) {
     lightHint,
     loadHistory,
     openContext,
+    countParked,
     dropAwaiting,
     peekAwaiting,
     peekParked,
     prepareParked,
-    processReport,
     redoFromPrompt,
     releaseIdleWriters,
     takePending,
@@ -51,7 +52,7 @@ async function main(payload) {
   // The second scan may count a new trailer; its message goes out with the gated ones. Only the counted ids leave the parked list.
   const gated = prepared.length
     ? withSession(ctx, payload, (state) => {
-        const messages = prepared.map((event) => processReport(ctx, state, event))
+        const messages = prepared.map((event) => countParked(ctx, state, event))
         dropAwaiting(state, prepared.map((event) => event.id))
         return [takePending(state), ...messages]
       })
