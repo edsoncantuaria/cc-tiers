@@ -24,11 +24,11 @@ import { BUDGET_OVERRIDE_RE, budgetMessage, budgetStatus, parseTaskBudget } from
 import { completion, evaluateCriteria, oneSpacing, parseContract, parseCriterionReports, parseReproLines, plural, weakenedCriteria } from './contract.mjs'
 import { declaresPackage, diagnoseFailure, failureResearchLines, missingPackage, nextAction } from './diagnose.mjs'
 import { MEMORY_BEGIN, MEMORY_END, MEMORY_IGNORE, addRecord, formatRecall, loadMemory, memoryPath, recall, sanitize, saveMemory } from './memory.mjs'
-import { checkParallel, declaredFiles, pruneActive, registerActive, releaseActive } from './parallel.mjs'
+import { checkParallel, declaredFiles, overlaps, pruneActive, registerActive, releaseActive } from './parallel.mjs'
 import { availableChecks, parseProfile, profileSettings, reviewRequired, selectChecks } from './policy.mjs'
 import { readHookErrors } from './integrity.mjs'
 import { clip } from './redact.mjs'
-import { TEXT_KEYWORD_FACTOR, assessRisk, isSensitivePath, riskRank, testsAvailableIn } from './risk.mjs'
+import { KEYWORD_FACTOR, TEXT_KEYWORD_FACTOR, assessRisk, isSensitivePath, riskRank, testsAvailableIn } from './risk.mjs'
 import { parseTelemetry, recordEvent, telemetryPath } from './telemetry.mjs'
 import { attemptChanges, outOfScope, sensitiveFiles, treeFingerprint, validateState, workspaceSnapshot } from './workspace.mjs'
 import { findingsNote, fold, gateFailure, gateMessage, isBlocking, judgeFindings, parseFindings, parseVerify, reviewMessage, runGate } from './verify.mjs'
@@ -756,12 +756,16 @@ export function decideTier(text, routing, { history = null, conserve = false, ce
 /**
  * The structured risk of one task: complexity, regression, sensitivity, ambiguity
  * and how little evidence the project offers. Routing and review depth read it.
+ * A sensitive path counts only among the files the task edits (CC_TIERS_FILES, else the paths in the text).
  */
 export function taskRisk(text, routing, { history = null, projectDir = '' } = {}) {
   const body = stripHeaders(text)
+  const declared = declaredFiles(parseHeaders(text), body)
+  // A path in the text still counts when CC_TIERS_FILES covers it ('.', a directory or a glob).
+  const files = declared.declared ? [...declared.files, ...extractFiles(body).filter((file) => declared.files.some((entry) => overlaps(file, entry)))] : declared.files
   return assessRisk({
     text: body,
-    files: extractFiles(body),
+    files,
     keywordRisk: keywordRisk(text, routing),
     complexity: assessComplexity(text, routing, { projectDir }),
     history: { haiku: Boolean(history) && historyMatches(text, history, 'haiku'), sonnet: Boolean(history) && historyMatches(text, history, 'sonnet') },
@@ -1712,7 +1716,8 @@ function reviewFloor(state, task, routing, flagged) {
   if (own(state.evidence, task)?.preexisting) return 'its failing check was declared pre-existing and a review must confirm it'
   const risk = own(state.log, task)?.risk
   if (risk === 'critical') return 'its risk is critical'
-  if ((own(state.log, task)?.factors || []).includes(TEXT_KEYWORD_FACTOR)) return 'it matches an Opus review keyword, so its review cannot be skipped though it does not start on Opus'
+  const factors = own(state.log, task)?.factors || []
+  if (factors.includes(KEYWORD_FACTOR) || factors.includes(TEXT_KEYWORD_FACTOR)) return 'it matches an Opus review keyword, so its review cannot be skipped'
   if (risk && reviewRequired(risk, routing.profile)) return `the ${routing.profile} profile reviews ${risk}-risk work`
   return ''
 }

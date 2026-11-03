@@ -3,13 +3,15 @@
  * Pure text and path matching, so it can be imported by cc_tiers.mjs without a cycle.
  */
 
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { fold } from './verify.mjs'
 
 export const RISK_LEVELS = ['low', 'medium', 'high', 'critical']
 /** A risk keyword in the task text while every file it names is ordinary: high risk, Sonnet writes it, Opus must review it. */
 export const TEXT_KEYWORD_FACTOR = 'risk keyword, no sensitive file named'
+/** A risk keyword with no proof the files are ordinary: still only high risk, since critical needs a sensitive path. */
+export const KEYWORD_FACTOR = 'risk keyword'
 
 // Whole words of a path, so docs/author.md or src/tokenizer.js are not sensitive; `.env` is matched as a file name.
 const SENSITIVE_WORDS = new Set([
@@ -37,6 +39,9 @@ const HEDGES = [
 const TEST_DIRS = ['test', 'tests', '__tests__', 'spec']
 const TEST_FILES = ['pytest.ini', 'phpunit.xml', 'phpunit.xml.dist', 'go.mod', 'Cargo.toml']
 const NPM_PLACEHOLDER = 'echo "Error: no test specified" && exit 1'
+// A `test:` rule, not `.PHONY: test` or a `test := x` assignment.
+const MAKEFILES = ['GNUmakefile', 'makefile', 'Makefile']
+const MAKE_TEST_RULE_RE = /^test\s*:(?!=)/m
 
 export function riskRank(level) {
   return RISK_LEVELS.indexOf(level)
@@ -106,12 +111,9 @@ function scoreRisk({ text, files, keywordRisk, complexity, history, testsAvailab
   if (complexityScore) factors.push(`complexity score ${rawScore}`)
 
   let sensitivity = 0
-  if (keywordRisk === 'text') {
+  if (keywordRisk) {
     sensitivity = 2
-    factors.push(TEXT_KEYWORD_FACTOR)
-  } else if (keywordRisk) {
-    sensitivity = 3
-    factors.push('risk keyword')
+    factors.push(keywordRisk === 'text' ? TEXT_KEYWORD_FACTOR : KEYWORD_FACTOR)
   }
   for (const file of paths) {
     if (!isSensitivePath(file)) continue
@@ -170,23 +172,33 @@ function scoreRisk({ text, files, keywordRisk, complexity, history, testsAvailab
   return { level, dimensions: { complexity: complexityScore, regression, sensitivity, ambiguity, evidence }, factors }
 }
 
-function hasTestScript(pkgPath) {
+/** package.json or composer.json: a real `scripts.test`, a command string or a composer list of commands. */
+function hasTestScript(manifestPath) {
   try {
-    const script = JSON.parse(readFileSync(pkgPath, 'utf8'))?.scripts?.test
+    const script = JSON.parse(readFileSync(manifestPath, 'utf8'))?.scripts?.test
+    if (Array.isArray(script)) return script.length > 0
     return typeof script === 'string' && script.trim() !== '' && script.trim() !== NPM_PLACEHOLDER
   } catch {
     return false
   }
 }
 
-/** true when the project has a test directory, test script or test runner config; null when the directory is unknown. */
+function hasMakeTestRule(makefilePath) {
+  try {
+    return MAKE_TEST_RULE_RE.test(readFileSync(makefilePath, 'utf8'))
+  } catch {
+    return false
+  }
+}
+
+/** true when the project has a test directory (any letter case), test script, Makefile test rule or test runner config; null when the directory is unknown. */
 export function testsAvailableIn(projectDir) {
   try {
     if (!projectDir || typeof projectDir !== 'string' || !statSync(projectDir).isDirectory()) return null
     const isDir = (name) => existsSync(path.join(projectDir, name)) && statSync(path.join(projectDir, name)).isDirectory()
-    if (TEST_DIRS.some(isDir)) return true
+    if (readdirSync(projectDir).some((name) => TEST_DIRS.includes(name.toLowerCase()) && isDir(name))) return true
     if (TEST_FILES.some((name) => existsSync(path.join(projectDir, name)))) return true
-    return hasTestScript(path.join(projectDir, 'package.json'))
+    return hasTestScript(path.join(projectDir, 'package.json')) || hasTestScript(path.join(projectDir, 'composer.json')) || MAKEFILES.some((name) => hasMakeTestRule(path.join(projectDir, name)))
   } catch {
     return null
   }

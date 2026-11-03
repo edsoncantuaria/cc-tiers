@@ -45,7 +45,7 @@ function scopeEntry(item) {
 }
 
 /** A file and a directory entry overlap when one is the other or contains it; a glob-free prefix match. */
-function overlaps(a, b) {
+export function overlaps(a, b) {
   if (a === '.' || b === '.') return true
   const x = a.toLowerCase()
   const y = b.toLowerCase()

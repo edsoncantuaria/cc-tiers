@@ -6,7 +6,7 @@ import { test } from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const { RISK_LEVELS, riskRank, assessRisk, testsAvailableIn } = await import(pathToFileURL(path.join(ROOT, 'hooks', 'risk.mjs')).href)
+const { RISK_LEVELS, TEXT_KEYWORD_FACTOR, riskRank, assessRisk, testsAvailableIn } = await import(pathToFileURL(path.join(ROOT, 'hooks', 'risk.mjs')).href)
 
 const dims = (input) => assessRisk(input).dimensions
 const withTests = { testsAvailable: true }
@@ -31,7 +31,7 @@ test('complexity dimension maps the score', () => {
 })
 
 test('sensitivity: risk keyword, sensitive path, data wording, none', () => {
-  assert.equal(dims({ keywordRisk: true }).sensitivity, 3)
+  assert.equal(dims({ keywordRisk: true }).sensitivity, 2)
   assert.ok(assessRisk({ keywordRisk: true }).factors.includes('risk keyword'))
   const byPath = assessRisk({ files: ['src/auth/login.js'] })
   assert.equal(byPath.dimensions.sensitivity, 3)
@@ -141,7 +141,32 @@ test('level high: data wording, contract with complexity, or a big sum', () => {
 test('level critical: a small change can be critical', () => {
   const result = assessRisk({ text: 'fix typo', files: ['src/session.js'], ...withTests })
   assert.equal(result.level, 'critical')
-  assert.equal(assessRisk({ text: 'x', keywordRisk: true, ...withTests }).level, 'critical')
+})
+
+test('a review keyword alone is at most high, whether files, a directory or nothing is named', () => {
+  for (const files of [[], ['hooks/verify.mjs'], ['src/', 'hooks'], ['.']]) {
+    for (const keywordRisk of [true, 'text']) {
+      const result = assessRisk({ text: 'x', keywordRisk, files, ...withTests })
+      assert.equal(result.level, 'high', `${keywordRisk} ${files}`)
+      assert.equal(result.dimensions.sensitivity, 2, `${keywordRisk} ${files}`)
+    }
+  }
+  assert.ok(assessRisk({ keywordRisk: true }).factors.includes('risk keyword'))
+  assert.ok(assessRisk({ keywordRisk: 'text' }).factors.includes(TEXT_KEYWORD_FACTOR))
+  assert.ok(!assessRisk({ keywordRisk: true }).factors.includes(TEXT_KEYWORD_FACTOR))
+  // Nothing but a sensitive path lifts a task to critical, however much else piles up.
+  const piled = assessRisk({ text: 'maybe somehow change the public API', keywordRisk: true, complexity: { score: 9 }, files: ['a/x.js', 'b/y.js', 'c/z.js'], testsAvailable: false })
+  assert.equal(piled.level, 'high')
+})
+
+test('a sensitive path among the files is critical with or without a keyword', () => {
+  for (const keywordRisk of [true, 'text', false]) {
+    for (const file of ['src/auth/login.js', 'config/.env']) {
+      const result = assessRisk({ text: 'x', keywordRisk, files: ['hooks/verify.mjs', file], ...withTests })
+      assert.equal(result.level, 'critical', `${keywordRisk} ${file}`)
+      assert.ok(result.factors.includes(`sensitive path: ${file}`))
+    }
+  }
 })
 
 test('word matching starts at a word, and a whole word ends at one', () => {
@@ -199,6 +224,26 @@ test('testsAvailableIn reads the project directory', async () => {
     assert.equal(testsAvailableIn(await make('noscript', { 'package.json': '{"name":"x"}' })), false)
     assert.equal(testsAvailableIn(await make('broken', { 'package.json': '{nope' })), false)
     assert.equal(testsAvailableIn(await make('file-named-test', { test: 'not a dir' })), false)
+    // Any letter case of a test directory counts, as does a phpunit config inside it (qualicheck: Test/phpunit.dist.xml).
+    for (const dir of ['Test', 'TESTS', 'Spec', '__Tests__']) assert.equal(testsAvailableIn(await make(`c-${dir}`, {}, [dir])), true, dir)
+    const phpunit = await make('phpunit', {}, ['Test'])
+    await writeFile(path.join(phpunit, 'Test', 'phpunit.dist.xml'), '')
+    assert.equal(testsAvailableIn(phpunit), true)
+    assert.equal(testsAvailableIn(await make('file-named-Test', { Test: 'not a dir' })), false)
+    // A Makefile counts only with a `test` rule (integracao-e2e); .PHONY, a longer name, an assignment or a recipe line do not.
+    assert.equal(testsAvailableIn(await make('make-rule', { Makefile: 'build:\n\tgo build\n\ntest:\n\t@go test ./...\n' })), true)
+    assert.equal(testsAvailableIn(await make('make-rule-spaced', { Makefile: 'test : build\n\tgo test\n' })), true)
+    // make also reads makefile and GNUmakefile.
+    for (const name of ['makefile', 'GNUmakefile']) assert.equal(testsAvailableIn(await make(`make-name-${name}`, { [name]: 'test:\n\tgo test\n' })), true, name)
+    for (const [name, body] of Object.entries({ phony: '.PHONY: test\nbuild:\n\ttrue\n', longer: 'tests:\n\ttrue\n', assign: 'test := 1\n', recipe: 'build:\n\ttest: nothing\n', empty: '' })) {
+      assert.equal(testsAvailableIn(await make(`make-${name}`, { Makefile: body })), false, name)
+    }
+    // composer.json: a scripts.test command or list of commands, not an empty one.
+    assert.equal(testsAvailableIn(await make('composer-string', { 'composer.json': '{"scripts":{"test":"phpunit"}}' })), true)
+    assert.equal(testsAvailableIn(await make('composer-list', { 'composer.json': '{"scripts":{"test":["@php phpunit"]}}' })), true)
+    for (const [name, body] of Object.entries({ none: '{"name":"x"}', empty: '{"scripts":{"test":""}}', emptyList: '{"scripts":{"test":[]}}', other: '{"scripts":{"lint":"phpcs"}}', broken: '{nope' })) {
+      assert.equal(testsAvailableIn(await make(`composer-${name}`, { 'composer.json': body })), false, name)
+    }
     assert.equal(testsAvailableIn(path.join(root, 'missing')), null)
     assert.equal(testsAvailableIn(path.join(root, 'script', 'package.json')), null)
   } finally {

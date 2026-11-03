@@ -2908,3 +2908,107 @@ test('writer: the session summary has a Writer line that names the mode of the d
   assert.equal(tiers.writerLine(defaultRouting({ writer: 'alternate' }), localNoon(0)).startsWith('Writer: alternate (opus today).'), true)
   assert.equal(tiers.writerLine(defaultRouting({ writer: 'alternate' }), localNoon(1)).startsWith('Writer: alternate (tiers today).'), true)
 })
+
+const CITED_MIGRATION = 'db/migrations/20261015130000_mover_analise_legado.php'
+
+test('taskRisk: a sensitive path is critical only among the files the task edits, CC_TIERS_FILES first, else the text', () => {
+  const routing = defaultRouting()
+  const ui = (files, text) => `CC_TIERS_TASK: ui\n${files ? `CC_TIERS_FILES: ${files}\n` : ''}${text}`
+  const cited = `Update the view. The old migration in ${CITED_MIGRATION} is context only.`
+  const listed = tiers.taskRisk(ui('src/view.js, tests/view.test.js', cited), routing)
+  assert.equal(listed.level, 'high')
+  assert.equal(listed.factors.some((factor) => factor.startsWith('sensitive path')), false)
+  // Without CC_TIERS_FILES the paths in the text are the files.
+  assert.equal(tiers.taskRisk(ui('', cited), routing).level, 'critical')
+  // A sensitive file in CC_TIERS_FILES is critical, a sensitive directory or glob too.
+  for (const files of [CITED_MIGRATION, 'src/view.js, db/migrations/', 'src/view.js, db/migrations/*.php', 'src/view.js, config/.env']) {
+    assert.equal(tiers.taskRisk(ui(files, cited), routing).level, 'critical', files)
+  }
+  // A task with no keyword citing a sensitive path while editing an ordinary file is not critical either.
+  assert.notEqual(tiers.taskRisk(ui('src/view.js', 'Update the view like src/auth/guard.js does.'), routing).level, 'critical')
+  assert.equal(tiers.taskRisk(ui('', 'Update the view like src/auth/guard.js does.'), routing).level, 'critical')
+})
+
+test('taskRisk: a path in the text counts when CC_TIERS_FILES covers it, so a broad list does not hide a sensitive edit', () => {
+  const routing = defaultRouting()
+  const task = (files, text) => `CC_TIERS_TASK: fix\nCC_TIERS_FILES: ${files}\n${text}`
+  for (const files of ['.', '**/*.js', 'src/', 'src/billing/*.js']) {
+    assert.equal(tiers.taskRisk(task(files, 'Fix the rounding in src/billing/total.js'), routing).level, 'critical', files)
+    assert.equal(tiers.taskRisk(task(files, 'Fix the login in src/auth/login.js'), routing).level, 'critical', files)
+  }
+  // A cited path outside what CC_TIERS_FILES lists stays out.
+  assert.notEqual(tiers.taskRisk(task('lib/', 'Fix the rounding like src/billing/total.js does'), routing).level, 'critical')
+})
+
+test('taskRisk: a review keyword alone is high whether files, a directory or nothing is named', () => {
+  const routing = defaultRouting()
+  const migrate = (files) => `CC_TIERS_TASK: ui\n${files ? `CC_TIERS_FILES: ${files}\n` : ''}Write a database migration for the users table`
+  for (const files of ['', 'src/', 'hooks', '.', 'src/view.js', 'src/view.js, Makefile']) {
+    const risk = tiers.taskRisk(migrate(files), routing)
+    assert.equal(risk.level, 'high', files || 'no files')
+    assert.ok(risk.factors.some((factor) => factor.startsWith('risk keyword')), files || 'no files')
+  }
+  assert.ok(tiers.taskRisk(migrate(''), routing).factors.includes('risk keyword'))
+  assert.ok(tiers.taskRisk(migrate('src/view.js'), routing).factors.includes('risk keyword, no sensitive file named'))
+})
+
+test('routing: a keyword task with no file named still hard-starts on Opus with the same effort boost, at high risk', () => {
+  const routing = defaultRouting()
+  const text = 'Write a database migration for the users table'
+  const hard = tiers.decideTier(text, routing)
+  assert.deepEqual([hard.tier, hard.because, hard.effort, hard.risk.level], ['opus', 'hard', 'high', 'high'])
+  const sonnet = tiers.decideTier(text, defaultRouting({ hard_start: 'sonnet' }))
+  assert.deepEqual([sonnet.tier, sonnet.because, sonnet.effort, sonnet.risk.level], ['sonnet', 'default', 'xhigh', 'high'])
+  const plain = tiers.decideTier('Add pagination to GET /users', defaultRouting({ hard_start: 'sonnet' }))
+  assert.equal(plain.effort, 'high')
+  // The delegation of a Sonnet writer carries the same boost.
+  const prompt = `CC_TIERS_TASK: users-migration\nCC_TIERS_TIER: sonnet\nCC_TIERS_ROLE: implementer\nCC_TIERS_RESEARCH: none - x\nCC_TIERS_SPEC: none - x\n${text}`
+  const call = tiers.checkDelegation(tiers.emptyState('s'), { subagent_type: 'cc-tiers:implementer', prompt }, defaultRouting({ hard_start: 'sonnet', verify: 'off' }))
+  assert.equal(call.deny, '')
+  assert.equal(call.input.effort, 'xhigh')
+})
+
+test('review floor: a keyword task, either factor, cannot skip its review; an ordinary one can', () => {
+  const routing = defaultRouting({ specify: 'off', verify: 'off', research: 'off' })
+  const finish = (task, prompt, extra = '') => {
+    const state = tiers.emptyState('s')
+    assert.equal(tiers.checkDelegation(state, { subagent_type: 'cc-tiers:implementer', prompt }, routing).deny, '')
+    const text = `${HEADER(task, 'sonnet', 'implementer')}CC_TIERS_REVIEW: skip\nCC_TIERS_STATUS: pass\nCC_TIERS_REASON: done${extra}`
+    return { state, applied: apply(state, routing, `done-${task}`, 'implementer', text, prompt) }
+  }
+  const prompt = (task, files, text) => `${HEADER(task, 'sonnet', 'implementer')}CC_TIERS_RESEARCH: none - x\nCC_TIERS_SPEC: none - x\n${files ? `CC_TIERS_FILES: ${files}\n` : ''}${text}`
+  const keyword = 'Write a database migration for the users table'
+  // No file named: the plain keyword factor.
+  const bare = finish('bare', prompt('bare', '', keyword))
+  assert.ok(bare.state.log.bare.factors.includes('risk keyword'))
+  assert.notEqual(bare.state.log.bare.risk, 'critical')
+  assert.equal(bare.applied.meta.outcome, 'review')
+  assert.match(bare.applied.message, /Review cannot be skipped: it matches an Opus review keyword/)
+  // Only ordinary files named: the text-only factor.
+  const text = finish('text', prompt('text', 'src/view.js', keyword))
+  assert.ok(text.state.log.text.factors.includes('risk keyword, no sensitive file named'))
+  assert.equal(text.applied.meta.outcome, 'review')
+  assert.match(text.applied.message, /Review cannot be skipped: it matches an Opus review keyword/)
+  // No keyword and no sensitive file: the skip still works.
+  const ordinary = finish('plain', prompt('plain', 'src/view.js', 'Add pagination to GET /users'))
+  assert.equal(ordinary.applied.meta.outcome, 'pass')
+  // review_policy never still wins.
+  const never = defaultRouting({ specify: 'off', verify: 'off', research: 'off', review_policy: 'never' })
+  const state = tiers.emptyState('s')
+  tiers.checkDelegation(state, { subagent_type: 'cc-tiers:implementer', prompt: prompt('bare', '', keyword) }, never)
+  const skip = `${HEADER('bare', 'sonnet', 'implementer')}CC_TIERS_REVIEW: skip\nCC_TIERS_STATUS: pass\nCC_TIERS_REASON: done`
+  assert.equal(apply(state, never, 'never-1', 'implementer', skip, prompt('bare', '', keyword)).meta.outcome, 'pass')
+})
+
+test('review floor: a change to a sensitive file the prompt did not name cannot skip review', () => {
+  const routing = defaultRouting({ specify: 'off', verify: 'off', research: 'off' })
+  const prompt = `${HEADER('plain', 'sonnet', 'implementer')}CC_TIERS_RESEARCH: none - x\nCC_TIERS_SPEC: none - x\nCC_TIERS_FILES: src/view.js\nAdd pagination to GET /users`
+  const state = tiers.emptyState('s')
+  assert.equal(tiers.checkDelegation(state, { subagent_type: 'cc-tiers:implementer', prompt }, routing).deny, '')
+  const text = `${HEADER('plain', 'sonnet', 'implementer')}CC_TIERS_REVIEW: skip\nCC_TIERS_STATUS: pass\nCC_TIERS_REASON: done`
+  const flagged = tiers.normalizeEvent(event('flag-1', 'implementer', text, prompt))
+  flagged.workspace = { changed: ['.env'], sensitive: [{ file: '.env', why: 'environment file' }], outOfScope: [] }
+  const applied = tiers.applyEvent(state, flagged, routing)
+  assert.equal(applied.meta.outcome, 'review')
+  assert.match(applied.message, /Review cannot be skipped: it changed a sensitive file the prompt did not name/)
+})
