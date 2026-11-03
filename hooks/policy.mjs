@@ -5,6 +5,7 @@
 
 import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
+import { MAKEFILES, hasMakeRule } from './risk.mjs'
 
 export const PROFILE_NAMES = ['balanced', 'quality', 'budget', 'fast']
 
@@ -20,6 +21,8 @@ const RISK_RANK = { low: 0, medium: 1, high: 2, critical: 3 }
 const MAX_DEPTH = 3
 const DEPTH_KINDS = [['test'], ['test'], ['test', 'typecheck', 'lint'], null]
 const NPM_PLACEHOLDER = 'echo "Error: no test specified" && exit 1'
+const MAKE_TARGETS = [['test', 'test'], ['check', 'test'], ['lint', 'lint']]
+const COMPOSER_SCRIPTS = [['test', 'test'], ['lint', 'lint'], ['analyse', 'static'], ['analyze', 'static']]
 const ESLINT_CONFIGS = ['eslint.config.js', 'eslint.config.mjs', 'eslint.config.cjs', '.eslintrc', '.eslintrc.js', '.eslintrc.cjs', '.eslintrc.json', '.eslintrc.yml', '.eslintrc.yaml']
 
 export function parseProfile(value, fallback = 'balanced') {
@@ -44,13 +47,18 @@ function readText(file) {
   }
 }
 
-function readScripts(projectDir) {
+function readScripts(projectDir, manifest = 'package.json') {
   try {
-    const scripts = JSON.parse(readText(path.join(projectDir, 'package.json'))).scripts
+    const scripts = JSON.parse(readText(path.join(projectDir, manifest))).scripts
     return scripts && typeof scripts === 'object' ? scripts : {}
   } catch {
     return {}
   }
+}
+
+/** A composer script is a command or a list of commands. */
+function hasCommands(script) {
+  return Array.isArray(script) ? script.length > 0 : typeof script === 'string' && script.trim() !== ''
 }
 
 /** The checks the project's manifests declare, read from files only. */
@@ -76,6 +84,9 @@ export function availableChecks(projectDir) {
     add('static', 'go vet ./...')
   }
   if (has('Cargo.toml')) add('test', 'cargo test')
+  const composer = readScripts(projectDir, 'composer.json')
+  for (const [name, kind] of COMPOSER_SCRIPTS) if (hasCommands(composer[name])) add(kind, `composer ${name}`)
+  for (const [target, kind] of MAKE_TARGETS) if (MAKEFILES.some((name) => hasMakeRule(path.join(projectDir, name), target))) add(kind, `make ${target}`)
   if (has('package-lock.json')) add('security', 'npm audit --omit=dev')
   return found
 }

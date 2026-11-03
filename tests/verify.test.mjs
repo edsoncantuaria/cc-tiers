@@ -178,7 +178,7 @@ test('out of list → unverified, not fail', () => {
     { raw: 'none - checked the screen by hand', reason: 'checked the screen by hand' },
   ])
   assert.equal(verify.gateMessage('booking', result), [
-    'cc-tiers gate: booking not validated: outside verify_allow: docker exec app php artisan test (add `php artisan test` to verify_allow in /config, keeping the entries already there)',
+    'cc-tiers gate: booking not validated: outside verify_allow: docker exec app php artisan test (add `php artisan test` to verify_allow in /config, keeping the entries already there) - not re-run: the writer\'s own run stands only as declared evidence',
     'cc-tiers gate: booking not validated: checked the screen by hand',
   ].join('\n'))
   const mixed = gate('CC_TIERS_VERIFY: docker exec app x\nCC_TIERS_VERIFY: npm test', scripted().run)
@@ -685,4 +685,142 @@ test('a reviewer finding runs a detected command too', () => {
   const judged = verify.judgeFindings([finding], { specText: '', allow: [], detected: [['npx', 'eslint', '.']], projectDir: PROJECT, timeoutS: 60, budgetS: 60, run })
   assert.equal(calls.length, 1)
   assert.equal(judged.blocking.length, 1)
+})
+
+test('gateAllows: syntax-only checks run with no entry when the one argument is a file of that tool', () => {
+  for (const allow of [[], verify.parseAllow('npm test')]) {
+    for (const line of ['php -l Test/BookingTest.php', 'php -l views/a.phtml', 'php -l lib/a.inc', 'bash -n scripts/semear.sh', 'bash -n scripts/a.bash', 'sh -n a.sh', 'node --check public/app.js', 'node --check a.mjs', 'node --check a.cjs']) {
+      assert.equal(verify.gateAllows(argv(line), allow), true, line)
+    }
+  }
+  assert.equal(verify.gateAllows(argv('php -l src/a.php'), [], [], { CI: '1' }), true, 'plain env keeps working')
+})
+
+test('gateAllows: a syntax-only check with another option, a second file, no file or another mode is refused', () => {
+  for (const line of [
+    'bash -n +n s.sh',
+    'sh -n +n s.sh',
+    'bash -n +o noexec s.sh',
+    'bash -n s.sh +n',
+    'node --check inspect s.js',
+    'node --check s.js inspect',
+    'php -l a.php b.php',
+    'sh -n a.sh b.sh',
+    'php -l src/Makefile',
+    'php -l src/a',
+    'php -l a.js',
+    'bash -n a.php',
+    'node --check a.sh',
+    'node --check a.json',
+    'php -l',
+    'bash -n',
+    'sh -n',
+    'node --check',
+    'php -l -r src/a.php',
+    'php -l -d auto_prepend_file=x src/a.php',
+    'php -l src/a.php -r',
+    'bash -n -c src/a.sh',
+    'bash -n -x a.sh',
+    'sh -n -- a.sh',
+    'node --check --import x a.js',
+    'node --check a.js --require x',
+    'node --check -',
+    'php src/a.php',
+    'bash scripts/semear.sh',
+    'sh -c a.sh',
+    'node public/app.js',
+    'php -ln a.php',
+  ]) {
+    assert.equal(verify.gateAllows(argv(line), []), false, line)
+  }
+})
+
+test('gateAllows: docker exec around a syntax-only check works as for the other commands', () => {
+  assert.equal(verify.gateAllows(argv('docker exec -w /app qc php -l Test/a.php'), []), true)
+  assert.equal(verify.gateAllows(argv('docker compose exec -T app bash -n scripts/x.sh'), []), true)
+  assert.equal(verify.gateAllows(argv('docker exec qc php -l -r Test/a.php'), []), false)
+  assert.equal(verify.gateAllows(argv('docker exec qc php Test/a.php'), []), false)
+  assert.equal(verify.gateAllows(argv('docker exec c bash -n +n s.sh'), []), false)
+  assert.equal(verify.gateAllows(argv('docker exec qc php -l a.php b.php'), []), false)
+  assert.equal(verify.gateAllows(argv('docker compose exec app php -l a.php'), [], [], { DOCKER_HOST: 'tcp://x' }), false)
+})
+
+test('the gate runs a syntax-only check even when verify_allow replaces the default list', () => {
+  const { run, calls } = scripted()
+  const result = verify.runGate(
+    'CC_TIERS_VERIFY: php -l Test/BookingTest.php\nCC_TIERS_VERIFY: bash -n scripts/semear.sh\nCC_TIERS_VERIFY: node --check public/app.js\nCC_TIERS_VERIFY: node --check public/app.js --import x\nCC_TIERS_VERIFY: php -l -d x=1 a.php',
+    { projectDir: PROJECT, allow: [], timeoutS: 60, budgetS: 600, run },
+  )
+  assert.deepEqual(calls.map((call) => call.cmd.argv.join(' ')), ['php -l Test/BookingTest.php', 'bash -n scripts/semear.sh', 'node --check public/app.js'])
+  assert.deepEqual(result.verified, ['php -l Test/BookingTest.php', 'bash -n scripts/semear.sh', 'node --check public/app.js'])
+  assert.deepEqual(result.unverified.map((item) => item.reason.split(':')[0]), ['refused flag --import', 'outside verify_allow'])
+})
+
+test('gateAllows: a detected make test is exact, so make variables need a verify_allow entry', () => {
+  const detected = [['make', 'test'], ['make', 'lint']]
+  assert.equal(verify.gateAllows(argv('make test'), [], detected), true)
+  assert.equal(verify.gateAllows(argv('make test CENARIO=x'), [], detected), false)
+  assert.equal(verify.gateAllows(argv('make test CENARIO=x'), verify.parseAllow('make test'), detected), true)
+  assert.equal(verify.gateAllows(argv('make check'), [], detected), false)
+  assert.equal(verify.gateAllows(argv('docker compose exec -T app make test'), [], detected), true)
+})
+
+test('allowPrefix drops trailing NAME=value arguments as it drops paths', () => {
+  assert.equal(verify.allowPrefix(argv('make test CENARIO=x')), 'make test')
+  assert.equal(verify.allowPrefix(argv('make test A=1 B=two')), 'make test')
+  assert.equal(verify.allowPrefix(argv('make test CENARIO=a/b.ts')), 'make test')
+  assert.equal(verify.allowPrefix(argv('make test')), 'make test')
+  assert.equal(verify.allowPrefix(argv('bash scripts/x.sh A=1')), 'bash scripts/x.sh')
+  assert.equal(verify.allowPrefix(argv('docker exec qc make test CENARIO=x')), 'make test')
+  assert.equal(verify.allowPrefix(argv('make test --filter=x')), 'make test --filter=x', 'an option is not a trailing variable')
+  const { run, calls } = scripted()
+  const result = verify.runGate('CC_TIERS_VERIFY: make test CENARIO=x', { projectDir: PROJECT, allow: ALLOW, timeoutS: 60, budgetS: 60, run })
+  assert.equal(calls.length, 0)
+  assert.match(result.unverified[0].reason, /\(add `make test` to verify_allow in \/config, keeping the entries already there\)$/)
+})
+
+test('gateMessage says a command the gate did not run was not re-run, and keeps the other lines as they are', () => {
+  const { run } = scripted()
+  const result = verify.runGate(
+    [
+      'CC_TIERS_VERIFY: make test CENARIO=x',
+      'CC_TIERS_VERIFY: node --test --import ./x.mjs',
+      'CC_TIERS_VERIFY: npm test; id',
+      'CC_TIERS_VERIFY: none - checked the screen by hand',
+      'CC_TIERS_VERIFY: npm run test',
+    ].join('\n'),
+    { projectDir: PROJECT, allow: ALLOW, timeoutS: 60, budgetS: 600, run, snapshot: snapshots(snap({}), snap({ 'a.txt': 'h1' })) },
+  )
+  const tail = ' - not re-run: the writer\'s own run stands only as declared evidence'
+  assert.deepEqual(verify.gateMessage('booking', result).split('\n'), [
+    'cc-tiers gate: booking not validated: outside verify_allow: make test CENARIO=x (add `make test` to verify_allow in /config, keeping the entries already there)' + tail,
+    'cc-tiers gate: booking not validated: refused flag --import: node --test --import ./x.mjs' + tail,
+    'cc-tiers gate: booking not validated: refused shell metacharacter: npm test; id' + tail,
+    'cc-tiers gate: booking not validated: checked the screen by hand',
+    'cc-tiers gate: booking not validated: changed the tree: a.txt',
+  ])
+  const budget = scripted({ code: 0, ms: 50000 })
+  const cut = verify.runGate('CC_TIERS_VERIFY: npm test\nCC_TIERS_VERIFY: npx tsc', { projectDir: PROJECT, allow: ALLOW, timeoutS: 60, budgetS: 50, run: budget.run })
+  assert.equal(verify.gateMessage('booking', cut).split('\n')[1], 'cc-tiers gate: booking not validated: budget exhausted: npx tsc' + tail)
+  assert.equal(verify.gateMessage('booking', { status: 'unverified', verified: [], flaky: [], unverified: [{ raw: '', reason: 'no project dir' }], failure: null }), 'cc-tiers gate: booking not validated: no project dir')
+})
+
+test('a Makefile target, a composer script and a syntax check the project declares run without an entry', async () => {
+  const { availableChecks } = await import(pathToFileURL(path.join(ROOT, 'hooks', 'policy.mjs')).href)
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-verify-make-'))
+  try {
+    await writeFile(path.join(dir, 'Makefile'), '.PHONY: test lint\ntest:\n\t@true\n')
+    await writeFile(path.join(dir, 'composer.json'), '{"scripts":{"analyse":"phpstan"}}')
+    const detected = availableChecks(dir).map(({ command }) => command.split(/\s+/))
+    const { run, calls } = scripted()
+    const result = verify.runGate(
+      'CC_TIERS_VERIFY: make test\nCC_TIERS_VERIFY: composer analyse\nCC_TIERS_VERIFY: make lint\nCC_TIERS_VERIFY: make test CENARIO=x',
+      { projectDir: dir, allow: [], detected, timeoutS: 60, budgetS: 600, run },
+    )
+    assert.deepEqual(calls.map((call) => call.cmd.argv.join(' ')), ['make test', 'composer analyse'])
+    assert.deepEqual(result.verified, ['make test', 'composer analyse'])
+    assert.deepEqual(result.unverified.map((item) => item.raw), ['make lint', 'make test CENARIO=x'])
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 })

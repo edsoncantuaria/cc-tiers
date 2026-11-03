@@ -39,9 +39,7 @@ const HEDGES = [
 const TEST_DIRS = ['test', 'tests', '__tests__', 'spec']
 const TEST_FILES = ['pytest.ini', 'phpunit.xml', 'phpunit.xml.dist', 'go.mod', 'Cargo.toml']
 const NPM_PLACEHOLDER = 'echo "Error: no test specified" && exit 1'
-// A `test:` rule, not `.PHONY: test` or a `test := x` assignment.
-const MAKEFILES = ['GNUmakefile', 'makefile', 'Makefile']
-const MAKE_TEST_RULE_RE = /^test\s*:(?!=)/m
+export const MAKEFILES = ['GNUmakefile', 'makefile', 'Makefile']
 
 export function riskRank(level) {
   return RISK_LEVELS.indexOf(level)
@@ -183,9 +181,10 @@ function hasTestScript(manifestPath) {
   }
 }
 
-function hasMakeTestRule(makefilePath) {
+/** A `<target>:` rule line, not `.PHONY: test`, a `test := x` or `test ::= x` assignment, or a recipe line. */
+export function hasMakeRule(makefilePath, target) {
   try {
-    return MAKE_TEST_RULE_RE.test(readFileSync(makefilePath, 'utf8'))
+    return new RegExp(`^${target}\\s*:(?!:?=)`, 'm').test(readFileSync(makefilePath, 'utf8'))
   } catch {
     return false
   }
@@ -198,7 +197,7 @@ export function testsAvailableIn(projectDir) {
     const isDir = (name) => existsSync(path.join(projectDir, name)) && statSync(path.join(projectDir, name)).isDirectory()
     if (readdirSync(projectDir).some((name) => TEST_DIRS.includes(name.toLowerCase()) && isDir(name))) return true
     if (TEST_FILES.some((name) => existsSync(path.join(projectDir, name)))) return true
-    return hasTestScript(path.join(projectDir, 'package.json')) || hasTestScript(path.join(projectDir, 'composer.json')) || MAKEFILES.some((name) => hasMakeTestRule(path.join(projectDir, name)))
+    return hasTestScript(path.join(projectDir, 'package.json')) || hasTestScript(path.join(projectDir, 'composer.json')) || MAKEFILES.some((name) => hasMakeRule(path.join(projectDir, name), 'test'))
   } catch {
     return null
   }

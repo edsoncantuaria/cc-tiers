@@ -235,7 +235,7 @@ test('testsAvailableIn reads the project directory', async () => {
     assert.equal(testsAvailableIn(await make('make-rule-spaced', { Makefile: 'test : build\n\tgo test\n' })), true)
     // make also reads makefile and GNUmakefile.
     for (const name of ['makefile', 'GNUmakefile']) assert.equal(testsAvailableIn(await make(`make-name-${name}`, { [name]: 'test:\n\tgo test\n' })), true, name)
-    for (const [name, body] of Object.entries({ phony: '.PHONY: test\nbuild:\n\ttrue\n', longer: 'tests:\n\ttrue\n', assign: 'test := 1\n', recipe: 'build:\n\ttest: nothing\n', empty: '' })) {
+    for (const [name, body] of Object.entries({ phony: '.PHONY: test\nbuild:\n\ttrue\n', longer: 'tests:\n\ttrue\n', assign: 'test := 1\n', assignPosix: 'test ::= 1\n', recipe: 'build:\n\ttest: nothing\n', empty: '' })) {
       assert.equal(testsAvailableIn(await make(`make-${name}`, { Makefile: body })), false, name)
     }
     // composer.json: a scripts.test command or list of commands, not an empty one.

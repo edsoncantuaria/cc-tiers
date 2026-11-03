@@ -27,6 +27,7 @@ const CODE_SHORT_FLAGS = ['-r', '-e', '-p', '-pe']
 const TAIL_LINES = 40
 const MAX_BUFFER = 32 * 1024 * 1024
 const MAX_CHANGED = 5
+const TREE_CHANGED = 'changed the tree'
 
 /** Splits on whitespace, honoring '...' and "..." with no escapes; null on an unclosed quote. */
 function tokenize(text) {
@@ -148,13 +149,29 @@ export function wrappedCommand(argv) {
   return i + 1 < argv.length ? argv.slice(i + 1) : null
 }
 
+/** Checks that only parse: the prefix plus one file of that tool; any other token can be an option (bash +n), a subcommand (node inspect) or an unchecked script argument (php before 8.3). */
+const SYNTAX_CHECKS = [
+  { prefix: ['php', '-l'], file: /\.(php|phtml|inc)$/ },
+  { prefix: ['bash', '-n'], file: /\.(sh|bash)$/ },
+  { prefix: ['sh', '-n'], file: /\.(sh|bash)$/ },
+  { prefix: ['node', '--check'], file: /\.(js|mjs|cjs)$/ },
+]
+
+function isSyntaxCheck(argv) {
+  return SYNTAX_CHECKS.some(({ prefix, file }) => {
+    const target = argv[prefix.length]
+    return argv.length === prefix.length + 1 && prefix.every((token, i) => argv[i] === token) && file.test(target) && !/^[-+]/.test(target)
+  })
+}
+
 /**
- * True when the gate may run argv: the allow list covers it, it is one of the commands cc-tiers
- * detected in the project (exactly, not as a prefix), or it is a wrapper around such a command.
+ * True when the gate may run argv: the allow list covers it, it is a syntax-only check on one file,
+ * it is one of the commands cc-tiers detected in the project (exactly, not as a prefix), or it is a wrapper around such a command.
  * A wrapped line with leading env is refused: DOCKER_CONFIG, DOCKER_HOST and the like choose what docker runs.
  */
 export function gateAllows(argv, allow, detected = [], env = {}) {
-  const covered = (tokens) => isAllowed(tokens, allow) || detected.some((entry) => entry.length === tokens.length && entry.every((token, i) => token === tokens[i]))
+  const covered = (tokens) =>
+    isAllowed(tokens, allow) || isSyntaxCheck(tokens) || detected.some((entry) => entry.length === tokens.length && entry.every((token, i) => token === tokens[i]))
   if (covered(argv)) return true
   const inner = Object.keys(env || {}).length ? null : wrappedCommand(argv)
   return Boolean(inner) && covered(inner)
@@ -163,13 +180,13 @@ export function gateAllows(argv, allow, detected = [], env = {}) {
 /** Programs that run whatever code follows them (bash -c, python -c): an entry of the bare name would allow anything. */
 const INTERPRETERS = new Set(['bash', 'sh', 'zsh', 'dash', 'fish', 'python', 'python3', 'node', 'php', 'ruby', 'perl', 'deno', 'bun', 'pwsh', 'powershell'])
 
-/** The narrowest verify_allow entry that covers this command on other files: it without the paths it ends with. */
+/** The narrowest verify_allow entry that covers this command on other files: it without the paths and NAME=value arguments it ends with. */
 export function allowPrefix(argv) {
   const tokens = wrappedCommand(argv) || argv
   // An interpreter keeps its script or subcommand, so the entry never allows its -c.
   const keep = INTERPRETERS.has(String(tokens[0]).toLowerCase()) ? 2 : 1
   let end = tokens.length
-  while (end > keep && /[\\/]|\.\w+$|^\.+$/.test(tokens[end - 1])) end -= 1
+  while (end > keep && /[\\/]|\.\w+$|^\.+$|^[A-Za-z_]\w*=/.test(tokens[end - 1])) end -= 1
   return tokens.slice(0, end).join(' ')
 }
 
@@ -281,7 +298,7 @@ export function runGate(text, { projectDir, allow, detected = [], timeoutS, budg
     } else {
       const changed = before ? attemptChanges(before, snapshot()) : []
       if (changed.length) {
-        skip(line.raw, `changed the tree: ${changed.slice(0, MAX_CHANGED).join(', ')}`)
+        skip(line.raw, `${TREE_CHANGED}: ${changed.slice(0, MAX_CHANGED).join(', ')}`)
       } else {
         gate.verified.push(line.raw)
         if (retried) gate.flaky.push(line.raw)
@@ -298,6 +315,11 @@ export function gateFailure(gate) {
   return gate.failure || gate.preexisting || null
 }
 
+/** A command line the gate did not run: not a `none` declaration, not a missing project dir, not a command that ran and changed the tree. */
+function notRerun(item) {
+  return Boolean(item.raw) && !/^none\b/.test(item.raw) && !String(item.reason).startsWith(TREE_CHANGED)
+}
+
 /** The gate lines, one per fact; commands join with '; ' since a command never holds one. */
 export function gateMessage(task, gate) {
   const prefix = `cc-tiers gate: ${task}`
@@ -306,7 +328,9 @@ export function gateMessage(task, gate) {
   if (gate.verified.length) lines.push(`${prefix} verified: ${gate.verified.join('; ')}`)
   if (gate.cached?.length) lines.push(`${prefix} reused for the same tree: ${gate.cached.join('; ')}`)
   for (const raw of gate.flaky) lines.push(`${prefix} flaky: ${raw}`)
-  for (const item of gate.unverified) lines.push(`${prefix} not validated: ${item.reason}`)
+  for (const item of gate.unverified) {
+    lines.push(`${prefix} not validated: ${item.reason}${notRerun(item) ? " - not re-run: the writer's own run stands only as declared evidence" : ''}`)
+  }
   if (gate.treeCheck) lines.push(`${prefix} tree check ${gate.treeCheck} in this tree`)
   const failure = gateFailure(gate)
   if (failure?.timedOut) lines.push(`${prefix} timed out: ${failure.raw} after ${failure.seconds} s`)

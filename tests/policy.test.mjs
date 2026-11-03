@@ -110,6 +110,59 @@ test('availableChecks detects php, python, go and rust projects', async () => {
   })
 })
 
+test('availableChecks detects the Makefile rules test, check and lint as make targets', async () => {
+  const rules = 'build:\n\tgo build\n\ntest:\n\t@go test ./...\n\ncheck : test\n\t@true\n\nlint::\n\t@true\n\ndeploy:\n\t@true\n'
+  await withProject({ Makefile: rules }, (dir) => {
+    assert.deepEqual(availableChecks(dir), [
+      { kind: 'test', command: 'make test' },
+      { kind: 'test', command: 'make check' },
+      { kind: 'lint', command: 'make lint' },
+    ])
+  })
+  for (const name of ['makefile', 'GNUmakefile']) {
+    await withProject({ [name]: 'test:\n\t@true\n' }, (dir) => assert.deepEqual(commands(availableChecks(dir)), ['make test'], name))
+  }
+  await withProject({ Makefile: 'test:\n\t@true\n', makefile: 'test:\n\t@true\n' }, (dir) => assert.deepEqual(commands(availableChecks(dir)), ['make test']))
+})
+
+test('availableChecks does not take .PHONY, an assignment, a recipe line or a longer name for a Makefile rule', async () => {
+  const bodies = {
+    phony: '.PHONY: test check lint\nbuild:\n\ttrue\n',
+    assign: 'test := 1\ncheck ::= 2\nlint = 3\n',
+    recipe: 'build:\n\ttest: nothing\n\tcheck: nothing\n',
+    longer: 'tests:\n\ttrue\ntest-unit:\n\ttrue\nchecks:\n\ttrue\nlinter:\n\ttrue\n',
+    empty: '',
+  }
+  for (const [name, body] of Object.entries(bodies)) {
+    await withProject({ Makefile: body }, (dir) => assert.deepEqual(availableChecks(dir), [], name))
+  }
+})
+
+test('availableChecks detects the composer scripts test, lint and analyse or analyze', async () => {
+  const scripts = { test: 'phpunit', lint: ['phpcs', '@php -l x.php'], analyse: 'phpstan analyse', analyze: 'phpstan analyse', fix: 'phpcbf', 'post-install-cmd': 'x' }
+  await withProject({ 'composer.json': JSON.stringify({ scripts }) }, (dir) => {
+    assert.deepEqual(availableChecks(dir), [
+      { kind: 'test', command: 'composer test' },
+      { kind: 'lint', command: 'composer lint' },
+      { kind: 'static', command: 'composer analyse' },
+      { kind: 'static', command: 'composer analyze' },
+    ])
+  })
+  const none = [
+    '{"name":"x"}',
+    '{"scripts":{"fix":"phpcbf"}}',
+    '{"scripts":{"test":"","lint":[],"analyse":"  "}}',
+    '{"scripts":"x"}',
+    '{nope',
+  ]
+  for (const body of none) await withProject({ 'composer.json': body }, (dir) => assert.deepEqual(availableChecks(dir), [], body))
+})
+
+test('availableChecks keeps the npm, make and composer checks side by side', async () => {
+  const files = { 'package.json': JSON.stringify({ scripts: { test: 'node --test' } }), Makefile: 'check:\n\t@true\n', 'composer.json': '{"scripts":{"test":"phpunit"}}' }
+  await withProject(files, (dir) => assert.deepEqual(commands(availableChecks(dir)), ['npm test', 'composer test', 'make check']))
+})
+
 test('availableChecks never throws and has no duplicates', async () => {
   assert.deepEqual(availableChecks(''), [])
   assert.deepEqual(availableChecks(undefined), [])
