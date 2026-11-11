@@ -32,7 +32,10 @@ const MAX_EVIDENCE_LINES = 3
 /** What a real environment failure prints; a test name or assertion message can carry the words but not these codes. */
 const COMMAND_MISSING = /command not found|spawn \S+ enoent/
 const DEPENDENCY_MACHINE = new RegExp(`cannot find module|cannot find package|modulenotfounderror|err_module_not_found|no module named|${COMMAND_MISSING.source}`)
-const INFRA_MACHINE = /econnrefused|enotfound|eaddrinuse|etimedout|enospc|eai_again|javascript heap out of memory|cannot connect to the docker daemon/
+// From `database is locked` on: a lock or resource another run holds (a database, a flock wrapper, a busy device), which a rerun clears.
+// Prose such as `is in use` or `is already running` is left out: an application's own error says it too.
+const INFRA_MACHINE =
+  /econnrefused|enotfound|eaddrinuse|etimedout|enospc|eai_again|javascript heap out of memory|cannot connect to the docker daemon|database is locked|could not (?:obtain|acquire|get) (?:an? |the )?(?:\w+ )?lock\b|resource (?:temporarily unavailable|busy)|(?:another|outr[ao]) \w+ (?:holds|has|tem) (?:the|a) (?:lock|trava)/
 
 /** The module a Node or Python import error names; a specifier that starts like a path, alias or subpath import is the project's own file. */
 const MISSING_NODE_RE = /cannot find (?:module|package) ['"]([^'"]+)['"]/i

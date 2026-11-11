@@ -3011,6 +3011,34 @@ test('the declared pre-existing command no longer hides a failing command listed
   }
 })
 
+test('a pre-existing line that cds to the absolute project dir behaves like its relative form', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-pre-abs-'))
+  try {
+    mkdirSync(path.join(dir, 'api'))
+    writeFileSync(path.join(dir, 'api', 'f.mjs'), 'process.exit(1)\n')
+    const routing = { ...defaultRouting({ specify: 'off' }), verifyAllow: [['node', 'f.mjs']] }
+    const run = (folder) => {
+      const command = `cd ${folder} && node f.mjs`
+      const text = [report('implementer', 'sonnet', 'pass'), `CC_TIERS_VERIFY: ${command}`, `CC_TIERS_PREEXISTING: ${command} - fails on main`].join('\n')
+      const state = tiers.emptyState('s')
+      const prepared = tiers.prepareReport({ routing, projectDir: dir }, tiers.normalizeEvent(event('a', 'implementer', text)))
+      return { state, gate: prepared.gate, applied: tiers.applyEvent(state, prepared, routing), command }
+    }
+
+    for (const folder of ['api', path.join(dir, 'api')]) {
+      const { state, gate, applied, command } = run(folder)
+      assert.equal(gate.failure, null, folder)
+      assert.equal(gate.preexisting.raw, command, folder)
+      assert.equal(applied.meta.outcome, 'review', folder)
+      assert.equal(state.tasks['users-pagination'].preexisting, 1, folder)
+      assert.deepEqual(state.tasks['users-pagination'].failures, [], folder)
+      assert.deepEqual(state.evidence['users-pagination'].preexisting, { command, evidence: 'fails on main' }, folder)
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('a checker can neither be delegated nor finish a task whose failure was declared pre-existing', () => {
   const routing = defaultRouting({ specify: 'off', research: 'off' })
   const state = tiers.emptyState('s')

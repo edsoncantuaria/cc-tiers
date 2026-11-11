@@ -357,10 +357,10 @@ test('a failed gate command that cannot import a package is classified against t
     counts('assertion.mjs', undefined)
     counts('mixed.mjs', undefined)
     const hang = run('hang.mjs')
-    assert.equal(hang.gate.failure.timedOut, true)
-    assert.match(hang.gate.failure.tail, /Cannot find module 'zzdeclared'/, 'the timed-out tail names a declared package, and a timeout still counts')
+    assert.equal(hang.gate.failure, null, 'a timeout is not a failure')
+    assert.match(hang.gate.unverified[0].reason, /^timed out after 1 s: node hang\.mjs$/)
     assert.equal(hang.gate.missing, undefined)
-    assert.equal(hang.applied.meta.outcome, 'retry')
+    assert.equal(hang.applied.meta.outcome, 'review')
 
     // The package is installed: a miss inside it (CJS names the subpath) or a bare miss with its directory present is the code's.
     mkdirSync(path.join(project, 'node_modules', 'zzdeclared'), { recursive: true })

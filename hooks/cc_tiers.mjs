@@ -1622,7 +1622,7 @@ export function applyEvent(state, event, routing) {
     }
     // A failure the writer declares the base already had: not counted once per task, and only an Opus review that confirms it lets the task finish.
     // Only when every other command ran and passed: any other failing command is gate.failure and counts as always.
-    const declared = declaredPreexisting(event.text)
+    const declared = declaredPreexisting(event.text, event.projectDir)
     const used = Number(current.preexisting) || 0
     const othersPassed = !meta.gate.failure && !meta.gate.unverified.length
     if (declared && declared.raw === meta.gate.preexisting?.raw && othersPassed && used < MAX_PREEXISTING_SKIPS && routing.reviewPolicy !== 'never') {
@@ -1735,9 +1735,9 @@ const MAX_INFRA_SKIPS = 2
 const MAX_PREEXISTING_SKIPS = 1
 
 /** The CC_TIERS_VERIFY line a writer's report declares failing without its change, with the evidence; null when it names none or gives no evidence. */
-function declaredPreexisting(text) {
+function declaredPreexisting(text, projectDir = '') {
   const declared = oneSpacing(parseHeaders(text || '').PREEXISTING)
-  for (const line of parseVerify(text)) {
+  for (const line of parseVerify(text, { projectDir })) {
     const command = line.kind === 'command' ? oneSpacing(line.raw) : ''
     if (command && declared.startsWith(`${command} - `)) return { raw: line.raw, command, evidence: clip(declared.slice(command.length + 3), 200) }
   }
@@ -3350,13 +3350,14 @@ export function prepareReport(ctx, event, payload = {}, { budgetS = ctx.routing.
   // Another writer sharing the tree may save files while the command runs; its edits are not this command's.
   const writing = peek?.writing || []
   const snapshot = projectDir && !writing.length ? () => workspaceSnapshot(projectDir) : null
-  const preexisting = declaredPreexisting(event.text)?.raw || ''
+  const preexisting = declaredPreexisting(event.text, projectDir)?.raw || ''
   const options = { projectDir, allow: routing.verifyAllow, detected: detectedChecks(projectDir), detectedIn: detectedChecks, timeoutS: routing.verifyTimeout, budgetS, cached, snapshot, preexisting, lock: gateLock(ctx.dataDir, projectDir) }
   if (projectDir) {
     const treeCheck = writing.length ? { treeCheck: `skipped: ${writing.join(', ')} still writing` } : {}
     const gate = { ...runGate(event.text, options), tree, ...treeCheck }
     const missing = missingFromGate(gate, projectDir)
-    return { ...event, gate: missing ? { ...gate, missing } : gate }
+    // applyEvent reads the declared pre-existing line again and needs the same dir to parse a cd to an absolute path.
+    return { ...event, projectDir, gate: missing ? { ...gate, missing } : gate }
   }
   // Nothing may run without a project dir; a declaration still tells missing from not validated.
   const gate = parseVerify(event.text).length ? 'unverified' : 'missing'
