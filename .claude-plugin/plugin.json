@@ -1,6 +1,6 @@
 {
   "name": "cc-tiers",
-  "version": "0.13.1",
+  "version": "0.13.2",
   "description": "Claude Code plugin for work done right the first time: it researches the installed versions, writes the acceptance criteria, has the work reviewed by Opus in a fresh context, and re-runs the checks before a pass counts. Each task runs on the model it needs.",
   "author": {
     "name": "edsoncantuaria",
