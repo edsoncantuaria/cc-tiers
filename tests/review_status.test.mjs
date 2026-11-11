@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import os from 'node:os'
@@ -775,6 +775,124 @@ test('the same report from SubagentStop and from the main transcript is counted 
 
     // A resumed run that reports the same text is a new attempt: the pair was already matched.
     assert.equal(stopAgent(dir, env, 'agent-c', 'implementer', 'c2', { handback: third }).tasks['report-export'].tier, 'opus')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+/** The frame the harness puts around a hand-back: a preamble, then the report with every line indented (shape taken from a real session). */
+const handbackBody = (text) =>
+  `[Subagent hand-back] The text below is the final report of a subagent this session delegated to. The report follows:\n${text.split('\n').map((line) => `  ${line}`).join('\n')}`
+
+/** A hand-back that arrives while the session is mid-turn: a queued_command attachment, with no handbackReportText. */
+const queuedHandbackRow = (agentId, text, uuid) =>
+  JSON.stringify({
+    type: 'attachment',
+    isSidechain: false,
+    uuid,
+    attachment: {
+      type: 'queued_command',
+      prompt: `<agent-message from="${agentId}">\n${handbackBody(text)}\n</agent-message>`,
+      commandMode: 'prompt',
+      origin: { kind: 'peer', from: agentId, senderTaskId: agentId, body: handbackBody(text), handback: true },
+      isMeta: true,
+    },
+  })
+
+test('a hand-back queued mid-turn or carried only in origin.body counts as its agent\'s report', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-status-'))
+  try {
+    const env = { ...hookEnv(dir), CLAUDE_PLUGIN_OPTION_VERIFY: 'off' }
+    const transcript = path.join(dir, 'main.jsonl')
+    writeFileSync(transcript, '')
+    launchAgent(env, 'agent-r', 'researcher', RESEARCH_PROMPT)
+    launchAgent(env, 'agent-w', 'implementer', WRITER_PROMPT.replace('users-pagination', 'csv-export'))
+    // Each SubagentStop saw no status: the hand-back was not in the agent transcript yet.
+    stopAgent(dir, env, 'agent-r', 'researcher', 'r1', { last: '' })
+    stopAgent(dir, env, 'agent-w', 'implementer', 'w1', { last: '' })
+    const research = trailer('researcher', 'pass')
+    const writer = trailer('implementer', 'fail').replace('users-pagination', 'csv-export')
+    appendRows(
+      transcript,
+      queuedHandbackRow('agent-r', research, 'q1'),
+      handbackRow('agent-w', writer, 'u1', { handbackReportText: undefined, body: handbackBody(writer) }),
+    )
+    scanMain(env, transcript)
+    assert.deepEqual(sessionState(dir).researched, { 'users-pagination': true })
+    endTurn(env, transcript)
+    const state = sessionState(dir)
+    assert.equal(state.tasks['csv-export'].failures.length, 1)
+    assert.equal(state.log['csv-export'].failures, 1)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('SubagentStop reads the hand-back, not a reworded last message, so the row of that report is its twin', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-status-'))
+  try {
+    const env = { ...hookEnv(dir), CLAUDE_PLUGIN_OPTION_VERIFY: 'off' }
+    const transcript = path.join(dir, 'main.jsonl')
+    writeFileSync(transcript, '')
+    launchAgent(env, 'agent-w', 'implementer', WRITER_PROMPT)
+    const handed = trailer('implementer', 'fail', ['CC_TIERS_REASON: make lint nao rodou no catalogo'])
+    const last = trailer('implementer', 'fail', ['CC_TIERS_REASON: make lint não rodou no catálogo'])
+    assert.equal(stopAgent(dir, env, 'agent-w', 'implementer', 'w1', { handback: handed, last }).tasks['users-pagination'].failures.length, 1)
+    appendRows(transcript, handbackRow('agent-w', handed, 'u1'))
+    endTurn(env, transcript)
+    assert.equal(sessionState(dir).tasks['users-pagination'].failures.length, 1, 'the row repeats the stop')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('agentHandbackReport reads only the latest run: a hand-back before a SendMessage resume is not the next stop\'s report', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-status-'))
+  try {
+    const file = path.join(dir, 'agent.jsonl')
+    // Shapes taken from real subagent transcripts: a harness nudge (no origin) stays in the run, a SendMessage (coordinator) starts a new one.
+    const nudge = JSON.stringify({ type: 'user', isMeta: true, message: { role: 'user', content: '[Your previous response had no visible output.]' } })
+    const resumed = JSON.stringify({ type: 'user', isMeta: true, origin: { kind: 'coordinator' }, message: { role: 'user', content: 'Your report had no status. Send only the trailer.' } })
+    writeFileSync(file, `${[assistantRow([HANDBACK(trailer('implementer', 'fail'))], 'm1'), HANDBACK_RESULT, nudge].join('\n')}\n`)
+    assert.match(tiers.agentHandbackReport(file), /STATUS: fail/)
+    appendRows(file, resumed)
+    assert.equal(tiers.agentHandbackReport(file), '')
+    appendRows(file, assistantRow([HANDBACK(trailer('implementer', 'pass'))], 'm2'))
+    assert.match(tiers.agentHandbackReport(file), /STATUS: pass/)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('SubagentStop waits briefly for a hand-back the agent transcript has not written yet', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-status-'))
+  try {
+    const env = { ...hookEnv(dir), CLAUDE_PLUGIN_OPTION_VERIFY: 'off' }
+    launchAgent(env, 'agent-r', 'researcher', RESEARCH_PROMPT)
+    const file = path.join(dir, 'r1.jsonl')
+    writeFileSync(file, '')
+    const child = spawn(process.execPath, [path.join(ROOT, 'hooks', 'subagent_stop.mjs')], { env, stdio: ['pipe', 'ignore', 'pipe'] })
+    child.stdin.end(JSON.stringify({ ...stopPayload('agent-r', file, ''), agent_type: 'cc-tiers:researcher' }))
+    setTimeout(() => writeFileSync(file, [assistantRow([HANDBACK(trailer('researcher', 'pass'))], 'm-r1'), HANDBACK_RESULT].join('\n')), 300)
+    const code = await new Promise((resolve) => child.on('close', resolve))
+    assert.equal(code, 0)
+    assert.deepEqual(sessionState(dir).researched, { 'users-pagination': true })
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('SubagentStop of an agent cc-tiers did not launch in the background does not wait for a hand-back', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-status-'))
+  try {
+    const env = { ...hookEnv(dir), CLAUDE_PLUGIN_OPTION_VERIFY: 'off' }
+    const file = path.join(dir, 'x1.jsonl')
+    writeFileSync(file, '')
+    const started = Date.now()
+    const stop = run('subagent_stop.mjs', { ...stopPayload('agent-x', file, 'done, no trailer'), agent_type: 'cc-tiers:reviewer' }, env)
+    assert.equal(stop.status, 0, stop.stderr)
+    // The wait is 10 x 200 ms; a hook that skips it ends well before that.
+    assert.ok(Date.now() - started < 1500, `took ${Date.now() - started} ms`)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

@@ -63,7 +63,7 @@ function isCodeFlag(token) {
   return name.startsWith('--') && name.length > 2 && CODE_FLAGS.some((flag) => flag.startsWith(name))
 }
 
-function parseLine(raw, platform = process.platform) {
+function parseLine(raw, platform = process.platform, projectDir = '') {
   const meta = metaRe(platform)
   const none = NONE_RE.exec(raw)
   if (none) return { raw, kind: 'none', reason: none[1] }
@@ -75,8 +75,12 @@ function parseLine(raw, platform = process.platform) {
   if (cd) {
     const dir = tokenize(cd[1])
     if (!dir || dir.length !== 1 || meta.test(cd[1])) return invalid('refused cd dir')
-    if (path.isAbsolute(dir[0]) || path.win32.isAbsolute(dir[0])) return invalid('cd dir must be relative')
     cwd = dir[0]
+    if (path.isAbsolute(cwd) || path.win32.isAbsolute(cwd)) {
+      // An absolute dir inside the project is the same dir as its relative form; with no project to compare to, nothing is inside.
+      cwd = projectDir && path.isAbsolute(cwd) ? projectRelative(projectDir, cwd) : null
+      if (cwd === null) return invalid('cd dir outside the project')
+    }
     rest = cd[2]
   }
   if (meta.test(rest)) return invalid('refused shell metacharacter')
@@ -95,12 +99,12 @@ function parseLine(raw, platform = process.platform) {
   return { raw, kind: 'command', argv: tokens, env, cwd }
 }
 
-/** Every CC_TIERS_VERIFY line of the report text, in order. */
-export function parseVerify(text, { platform = process.platform } = {}) {
+/** Every CC_TIERS_VERIFY line of the report text, in order; projectDir lets a cd to an absolute dir inside it parse as its relative form. */
+export function parseVerify(text, { platform = process.platform, projectDir = '' } = {}) {
   const lines = []
   for (const line of String(text || '').split(/\r?\n/)) {
     const match = VERIFY_RE.exec(line.trim())
-    if (match) lines.push(parseLine(match[1], platform))
+    if (match) lines.push(parseLine(match[1], platform, projectDir))
   }
   return lines
 }
@@ -190,13 +194,17 @@ export function allowPrefix(argv) {
   return tokens.slice(0, end).join(' ')
 }
 
-/** Real paths when the dir exists, so a symlink cannot lead out; a missing dir is judged by its path. */
-function insideProject(projectDir, cwd) {
+/** The path from the project to cwd, null when it leaves the project. Real paths when the dir exists, so a symlink cannot lead out; a missing dir is judged by its path. */
+function projectRelative(projectDir, cwd) {
   const resolved = path.resolve(projectDir)
   const wanted = path.resolve(resolved, cwd || '.')
   const real = existsSync(resolved) && existsSync(wanted)
   const rel = real ? path.relative(realpathSync(resolved), realpathSync(wanted)) : path.relative(resolved, wanted)
-  return rel === '' || (rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel))
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel)) ? rel : null
+}
+
+function insideProject(projectDir, cwd) {
+  return projectRelative(projectDir, cwd) !== null
 }
 
 /** Whether dir or a parent holds a .git entry: a directory, or a file in a linked worktree. */
@@ -254,6 +262,7 @@ export function runCommand(cmd, { projectDir, timeoutS }) {
  * snapshot() returns the tree state (null outside git): a command that changes it, retry included, is not evidence.
  * preexisting is the raw command the writer declared failing without its change: its failure is kept apart
  * in gate.preexisting and the other commands still run; any other failure is gate.failure and stops the gate.
+ * A command that runs into the timeout is not a failure: it is left not validated and the next lines still run.
  * lock(waitS) takes the project's gate lock before the first command runs, waiting up to waitS, and returns its release or null:
  * a gate that cannot get it within its budget leaves its commands not validated, so two gates of a project never run at once.
  * detected is what the project dir declares; detectedIn(dir) is what a cd dir declares, which a line with a cd may also run.
@@ -262,7 +271,7 @@ export function runCommand(cmd, { projectDir, timeoutS }) {
  */
 export function runGate(text, { projectDir, allow, detected = [], detectedIn = () => [], timeoutS, budgetS, run = runCommand, cached = null, snapshot = null, preexisting = '', lock = null }) {
   const gate = { status: 'unverified', verified: [], flaky: [], unverified: [], failure: null, cached: [] }
-  const lines = parseVerify(text)
+  const lines = parseVerify(text, { projectDir })
   if (!lines.length) return { ...gate, status: 'missing' }
   let remaining = budgetS
   let release = null
@@ -333,12 +342,15 @@ export function runGate(text, { projectDir, allow, detected = [], detectedIn = (
       let retried = false
       if (!result.timedOut && result.code !== 0 && remaining > 0) {
         const retry = attempt(line)
-        // A retry cut short by the budget proves nothing, so the first failure stands; so does one with no budget left.
-        if (!(retry.timedOut && retry.seconds < timeoutS)) [result, retried] = [retry, true]
+        // A retry that timed out proves nothing, so the first failure stands.
+        if (!retry.timedOut) [result, retried] = [retry, true]
       }
       if (result.timedOut && result.seconds < timeoutS) {
         exhausted(line.raw)
-      } else if (result.timedOut || result.code !== 0) {
+      } else if (result.timedOut) {
+        // A suite longer than the limit is the environment's, not the code's: the writer's own run stands as declared and the review still runs.
+        skip(line.raw, `timed out after ${result.seconds} s: ${line.raw}`)
+      } else if (result.code !== 0) {
         const failure = { raw: line.raw, code: result.code, timedOut: result.timedOut, tail: result.tail, seconds: result.seconds }
         if (preexisting && line.raw === preexisting) gate.preexisting = gate.preexisting || failure
         else gate.failure = failure

@@ -193,6 +193,22 @@ test('renderInsights sorts by count and marks cost as estimated', () => {
   assert.ok(!text.includes('Escalation reasons'))
 })
 
+test('failure.uncounted is a known event, kept in reduced telemetry, and insights take that failure out of the rework figures', () => {
+  assert.ok(REDUCED_TYPES.includes('failure.uncounted'))
+  assert.deepEqual(sanitizeEvent({ type: 'failure.uncounted', task: 'a', tier: 'sonnet', category: 'test', source: 'respec', prompt: 'secret' }), { type: 'failure.uncounted', task: 'a', tier: 'sonnet', category: 'test', source: 'respec' })
+  const summary = summarize([
+    { type: 'failure.diagnosed', task: 'a', category: 'test' },
+    { type: 'failure.uncounted', task: 'a', category: 'test', source: 'respec' },
+    { type: 'failure.diagnosed', task: 'b', category: 'type' },
+    { type: 'task.passed', task: 'a' },
+  ])
+  assert.equal(summary.uncounted, 1)
+  assert.deepEqual(summary.byCategory, { type: 1 })
+  assert.deepEqual(summary.rework, { tasks: 1, total: 2 })
+  assert.match(renderInsights(summary), /Failures not counted after a spec correction \(CC_TIERS_RESPEC\): 1\./)
+  assert.ok(!renderInsights(summarize([{ type: 'task.passed', task: 'a' }])).includes('not counted'))
+})
+
 function started(task, tier, risk = 'medium') {
   return { type: 'model.selected', task, tier, role: 'implementer', effort: 'medium', risk }
 }

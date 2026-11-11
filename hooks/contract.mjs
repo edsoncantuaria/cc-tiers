@@ -103,14 +103,35 @@ export function oneSpacing(text) {
   return String(text ?? '').split(/\s+/).filter(Boolean).join(' ')
 }
 
+const CD_RE = /^cd\s+(\S+)\s+&&\s+(.*)$/
+
+/** A command line split into its `cd <dir> &&` prefix (dir '' when none) and the command itself. */
+function splitCd(text) {
+  const line = oneSpacing(text)
+  const cd = CD_RE.exec(line)
+  return cd ? { dir: cd[1].replace(/^(\.\/)+/, '').replace(/\/+$/, ''), command: cd[2] } : { dir: '', command: line }
+}
+
+/** True when the verified line is the criterion's command; a criterion without a cd is credited behind any cd, one with a cd needs the same dir. */
+function sameCommand(verified, check) {
+  const line = splitCd(verified)
+  const wanted = splitCd(check)
+  return line.command === wanted.command && (!wanted.dir || line.dir === wanted.dir)
+}
+
 /** True when the evidence names the command as whole tokens: not inside a longer word, flag or path. */
 function namesCommand(evidence, command) {
   const escaped = oneSpacing(command).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   return new RegExp(`(?<=^|[\\s\`'"(])${escaped}(?=$|[\\s\`'"]|[.,;:!?)\\]](?:\\s|$))`).test(oneSpacing(evidence))
 }
 
+/** True when the criterion is a check of this command, with the cd rule of sameCommand. */
+export function checksCommand(criterion, command) {
+  return Boolean(criterion?.check) && sameCommand(command, criterion.check)
+}
+
 /** The criteria with the state the evidence supports: a declared pass alone is not evidence until a verified command or a passed review backs it. */
-export function evaluateCriteria(contract, { reports = [], verified = [], repro = [], reviewPassed = false, failedCriteria = [] } = {}) {
+export function evaluateCriteria(contract, { reports = [], verified = [], repro = [], reviewPassed = false, failedCriteria = [], preexisting = '' } = {}) {
   const reported = new Map()
   for (const report of reports) reported.set(String(report.id).toUpperCase(), report)
   const failed = new Set(failedCriteria.map(criterionKey))
@@ -118,13 +139,17 @@ export function evaluateCriteria(contract, { reports = [], verified = [], repro 
     const report = reported.get(criterion.id)
     const evaluated = (state, evidenced, evidence) => ({ ...criterion, state, evidenced, evidence })
     if (failed.has(criterionKey(criterion.text))) return evaluated('fail', false, report?.evidence || 'reviewer finding')
+    // A check of the command the writer declared pre-existing is reported, not failed: it never counts as evidence either.
+    if (report?.state === 'fail' && preexisting && checksCommand(criterion, preexisting)) {
+      return { ...evaluated('unverifiable', false, `declared pre-existing: ${report.evidence}`), inherited: true }
+    }
     if (report?.state === 'fail') return evaluated('fail', false, report.evidence)
-    const command = criterion.check && verified.find((item) => oneSpacing(item) === oneSpacing(criterion.check))
+    const command = criterion.check && verified.find((item) => sameCommand(item, criterion.check))
     const isRepro = criterion.kind === 'repro' && criterion.check
     if (command && !isRepro) return evaluated('pass', true, command)
     if (isRepro) {
       // A repro is evidenced by its command passing now, a declared failure before the fix, and a review that confirms the declaration.
-      const before = repro.find((item) => item.command && item.command === oneSpacing(criterion.check))
+      const before = repro.find((item) => item.command && sameCommand(item.command, criterion.check))
       const none = repro.find((item) => !item.command)
       if (command && before) {
         const shown = `failed before (declared): ${before.evidence}; passes now: \`${command}\``
@@ -136,7 +161,7 @@ export function evaluateCriteria(contract, { reports = [], verified = [], repro 
     // A check criterion names its own command: only that command passing is evidence, never another one or a review.
     if (criterion.check && report?.state === 'pass') return evaluated('pass', false, `declared; \`${criterion.check}\` did not run`)
     if (report?.state === 'pass') {
-      const named = verified.find((item) => oneSpacing(item) && namesCommand(report.evidence, item))
+      const named = verified.find((item) => oneSpacing(item) && (namesCommand(report.evidence, item) || namesCommand(report.evidence, splitCd(item).command)))
       if (named) return evaluated('pass', true, named)
       return evaluated('pass', reviewPassed, reviewPassed ? report.evidence : 'declared')
     }
@@ -181,7 +206,7 @@ export function completion({
   const declaredPass = mandatory.filter((criterion) => criterion.state === 'pass' && !criterion.evidenced).map((criterion) => criterion.id)
   const gateFailed = gate.status === 'fail'
   // A failing command the writer declared pre-existing is reported, not counted against the change, but it never lets the task reach 'verified'.
-  const inherited = gateFailed && Boolean(preexisting)
+  const inherited = Boolean(preexisting) && (gateFailed || mandatory.some((criterion) => criterion.inherited))
   const hasVerified = passed.length > 0 || gate.status === 'pass'
   const strict = riskRank(risk) >= riskRank(strictFrom)
   const needsReview = riskRank(risk) >= RISK_RANK.high

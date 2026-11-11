@@ -109,7 +109,7 @@ test('required files are present and Python hooks are gone', () => {
 test('manifest declares the 0.5.0 knobs', () => {
   const manifest = JSON.parse(readFileSync(path.join(ROOT, '.claude-plugin/plugin.json'), 'utf8'))
   assert.equal(manifest.name, 'cc-tiers')
-  assert.equal(manifest.version, '0.13.1')
+  assert.equal(manifest.version, '0.13.2')
   assert.equal(JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version, manifest.version)
   assert.equal(/\s|@|:|\/|\\/.test(manifest.name), false)
   assert.equal(RESERVED_PREFIXES.some((prefix) => manifest.name.startsWith(prefix)), false)
@@ -1424,9 +1424,9 @@ test('a background report delivered through SubagentHandback is counted at Subag
     const file = tiers.sessionPath(path.join(dir, 'data'), 'sess-1')
     assert.deepEqual(tiers.loadState(file, 'sess-1').researched, { 'users-pagination': true })
 
-    // A last message that carries the trailer wins over the transcript.
+    // The hand-back wins over a last message with its own trailer: it is the text the orchestrator and the hand-back row get.
     launch('researcher', 'agent-w', 'csv')
-    stop('researcher', 'agent-w', 'brief\nCC_TIERS_STATUS: fail', 'CC_TIERS_TASK: csv\nCC_TIERS_ROLE: researcher\nCC_TIERS_STATUS: pass')
+    stop('researcher', 'agent-w', 'CC_TIERS_TASK: csv\nCC_TIERS_ROLE: researcher\nCC_TIERS_STATUS: pass', 'brief\nCC_TIERS_STATUS: fail')
     assert.deepEqual(tiers.loadState(file, 'sess-1').researched, { 'users-pagination': true, csv: true })
   } finally {
     await rm(dir, { recursive: true, force: true })
@@ -1668,6 +1668,29 @@ test('a task that escalated past Sonnet starts similar work at the top of the So
   }
 })
 
+test('the small path note needs a positive sign of one direct change', () => {
+  const routing = defaultRouting()
+  const noted = (prompt) => tiers.lightHint(prompt, routing).includes('cc-tiers small path')
+  for (const prompt of [
+    'Add pagination to GET /users',
+    'deixa o video em 1366x768',
+    'corrija o rodape do README para citar a versao 0.13.2',
+    'deixa 1366x768, ta ruim de ver a pagina do chrome ainda',
+    'o limpar esta indo um por um, e esta demorando. Faça igual ao conferir resultado.',
+    'make this button blue', 'add a test that checks the empty list', 'remove the function that logs the token',
+    'write a test for parseDate', 'escreva um teste para o parser',
+  ]) assert.ok(noted(prompt), prompt)
+  for (const prompt of [
+    'continue', 'pode seguir', 'segue', 'sim', 'ok', 'feito', '2', '3 and 2', 'pode commitar', 'pode finalizar', 'travou, continue',
+    'pesquise na rede tambem.', 'estou usando a um tempo o ultimo update, valida como se saiu, se esta bom.',
+    'acha que ele serve para qualquer automacao?', 'finalizou a suite?', 'roda com tela, deixa eu ver',
+    'vamos ajustar esses pontos.', 'corrija esses', 'pode fazer ambos', 'vamos fazer o A e o B', 'vamos fazer o 1-2',
+    'siga com esses 4 itens como proxima tarefa', 'vamos fazer isso!', 'vamos seguir assim', 'vamos fazer dessa forma e testar',
+    'Fix both handlers', 'check the build and fix it', 'corrige isso', 'commita isso',
+    "let's do that", 'go with that one', 'sounds good, do it',
+  ]) assert.ok(!noted(prompt), prompt)
+})
+
 test('the light path flags a one-task trivial request only', () => {
   const routing = defaultRouting()
   assert.ok(tiers.lightHint('fix a typo in README', routing).includes('Do it yourself in this session'))
@@ -1724,18 +1747,14 @@ test('the light path keeps the small and trivial notes for a change request, how
   const routing = defaultRouting()
   const delegate = defaultRouting({ light_path: 'delegate' })
   const small = (note) => note.startsWith('cc-tiers small path: this request looks like one small change.')
-  assert.ok(tiers.lightHint('Vamos fazer a Prioridade 1', routing).includes('cc-tiers small path'))
   assert.ok(tiers.lightHint('Add pagination to GET /users', routing).includes('cc-tiers small path'))
   assert.ok(tiers.lightHint('fix a typo in README', routing).includes('cc-tiers light path'))
   // A change request keeps its note however it is phrased, unless it asks or names several tasks (next test).
   for (const change of [
-    'corrige isso',
     'arruma o teste que quebrou',
     'ajusta o layout do header',
     'muda a cor do botão',
-    'commita isso',
-    'pode subir a versão',
-    'pode commitar, pushar e montar a release',
+    'suba a versão',
     'veja se o teste passa e conserta',
     'can you make the button blue',
     'can you bump the version to 1.2',
@@ -1785,6 +1804,7 @@ test('the small path note stays off a question, an analysis or several tasks', (
     'e o Muster',
     'vamos ajustar todos, do 1 ao 6, em partes conforme ordem sugerida.',
     'Vamos fazer a Prioridade 1 e 2',
+    'Vamos fazer a Prioridade 1',
   ]) quiet(prompt)
   // A leading question or analysis word, in Portuguese or English.
   for (const prompt of [
@@ -1832,7 +1852,6 @@ test('the small path note stays off a question, an analysis or several tasks', (
   ]) quiet(prompt)
   // The same requests without the question or the span keep the note, and a lookup keeps the Haiku light-path note.
   assert.ok(tiers.lightHint('pode trocar o rótulo do botão para Salvar', routing).includes('cc-tiers small path'))
-  assert.ok(tiers.lightHint('Vamos fazer a Prioridade 1', routing).includes('cc-tiers small path'))
   for (const lookup of ['where is fetchUser defined?', 'onde fica o AcessoDAO?']) {
     assert.ok(tiers.lightHint(lookup, delegate).includes('cc-tiers light path'), lookup)
     assert.ok(tiers.lightHint(lookup, routing).includes('cc-tiers light path'), lookup)
@@ -3011,6 +3030,34 @@ test('the declared pre-existing command no longer hides a failing command listed
   }
 })
 
+test('a pre-existing line that cds to the absolute project dir behaves like its relative form', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-pre-abs-'))
+  try {
+    mkdirSync(path.join(dir, 'api'))
+    writeFileSync(path.join(dir, 'api', 'f.mjs'), 'process.exit(1)\n')
+    const routing = { ...defaultRouting({ specify: 'off' }), verifyAllow: [['node', 'f.mjs']] }
+    const run = (folder) => {
+      const command = `cd ${folder} && node f.mjs`
+      const text = [report('implementer', 'sonnet', 'pass'), `CC_TIERS_VERIFY: ${command}`, `CC_TIERS_PREEXISTING: ${command} - fails on main`].join('\n')
+      const state = tiers.emptyState('s')
+      const prepared = tiers.prepareReport({ routing, projectDir: dir }, tiers.normalizeEvent(event('a', 'implementer', text)))
+      return { state, gate: prepared.gate, applied: tiers.applyEvent(state, prepared, routing), command }
+    }
+
+    for (const folder of ['api', path.join(dir, 'api')]) {
+      const { state, gate, applied, command } = run(folder)
+      assert.equal(gate.failure, null, folder)
+      assert.equal(gate.preexisting.raw, command, folder)
+      assert.equal(applied.meta.outcome, 'review', folder)
+      assert.equal(state.tasks['users-pagination'].preexisting, 1, folder)
+      assert.deepEqual(state.tasks['users-pagination'].failures, [], folder)
+      assert.deepEqual(state.evidence['users-pagination'].preexisting, { command, evidence: 'fails on main' }, folder)
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('a checker can neither be delegated nor finish a task whose failure was declared pre-existing', () => {
   const routing = defaultRouting({ specify: 'off', research: 'off' })
   const state = tiers.emptyState('s')
@@ -3038,6 +3085,217 @@ test('a checker can neither be delegated nor finish a task whose failure was dec
   assert.equal(confirmed.meta.outcome, 'pass')
   assert.equal(state.tasks['users-pagination'], undefined)
   assert.equal(call('checker', 'haiku').deny, '', 'once the task is finished nothing is declared')
+})
+
+const SEED_TASK = 'users-pagination'
+const SEED_SPEC = 'Criteria:\n- the seeds load\nChecks:\n- `make check-seed` passes'
+const SEED_DECLARATION = 'CC_TIERS_PREEXISTING: make check-seed - fails on (f) vendas.carteira, a known failure in the README'
+const SEED_NOT_RUN = { ...GATE_BASE, status: 'pass', verified: ['npm test'], unverified: [{ raw: 'make check-seed', reason: 'outside verify_allow: make check-seed' }] }
+const seedReport = (...lines) => [report('implementer', 'sonnet', 'pass'), 'CC_TIERS_VERIFY: npm test', 'CC_TIERS_VERIFY: make check-seed', ...lines, SEED_DECLARATION].join('\n')
+const SEED_C1_PASS = 'CC_TIERS_CRITERION: C1 pass - loads'
+const SEED_C2_FAIL = 'CC_TIERS_CRITERION: C2 fail - make check-seed fails on (f) vendas.carteira'
+const seedState = (spec = SEED_SPEC) => {
+  const state = tiers.emptyState('s')
+  state.contracts = { [SEED_TASK]: parseContract(spec) }
+  return state
+}
+
+test('a pass whose only failed criteria check the declared pre-existing command takes the pre-existing path, even when the gate did not run it', () => {
+  const routing = defaultRouting()
+  const state = seedState()
+  const applied = tiers.applyEvent(state, gateEvent('a', seedReport(SEED_C1_PASS, SEED_C2_FAIL), SEED_NOT_RUN), routing)
+  assert.equal(applied.meta.outcome, 'review')
+  assert.match(applied.message, /the writer reports `make check-seed` failing \(criteria C2\) and the gate did not run it, and the writer declares it fails without this change too/)
+  assert.match(applied.message, /Not counted as a failure \(1 of 1\)\. Send it to cc-tiers:reviewer \(Opus\)/)
+  assert.deepEqual(state.tasks[SEED_TASK].failures, [])
+  assert.equal(state.tasks[SEED_TASK].preexisting, 1)
+  assert.equal(applied.meta.floor, 'its failing check was declared pre-existing and a review must confirm it')
+  assert.equal(state.evidence[SEED_TASK].preexisting.command, 'make check-seed')
+  const reviewed = apply(state, routing, 'k', 'reviewer', report('reviewer', 'opus', 'pass'))
+  assert.equal(reviewed.meta.outcome, 'pass')
+  assert.equal(reviewed.meta.completion.status, 'partial', 'an inherited failure never verifies the task')
+  assert.match(reviewed.message, /criterion C2 unverifiable: declared pre-existing: make check-seed fails on \(f\) vendas\.carteira/)
+})
+
+test('a pre-existing declaration behind a cd covers the criterion that checks the command without one', () => {
+  const routing = defaultRouting()
+  const state = seedState()
+  const command = 'cd e2e && make check-seed'
+  const text = [report('implementer', 'sonnet', 'pass'), 'CC_TIERS_VERIFY: npm test', `CC_TIERS_VERIFY: ${command}`, SEED_C1_PASS, SEED_C2_FAIL, `CC_TIERS_PREEXISTING: ${command} - fails on (f) vendas.carteira`].join('\n')
+  const notRun = { ...SEED_NOT_RUN, unverified: [{ raw: command, reason: `outside verify_allow: ${command}` }] }
+  const applied = tiers.applyEvent(state, gateEvent('a', text, notRun), routing)
+  assert.equal(applied.meta.outcome, 'review')
+  assert.equal(state.evidence[SEED_TASK].preexisting.command, command)
+  const reviewed = apply(state, routing, 'k', 'reviewer', report('reviewer', 'opus', 'pass'))
+  assert.equal(reviewed.meta.completion.status, 'partial')
+  assert.match(reviewed.message, /criterion C2 unverifiable: declared pre-existing: make check-seed fails on \(f\) vendas\.carteira/)
+})
+
+test('the pre-existing path of a gate that ran the command also accepts its failed check criteria, and no others', () => {
+  const routing = defaultRouting()
+  const ran = { ...GATE_BASE, status: 'fail', verified: ['npm test'], preexisting: { raw: 'make check-seed', code: 1, timedOut: false, tail: 'FAIL (f)', seconds: 2 } }
+  const state = seedState()
+  const accepted = tiers.applyEvent(state, gateEvent('a', seedReport(SEED_C1_PASS, SEED_C2_FAIL), ran), routing)
+  assert.equal(accepted.meta.outcome, 'review')
+  assert.match(accepted.message, /^cc-tiers gate: .*\nusers-pagination: `make check-seed` failed, and the writer declares it fails/s)
+  const other = seedState()
+  const counted = tiers.applyEvent(other, gateEvent('b', seedReport('CC_TIERS_CRITERION: C1 fail - broke', SEED_C2_FAIL), ran), routing)
+  assert.equal(counted.meta.outcome, 'retry', 'a failed criterion that checks nothing declared counts')
+  assert.equal(other.tasks[SEED_TASK].failures.length, 1)
+  assert.equal(other.tasks[SEED_TASK].preexisting, undefined)
+})
+
+test('a failed criterion that is not a check of the declared command still makes the pass a counted failure', () => {
+  const routing = defaultRouting()
+  const cases = [
+    ['a functional criterion failed too', seedState(), [SEED_C1_PASS.replace('C1 pass', 'C1 fail'), SEED_C2_FAIL], SEED_NOT_RUN, /criteria C1, C2 failed/],
+    ['only a functional criterion failed', seedState(), ['CC_TIERS_CRITERION: C1 fail - broke'], SEED_NOT_RUN, /criteria C1 failed/],
+    ['the criterion checks another command', seedState('Criteria:\n- the seeds load\nChecks:\n- `make other` passes'), [SEED_C2_FAIL], SEED_NOT_RUN, /criteria C2 failed/],
+    ['the gate itself verified the declared command', seedState(), [SEED_C2_FAIL], { ...GATE_BASE, status: 'pass', verified: ['npm test', 'make check-seed'] }, /criteria C2 failed/],
+  ]
+  for (const [name, state, lines, gate, reason] of cases) {
+    const applied = tiers.applyEvent(state, gateEvent('a', seedReport(...lines), gate), routing)
+    assert.equal(applied.meta.outcome, 'retry', name)
+    assert.match(applied.meta.reason, reason, name)
+    assert.equal(state.tasks[SEED_TASK].failures.length, 1, name)
+    assert.equal(state.tasks[SEED_TASK].preexisting, undefined, name)
+  }
+})
+
+test('another failing or unrun command, a second declaration or no review keeps the declared failure counted', () => {
+  const routing = defaultRouting()
+  const lines = [SEED_C1_PASS, SEED_C2_FAIL]
+  const unrun = { ...SEED_NOT_RUN, unverified: [...SEED_NOT_RUN.unverified, { raw: 'npx tsc', reason: 'outside verify_allow: npx tsc' }] }
+  assert.equal(tiers.applyEvent(seedState(), gateEvent('a', seedReport(...lines), unrun), routing).meta.outcome, 'retry')
+  const failing = { ...SEED_NOT_RUN, status: 'fail', failure: { raw: 'npx tsc', code: 1, timedOut: false, tail: 'error TS2322', seconds: 3 } }
+  const other = tiers.applyEvent(seedState(), gateEvent('b', seedReport(...lines), failing), routing)
+  assert.equal(other.meta.outcome, 'retry')
+  assert.match(other.meta.reason, /npx tsc exit 1/)
+  const state = seedState()
+  assert.equal(tiers.applyEvent(state, gateEvent('c', seedReport(...lines), SEED_NOT_RUN), routing).meta.outcome, 'review')
+  const second = tiers.applyEvent(state, gateEvent('d', seedReport(...lines), SEED_NOT_RUN), routing)
+  assert.equal(second.meta.outcome, 'retry')
+  assert.equal(state.tasks[SEED_TASK].failures.length, 1)
+  assert.equal(state.tasks[SEED_TASK].preexisting, 1)
+  const never = tiers.applyEvent(seedState(), gateEvent('e', seedReport(...lines), SEED_NOT_RUN), defaultRouting({ review_policy: 'never' }))
+  assert.equal(never.meta.outcome, 'retry')
+})
+
+const respecSpec = (...lines) => [SPEC_BEGIN, 'Criteria:', ...lines.map((line) => `- ${line}`), SPEC_END].join('\n')
+const FIRST_SPEC = respecSpec('the parser handles step 3', 'the output is sorted')
+const respecRouting = (user = {}) => defaultRouting({ research: 'off', ...user })
+const delegateTo = (state, routing, spec, { respec = '', agent = 'implementer', tier = 'sonnet' } = {}) =>
+  tiers.checkDelegation(state, { subagent_type: `cc-tiers:${agent}`, prompt: `${HEADER(SEED_TASK, tier, agent)}${respec ? `CC_TIERS_RESPEC: ${respec}\n` : ''}${spec}\nBuild it.` }, routing)
+function failedOn(state, routing, id, ...ids) {
+  const applied = apply(state, routing, id, 'implementer', [report('implementer', 'sonnet', 'fail', '', 'criteria failed'), ...ids.map((item) => `CC_TIERS_CRITERION: ${item} fail - broke`)].join('\n'))
+  tiers.logReport(state, applied.meta)
+  return applied
+}
+
+test('a respec that rewords a criterion the counted failure named removes that failure, and the context, audit and telemetry say so', () => {
+  const routing = respecRouting()
+  const state = tiers.emptyState('s')
+  assert.equal(delegateTo(state, routing, FIRST_SPEC).deny, '')
+  assert.equal(failedOn(state, routing, 'a', 'C1').meta.outcome, 'retry')
+  assert.deepEqual(state.tasks[SEED_TASK].specFailed.map((item) => item.id), ['C1'])
+  assert.equal(state.log[SEED_TASK].failures, 1)
+
+  const retry = delegateTo(state, routing, respecSpec('the parser handles step 2', 'the output is sorted'), { respec: 'the spec said step 3, the parser has no such step' })
+  assert.equal(retry.deny, '')
+  assert.match(retry.context, /the last sonnet failure of users-pagination named C1 "the parser handles step 3", and CC_TIERS_RESPEC changed it, so the spec was the cause\. That failure is no longer counted \(0 of 2\); this happens once per task\./)
+  const entry = state.tasks[SEED_TASK]
+  assert.deepEqual(entry.failures, [])
+  assert.deepEqual(entry.diagnoses, [])
+  assert.equal(entry.respecUncounted, 1)
+  assert.equal(entry.specFailed, undefined)
+  assert.equal(state.log[SEED_TASK].failures, 0)
+  assert.equal(state.log[SEED_TASK].uncounted, 1)
+  assert.equal(state.contracts[SEED_TASK].criteria[0].text, 'the parser handles step 2')
+  assert.ok(state.audit.some((item) => /users-pagination: sonnet failure uncounted: the respec changed C1 "the parser handles step 3"/.test(item.problem)))
+  const event = state.events.find((item) => item.type === 'failure.uncounted')
+  assert.deepEqual({ task: event.task, tier: event.tier, role: event.role, source: event.source }, { task: SEED_TASK, tier: 'sonnet', role: 'implementer', source: 'respec' })
+})
+
+test('a respec that only adds criteria or rewords others uncounts nothing', () => {
+  const routing = respecRouting()
+  for (const [name, spec] of [
+    ['adds one', respecSpec('the parser handles step 3', 'the output is sorted', 'it handles an empty file')],
+    ['rewords one the failure did not name', respecSpec('the parser handles step 3', 'the output is sorted by name')],
+  ]) {
+    const state = tiers.emptyState('s')
+    delegateTo(state, routing, FIRST_SPEC)
+    failedOn(state, routing, 'a', 'C1')
+    const retry = delegateTo(state, routing, spec, { respec: 'adjusting the spec' })
+    assert.equal(retry.deny, '', name)
+    assert.ok(!retry.context.includes('no longer counted'), name)
+    assert.equal(state.tasks[SEED_TASK].failures.length, 1, name)
+    assert.equal(state.tasks[SEED_TASK].respecUncounted, undefined, name)
+    assert.ok(!state.events.some((item) => item.type === 'failure.uncounted'), name)
+  }
+})
+
+test('a respec after the task moved past the tier that failed uncounts nothing', () => {
+  const routing = respecRouting()
+  const changed = respecSpec('the parser handles step 2', 'the output is sorted')
+  const escalated = tiers.emptyState('s')
+  delegateTo(escalated, routing, FIRST_SPEC)
+  failedOn(escalated, routing, 'a', 'C1')
+  assert.equal(failedOn(escalated, routing, 'b', 'C1').meta.outcome, 'escalate')
+  const afterEscalation = delegateTo(escalated, routing, changed, { respec: 'step 3 was wrong', agent: 'architect', tier: 'opus' })
+  assert.equal(afterEscalation.deny, '')
+  assert.ok(!afterEscalation.context.includes('no longer counted'))
+  assert.equal(escalated.tasks[SEED_TASK].carried.length, 2)
+
+  const early = tiers.emptyState('s')
+  delegateTo(early, routing, FIRST_SPEC)
+  failedOn(early, routing, 'c', 'C1')
+  const moved = delegateTo(early, routing, changed, { respec: 'step 3 was wrong', agent: 'architect', tier: 'opus' })
+  assert.equal(moved.deny, '')
+  assert.ok(!moved.context.includes('no longer counted'))
+  assert.equal(early.tasks[SEED_TASK].carried.length, 1, 'the failure stays in the notes carried to Opus')
+  assert.equal(early.tasks[SEED_TASK].respecUncounted, undefined)
+})
+
+test('only one failure per task is uncounted, and the limit travels with the task across tiers', () => {
+  const routing = respecRouting()
+  const state = tiers.emptyState('s')
+  delegateTo(state, routing, FIRST_SPEC)
+  failedOn(state, routing, 'a', 'C1')
+  delegateTo(state, routing, respecSpec('the parser handles step 2', 'the output is sorted'), { respec: 'step 3 was wrong' })
+  failedOn(state, routing, 'b', 'C2')
+  assert.deepEqual(state.tasks[SEED_TASK].specFailed.map((item) => item.id), ['C2'])
+  const again = delegateTo(state, routing, respecSpec('the parser handles step 2', 'the output is sorted by id'), { respec: 'sorting was wrong too' })
+  assert.equal(again.deny, '')
+  assert.ok(!again.context.includes('no longer counted'))
+  assert.equal(state.tasks[SEED_TASK].failures.length, 1)
+  assert.equal(state.log[SEED_TASK].uncounted, 1)
+  assert.equal(failedOn(state, routing, 'c', 'C2').meta.outcome, 'escalate')
+  assert.equal(state.tasks[SEED_TASK].tier, 'opus')
+  assert.equal(state.tasks[SEED_TASK].respecUncounted, 1)
+})
+
+test('a failure from the gate or from a review is never uncounted by a respec', () => {
+  const changed = respecSpec('the parser handles step 2', 'the output is sorted')
+  const routing = respecRouting({ max_attempts: 3 })
+  const gated = tiers.emptyState('s')
+  delegateTo(gated, routing, FIRST_SPEC)
+  const failure = { raw: 'npm test', code: 1, timedOut: false, tail: 'AssertionError: boom', seconds: 3 }
+  const text = [report('implementer', 'sonnet', 'pass'), 'CC_TIERS_VERIFY: npm test', 'CC_TIERS_CRITERION: C1 fail - broke'].join('\n')
+  assert.equal(tiers.applyEvent(gated, gateEvent('g', text, { ...GATE_BASE, status: 'fail', failure }), routing).meta.outcome, 'retry')
+  assert.equal(gated.tasks[SEED_TASK].specFailed, undefined)
+  const afterGate = delegateTo(gated, routing, changed, { respec: 'step 3 was wrong' })
+  assert.ok(!afterGate.context.includes('no longer counted'))
+  assert.equal(gated.tasks[SEED_TASK].failures.length, 1)
+
+  const reviewed = tiers.emptyState('s')
+  delegateTo(reviewed, routing, FIRST_SPEC)
+  failedOn(reviewed, routing, 'a', 'C1')
+  assert.ok(reviewed.tasks[SEED_TASK].specFailed)
+  assert.equal(apply(reviewed, routing, 'v', 'reviewer', report('reviewer', 'sonnet', 'fail', '', 'wrong sorting')).meta.outcome, 'retry')
+  assert.equal(reviewed.tasks[SEED_TASK].specFailed, undefined, 'the later failure is the last one, and it is not the spec criteria')
+  const afterReview = delegateTo(reviewed, routing, changed, { respec: 'step 3 was wrong' })
+  assert.ok(!afterReview.context.includes('no longer counted'))
+  assert.equal(reviewed.tasks[SEED_TASK].failures.length, 2)
 })
 
 test('failure research is a /config and project option: on by default, 1 search per task, 0 behaves like off', () => {
@@ -3297,4 +3555,94 @@ test('review floor: a change to a sensitive file the prompt did not name cannot 
   const applied = tiers.applyEvent(state, flagged, routing)
   assert.equal(applied.meta.outcome, 'review')
   assert.match(applied.message, /Review cannot be skipped: it changed a sensitive file the prompt did not name/)
+})
+
+const LINT_SPEC = 'Criteria:\n- the lint is clean (request)\nChecks:\n- `make lint` exits 0 (repo: Makefile)'
+const LINT_GATE = { ...GATE_BASE, status: 'pass', verified: ['cd integracao-e2e && make lint'] }
+const lintReport = `${report('implementer', 'sonnet', 'pass')}\nCC_TIERS_CRITERION: C1 pass - ran \`make lint\`\nCC_TIERS_CRITERION: C2 pass - ran it\nCC_TIERS_VERIFY: cd integracao-e2e && make lint`
+const completionLine = (message) => message.split('\n').find((line) => line.startsWith('cc-tiers completion:'))
+
+test('a check run behind a cd by the gate evidences the criterion in the completion line', () => {
+  const routing = defaultRouting({ review_policy: 'always' })
+  const state = tiers.emptyState('s')
+  state.contracts = { 'users-pagination': parseContract(LINT_SPEC) }
+  assert.equal(tiers.applyEvent(state, gateEvent('a', lintReport, LINT_GATE), routing).meta.outcome, 'review')
+  const reviewed = apply(state, routing, 'b', 'reviewer', report('reviewer', 'opus', 'pass'))
+  assert.match(reviewed.message, /Criteria with evidence: 2\/2\./)
+  assert.match(reviewed.message, /\| C2 `make lint` exits 0 \| pass \| cd integracao-e2e && make lint \|/)
+  assert.doesNotMatch(reviewed.message, /did not run/)
+})
+
+// The log entry is what lets a review of a finished task find its writer's tier.
+const logged = (state, applied) => {
+  tiers.logReport(state, applied.meta)
+  return applied
+}
+
+test('a second review pass of a finished task repeats its completion, and a new writer pass computes its own', () => {
+  const routing = defaultRouting({ review_policy: 'always' })
+  const state = tiers.emptyState('s')
+  state.contracts = { 'users-pagination': parseContract(LINT_SPEC) }
+  logged(state, tiers.applyEvent(state, gateEvent('a', lintReport, LINT_GATE), routing))
+  const first = logged(state, apply(state, routing, 'b', 'reviewer', report('reviewer', 'opus', 'pass')))
+  assert.ok(completionLine(first.message))
+  const again = logged(state, apply(state, routing, 'c', 'reviewer', report('reviewer', 'opus', 'pass')))
+  assert.equal(completionLine(again.message), completionLine(first.message))
+  assert.deepEqual(again.meta.completion, first.meta.completion)
+  assert.doesNotMatch(again.message, /No spec criteria/)
+
+  const plain = `${report('implementer', 'sonnet', 'pass')}\nCC_TIERS_VERIFY: npm test`
+  logged(state, tiers.applyEvent(state, gateEvent('d', plain, { ...GATE_BASE, status: 'pass', verified: ['npm test'] }), routing))
+  const next = logged(state, apply(state, routing, 'e', 'reviewer', report('reviewer', 'opus', 'pass')))
+  assert.match(completionLine(next.message), /Checks run 1, passed 1/)
+  assert.match(completionLine(next.message), /No spec criteria/)
+})
+
+const orchestratorReport = (status) => ({
+  kind: 'report',
+  id: 'o1',
+  role: 'orchestrator',
+  prompt: '',
+  text: `CC_TIERS_TASK: users-pagination\nCC_TIERS_TIER: opus\nCC_TIERS_ROLE: orchestrator\nCC_TIERS_STATUS: ${status}\nCC_TIERS_REASON: x`,
+})
+const WRITER_ATTEMPTS = {
+  'a writer pass whose gate failed': (state, routing) =>
+    tiers.applyEvent(state, gateEvent('c', lintReport, { ...GATE_BASE, status: 'fail', failure: { raw: 'make lint', code: 1, timedOut: false, tail: 'boom', seconds: 1 } }), routing),
+  'a writer that failed': (state, routing) => tiers.applyEvent(state, gateEvent('c', report('implementer', 'sonnet', 'fail')), routing),
+  'a writer that crashed': (state, routing) =>
+    tiers.applyEvent(state, tiers.normalizeEvent(event('c', 'implementer', '', 'CC_TIERS_TASK: users-pagination', true)), routing),
+  'the orchestrator attempt that failed': (state, routing) => tiers.applyEvent(state, orchestratorReport('fail'), routing),
+  'a new writer delegation': (state, routing) => {
+    const prompt = 'CC_TIERS_TASK: users-pagination\nCC_TIERS_TIER: sonnet\nCC_TIERS_ROLE: implementer\n'
+    assert.equal(tiers.checkDelegation(state, { subagent_type: 'cc-tiers:implementer', prompt }, defaultRouting({ research: 'off', specify: 'off' })).deny, '')
+  },
+}
+
+for (const [name, attempt] of Object.entries(WRITER_ATTEMPTS)) {
+  test(`a review pass never repeats a completion older than ${name}`, () => {
+    const routing = defaultRouting({ review_policy: 'always' })
+    const state = tiers.emptyState('s')
+    state.contracts = { 'users-pagination': parseContract(LINT_SPEC) }
+    logged(state, tiers.applyEvent(state, gateEvent('a', lintReport, LINT_GATE), routing))
+    const first = logged(state, apply(state, routing, 'b', 'reviewer', report('reviewer', 'opus', 'pass')))
+    assert.match(completionLine(first.message), /verified on sonnet/)
+    assert.ok(state.completions['users-pagination'])
+
+    const attempted = attempt(state, routing)
+    if (attempted) logged(state, attempted)
+    assert.equal(state.completions['users-pagination'], undefined, 'the stored line is dropped')
+    const later = apply(state, routing, 'd', 'reviewer', report('reviewer', 'opus', 'pass'))
+    assert.doesNotMatch(later.message, /Criteria with evidence: 2\/2|users-pagination verified on sonnet/)
+  })
+}
+
+test('stored completions stay bounded', () => {
+  const state = tiers.emptyState('s')
+  state.completions = Object.fromEntries(Array.from({ length: 205 }, (_, index) => [`t${index}`, { result: {}, line: '' }]))
+  const routing = defaultRouting({ review_policy: 'always' })
+  tiers.applyEvent(state, gateEvent('a', lintReport, LINT_GATE), routing)
+  apply(state, routing, 'b', 'reviewer', report('reviewer', 'opus', 'pass'))
+  assert.equal(Object.keys(state.completions).length, 200)
+  assert.ok(state.completions['users-pagination'])
+  assert.equal(state.completions.t0, undefined)
 })

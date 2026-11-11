@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.13.2 - 2026-11-11
+
+### Added
+
+- A `CC_TIERS_RESPEC` that drops or rewords a criterion the last counted writer failure named uncounts that failure, once per task and for the same tier only (a respec after an escalation finds nothing to uncount). The note says which criteria changed, the audit records it, and telemetry gets a `failure.uncounted` event, shown by `/cc-tiers:insights` (`Failures not counted after a spec correction (CC_TIERS_RESPEC): N`, and out of the failure categories and the rework count) and by `/cc-tiers:report`.
+- A writer pass whose only failed mandatory criteria are checks of exactly the command in `CC_TIERS_PREEXISTING` takes the pre-existing path even when the gate did not run that command: it is not counted, goes to the Opus review, the criteria are `unverifiable` and inherited, and the completion is `partial` at most.
+- Lock and busy-resource output is a confirmed `infra` diagnosis: `database is locked`, `could not obtain|acquire|get [the] lock`, `resource temporarily unavailable|busy`, `another <x> holds|has the lock`, and `outra <x> tem a trava`. Prose such as `is in use` is left out, because an application's own error says it too.
+- A hand-back row of the shape `queued_command` attachment (a hand-back that arrives mid-turn) and a peer user row that carries only `origin.body` count as the agent's report.
+- SubagentStop waits up to 2 s (10 tries of 200 ms) for a `SubagentHandback` not yet written, when the last message has no `CC_TIERS_STATUS`, and only for an agent cc-tiers registered.
+
+### Changed
+
+- A command that hits `verify_timeout` is **not validated** (`timed out after N s: <command>`), no longer a failure. It is not run again and the next lines still run. The README says so in the gate outcomes, the `verify_timeout` row, and the list of failures that still count.
+- `cd <absolute dir> && <command>` inside the project runs as its relative form, in `CC_TIERS_VERIFY` and in `CC_TIERS_PREEXISTING`; an absolute dir outside the project is refused.
+- SubagentStop reads the `SubagentHandback` of the agent's latest run before its last message; a `SendMessage` from the session (origin `coordinator`) starts a new run, and the row of the same report is its twin and counts once.
+- The small path note needs a verb that names a change and none of: a continuation or an acknowledgement, a question, research, or validation ask, several items, or a decision that only points back (`isso`, `assim`, `dessa forma`, `do that`, `go with that`, `that one`). In the 163 real prompts of a week that got the note, it drops from 150 to 10.
+
+### Fixed
+
+- A hand-back that reached the transcript as a `queued_command` attachment, or as a peer row with only `origin.body`, was not read, and the same report could count twice through SubagentStop and its row.
+- A gate that ran a suite longer than `verify_timeout`, or a command that hit a lock another run held, counted a failure of the writer that was the environment's.
+- A failure caused by a wrong criterion that the writer's retry fixed with `CC_TIERS_RESPEC` stayed counted and pushed the task toward escalation.
+- A sensitive file listed in `CC_TIERS_FILES` (its exact path or a listed directory) was still flagged as one "its prompt did not name" when the name had no extension (`Jenkinsfile`), which forced an Opus review. A test-name match does not name a sensitive file.
+- Files the session itself, or another Claude Code session in the same transcript folder, edited with Edit, Write, MultiEdit or NotebookEdit while a writer ran were charged to that writer as sensitive or out-of-scope changes. They are now named on their own line and do not force a review. This session's own subagents are not read, and an edit made through Bash leaves no path, so it is still charged.
+- A check criterion such as `make lint` stayed "passed only as declared" when the gate verified `cd <repo> && make lint` (a folder of repositories needs the `cd`). A criterion without a `cd` is now credited by the same command behind any `cd`, one with a `cd` needs the same directory, and the same rule covers a declared pass that names the command, a `Repro:` criterion and its `CC_TIERS_REPRO` line, and `CC_TIERS_PREEXISTING`.
+- A second review pass of a finished task (a reviewer asked to resend its trailer) printed a fresh `unverified ... No spec criteria` completion, because the task's contract and evidence were already cleared. It now repeats the completion already printed, until a new delegation or writer report of that slug.
+
 ## 0.13.1 - 2026-11-03
 
 ### Changed

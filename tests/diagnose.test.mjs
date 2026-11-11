@@ -44,6 +44,13 @@ const DETAIL_CASES = [
   ['infra', 'ENOSPC: no space left on device'],
   ['infra', 'FATAL ERROR: JavaScript heap out of memory'],
   ['infra', 'Cannot connect to the Docker daemon'],
+  ['infra', 'o e2e está em uso: outra execução tem a trava (/tmp/integracao-e2e.trava).'],
+  ['infra', 'sqlite3.OperationalError: database is locked'],
+  ['infra', 'E: Could not get lock /var/lib/dpkg/lock-frontend'],
+  ['infra', 'Could not obtain lock on relation "users"'],
+  ['infra', 'flock: Resource temporarily unavailable'],
+  ['infra', 'rsync: device or resource busy'],
+  ['infra', 'another run holds the lock on the fixtures'],
   ['flaky', 'test is flaky, passed on retry'],
   ['regression', 'regression: login test now fails'],
   ['regression', 'previously passing test'],
@@ -357,6 +364,42 @@ test('a machine error on its own line is infra even beside an assertion line', (
   assert.equal(diagnosis.evidence, 'Error: connect ECONNREFUSED 127.0.0.1:5432')
   const missing = fromDetail('not ok 2 - loads the plugin\nError: Cannot find module \'left-pad\'')
   assert.equal(missing.category, 'dependency')
+})
+
+// A lock word on an assertion line is the test's own claim about the code, not a lock another run holds.
+test('an assertion that names a lock is a test, a lock message on its own line is infra', () => {
+  for (const detail of [
+    'AssertionError: expected lock to be released',
+    'not ok 2 - releases the lock\nAssertionError: expected 1 to equal 2',
+    'AssertionError: database is locked',
+    'not ok 3 - could not acquire the lock when it is in use',
+  ]) {
+    const diagnosis = fromDetail(detail)
+    assert.equal(diagnosis.category, 'test', detail)
+    assert.equal(diagnosis.confirmed, true, detail)
+  }
+  const beside = fromDetail('not ok 1 - runs the suite\no e2e está em uso: outra execução tem a trava (/tmp/integracao-e2e.trava).')
+  assert.equal(beside.category, 'infra')
+  assert.equal(beside.confirmed, true)
+  assert.equal(beside.symptom, 'o e2e está em uso: outra execução tem a trava (/tmp/integracao-e2e.trava).')
+  const failed = fromDetail('AssertionError [ERR_ASSERTION]: expected 1 to equal 2\ndatabase is locked')
+  assert.equal(failed.category, 'test', 'a failed assertion anywhere keeps the output a code failure')
+})
+
+// The application's own error may say it is in use or already running: that is the code under test, not a lock another run holds.
+test('an application error that says in use or already running stays a test failure', () => {
+  for (const detail of [
+    "not ok 1 - registers a user\nerror: 'email is in use'",
+    "not ok 1 - starts the job\nerror: 'job is already running'",
+    // `lock` inside another word (block, clock, unlock) is no lock.
+    'not ok 1 - fetches the latest block\nError: could not get block 42 from node',
+    'not ok 1 - reads the clock\nError: could not obtain clock source',
+    'not ok 1 - unlocks the account\nError: could not acquire user for unlock',
+  ]) {
+    const diagnosis = fromDetail(detail)
+    assert.equal(diagnosis.category, 'test', detail)
+    assert.equal(diagnosis.confirmed, true, detail)
+  }
 })
 
 test('a connection refusal with no assertion line is infra, confirmed', () => {

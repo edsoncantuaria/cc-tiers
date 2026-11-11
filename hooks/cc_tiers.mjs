@@ -21,7 +21,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { TIERS, dollars, extractFiles, slug, writeAtomic } from './base.mjs'
 import { BUDGET_OVERRIDE_RE, budgetMessage, budgetStatus, parseTaskBudget } from './budget.mjs'
-import { completion, evaluateCriteria, oneSpacing, parseContract, parseCriterionReports, parseReproLines, plural, weakenedCriteria } from './contract.mjs'
+import { checksCommand, completion, evaluateCriteria, oneSpacing, parseContract, parseCriterionReports, parseReproLines, plural, weakenedCriteria } from './contract.mjs'
 import { declaresPackage, diagnoseFailure, failureResearchLines, missingPackage, nextAction } from './diagnose.mjs'
 import { MEMORY_BEGIN, MEMORY_END, MEMORY_IGNORE, addRecord, formatRecall, loadMemory, memoryPath, recall, sanitize, saveMemory } from './memory.mjs'
 import { checkParallel, declaredFiles, overlaps, pruneActive, registerActive, releaseActive } from './parallel.mjs'
@@ -1059,10 +1059,10 @@ function coveredByReview(state, tasks, task, event) {
   return Boolean(launched && !own(tasks, task) && Number(own(state.log, task)?.reviewLaunched) > launched)
 }
 
-/** The skipped infra and pre-existing failures and the failure searches suggested travel with the task across tiers, so their limits bound the whole task. */
+/** The skipped infra and pre-existing failures, the failure searches suggested and the one respec uncount travel with the task across tiers, so their limits bound the whole task. */
 function infraKept(entry) {
   const kept = {}
-  for (const key of ['infra', 'preexisting', 'searches']) if (Number(entry?.[key])) kept[key] = Number(entry[key])
+  for (const key of ['infra', 'preexisting', 'searches', 'respecUncounted']) if (Number(entry?.[key])) kept[key] = Number(entry[key])
   return kept
 }
 
@@ -1158,6 +1158,7 @@ export function emptyState(sessionId) {
     cursor: freshCursor(),
     contracts: {},
     evidence: {},
+    completions: {},
     snapshots: {},
     verifyCache: {},
     active: {},
@@ -1178,7 +1179,7 @@ export function loadState(file, sessionId) {
     if (!data || typeof data !== 'object' || !data.tasks || typeof data.tasks !== 'object') return emptyState(sessionId)
     const base = emptyState(sessionId)
     for (const key of ['seen', 'spent', 'pending', 'awaiting', 'events', 'audit']) if (!Array.isArray(data[key])) data[key] = base[key]
-    for (const key of ['spend', 'cost', 'log', 'background', 'finished', 'researched', 'contracts', 'evidence', 'snapshots', 'verifyCache', 'active']) {
+    for (const key of ['spend', 'cost', 'log', 'background', 'finished', 'researched', 'contracts', 'evidence', 'completions', 'snapshots', 'verifyCache', 'active']) {
       if (!data[key] || typeof data[key] !== 'object' || Array.isArray(data[key])) data[key] = base[key]
     }
     if (!data.cursor || typeof data.cursor !== 'object') data.cursor = base.cursor
@@ -1449,6 +1450,8 @@ export function applyEvent(state, event, routing) {
   if (role === 'researcher') return applyResearch(state, meta, task, headers, event)
   // A delegated writer that reported, or crashed, is no longer editing the tree.
   if (DELEGATED_WRITERS.has(role)) releaseActive(state, task)
+  // Any writer report, a failure or crash too, makes the completion printed before it stale.
+  if (!REVIEW_ROLES.has(role) && state.completions) delete state.completions[task]
   let tier = (headers.TIER || '').toLowerCase()
   const defaultTier = role === 'checker' ? 'haiku' : role === 'reviewer' ? 'sonnet' : ROLES[role]
   if (!TIERS.includes(tier)) tier = defaultTier
@@ -1533,17 +1536,17 @@ export function applyEvent(state, event, routing) {
     rememberGate(state, gate)
   }
 
-  // A pass that reports a mandatory criterion as failed is a failure, whatever the status line says.
+  // A pass that reports a mandatory criterion as failed is a failure, whatever the status line says, unless it is a check of the command the writer declared pre-existing.
   const contract = own(state.contracts, task)
   const criterionReports = REVIEW_ROLES.has(role) ? [] : parseCriterionReports(event.text || '')
   const repro = REVIEW_ROLES.has(role) ? [] : parseReproLines(stripBriefs(event.text || ''))
-  if (status === 'pass' && contract && criterionReports.length) {
-    const mandatory = new Set(contract.criteria.filter((item) => item.mandatory).map((item) => item.id))
-    const failedIds = criterionReports.filter((item) => item.state === 'fail' && mandatory.has(item.id)).map((item) => item.id)
-    if (failedIds.length) {
-      status = 'fail'
-      gateReason = `the report says pass but criteria ${failedIds.join(', ')} failed`
-    }
+  const failedCriteria = (contract?.criteria || []).filter((item) => item.mandatory && criterionReports.some((report) => report.id === item.id && report.state === 'fail'))
+  const declared = REVIEW_ROLES.has(role) ? null : declaredPreexisting(event.text || '', event.projectDir)
+  const preexistingUsed = Number(own(tasks, task)?.preexisting) || 0
+  const inherited = preexistingAccepted({ declared, gate: meta.gate, failed: failedCriteria, used: preexistingUsed, routing })
+  if (status === 'pass' && failedCriteria.length && !inherited) {
+    status = 'fail'
+    gateReason = `the report says pass but criteria ${failedCriteria.map((item) => item.id).join(', ')} failed`
   }
   const covered = status === 'pass' && !REVIEW_ROLES.has(role) && coveredByReview(state, tasks, task, event)
   if (status === 'pass' && !REVIEW_ROLES.has(role) && !covered) recordEvidence(state, task, criterionReports, meta.gate || null, { repro })
@@ -1620,23 +1623,21 @@ export function applyEvent(state, event, routing) {
           `It was not counted as a failure (${skipped + 1} of ${MAX_INFRA_SKIPS}). ${uninstalled ? `Install ${uninstalled}` : 'Fix the environment'} and run the same tier again; the next environment failure after that counts.`,
       }
     }
-    // A failure the writer declares the base already had: not counted once per task, and only an Opus review that confirms it lets the task finish.
-    // Only when every other command ran and passed: any other failing command is gate.failure and counts as always.
-    const declared = declaredPreexisting(event.text)
-    const used = Number(current.preexisting) || 0
-    const othersPassed = !meta.gate.failure && !meta.gate.unverified.length
-    if (declared && declared.raw === meta.gate.preexisting?.raw && othersPassed && used < MAX_PREEXISTING_SKIPS && routing.reviewPolicy !== 'never') {
-      tasks[task] = { ...current, tier, failures: current.failures || [], preexisting: used + 1 }
-      recordEvidence(state, task, criterionReports, meta.gate, { preexisting: { command: declared.command, evidence: declared.evidence }, repro })
-      meta.outcome = 'review'
-      meta.floor = reviewFloor(state, task, routing, flagged)
-      return {
-        state,
-        meta,
-        message:
-          `${gateNote}${task}: \`${declared.command}\` failed, and the writer declares it fails without this change too (${declared.evidence}). ` +
-          `Not counted as a failure (${used + 1} of ${MAX_PREEXISTING_SKIPS}). Send it to cc-tiers:reviewer (Opus): the review must confirm the failure exists without this change; a review that cannot confirm it rejects.`,
-      }
+  }
+
+  // A failure the writer declares the base already had: not counted once per task, and only an Opus review that confirms it lets the task finish.
+  if (inherited) {
+    tasks[task] = { ...current, tier, failures: current.failures || [], preexisting: preexistingUsed + 1 }
+    recordEvidence(state, task, criterionReports, meta.gate, { preexisting: { command: declared.command, evidence: declared.evidence }, repro })
+    meta.outcome = 'review'
+    meta.floor = reviewFloor(state, task, routing, flagged)
+    const what = declared.raw === meta.gate.preexisting?.raw ? `\`${declared.command}\` failed` : `the writer reports \`${declared.command}\` failing (criteria ${failedCriteria.map((item) => item.id).join(', ')}) and the gate did not run it`
+    return {
+      state,
+      meta,
+      message:
+        `${gateNote}${task}: ${what}, and the writer declares it fails without this change too (${declared.evidence}). ` +
+        `Not counted as a failure (${preexistingUsed + 1} of ${MAX_PREEXISTING_SKIPS}). Send it to cc-tiers:reviewer (Opus): the review must confirm the failure exists without this change; a review that cannot confirm it rejects.`,
     }
   }
 
@@ -1716,6 +1717,9 @@ export function applyEvent(state, event, routing) {
     }
   } else {
     const applied = applyFailure(tasks, task, current, tier, role, reason, routing, gateDetail, { source: event.kind === 'error' ? 'error' : meta.gate?.status === 'fail' ? 'gate' : 'report' })
+    // A retry that counted on criteria the writer reported failed remembers them: a respec of those criteria on the next delegation removes it.
+    const onCriteria = failedCriteria.length > 0 && event.kind !== 'error' && !['fail', 'missing'].includes(meta.gate?.status)
+    if (applied.outcome === 'retry' && onCriteria) tasks[task].specFailed = failedCriteria.map(({ id, text, mandatory }) => ({ id, text, mandatory }))
     meta.outcome = applied.outcome
     message = applied.message
     meta.haikuFailure = applied.haikuFailure
@@ -1735,13 +1739,24 @@ const MAX_INFRA_SKIPS = 2
 const MAX_PREEXISTING_SKIPS = 1
 
 /** The CC_TIERS_VERIFY line a writer's report declares failing without its change, with the evidence; null when it names none or gives no evidence. */
-function declaredPreexisting(text) {
+function declaredPreexisting(text, projectDir = '') {
   const declared = oneSpacing(parseHeaders(text || '').PREEXISTING)
-  for (const line of parseVerify(text)) {
+  for (const line of parseVerify(text, { projectDir })) {
     const command = line.kind === 'command' ? oneSpacing(line.raw) : ''
     if (command && declared.startsWith(`${command} - `)) return { raw: line.raw, command, evidence: clip(declared.slice(command.length + 3), 200) }
   }
   return null
+}
+
+/**
+ * Whether a declared pre-existing failure is accepted: once per task, and only when everything else the report says held up.
+ * Either the gate ran the declared command and it failed, or the gate never ran it and the report fails the checks of it.
+ */
+function preexistingAccepted({ declared, gate, failed, used, routing }) {
+  if (!declared || !gate || used >= MAX_PREEXISTING_SKIPS || routing.reviewPolicy === 'never') return false
+  if (gate.failure || gate.unverified.some((item) => item.raw !== declared.raw)) return false
+  if (failed.some((criterion) => !checksCommand(criterion, declared.command))) return false
+  return declared.raw === gate.preexisting?.raw || (failed.length > 0 && gate.unverified.some((item) => item.raw === declared.raw))
 }
 
 /** What a writer's report and gate proved, kept until the task finishes; preexisting is the failure the writer declared it did not cause, repro how its commands failed before the fix. */
@@ -1777,7 +1792,11 @@ function workspaceNote(task, workspace, others) {
     lines.push(`cc-tiers scope: ${task} changed sensitive file(s) its prompt did not name: ${workspace.sensitive.map((item) => `${item.file} (${item.why})`).join(', ')}. Confirm they were intended.`)
   }
   if (workspace.outOfScope?.length) lines.push(`cc-tiers scope: ${task} changed files outside its CC_TIERS_FILES: ${workspace.outOfScope.slice(0, 12).join(', ')}.`)
-  if (lines.length && others.length) lines.push(`Other open tasks (${others.join(', ')}) share the working tree and may have made some of these changes.`)
+  const scoped = lines.length
+  if (workspace.elsewhere?.length) {
+    lines.push(`cc-tiers scope: you or another Claude session edited ${workspace.elsewhere.slice(0, 12).join(', ')} while ${task} ran, so they are not counted against it.`)
+  }
+  if (scoped && others.length) lines.push(`Other open tasks (${others.join(', ')}) share the working tree and may have made some of these changes.`)
   return lines.join('\n')
 }
 
@@ -1795,11 +1814,14 @@ function rememberGate(state, gate) {
  * and not run, and a qualitative confidence. A pass is never more than the evidence shows.
  */
 function finishTask(state, task, routing, { reviewed, tier }) {
+  // A writer report or delegation drops the stored line, so one still there is a review asked again: it repeats that completion.
+  const printed = own(state.completions, task)
+  if (printed) return printed
   const evidence = own(state.evidence, task) || {}
   const contract = own(state.contracts, task) || { criteria: [] }
   const entry = own(state.log, task)
   const risk = entry?.risk || 'medium'
-  const criteria = evaluateCriteria(contract, { reports: evidence.reports || [], verified: evidence.verified || [], repro: evidence.repro || [], reviewPassed: reviewed })
+  const criteria = evaluateCriteria(contract, { reports: evidence.reports || [], verified: evidence.verified || [], repro: evidence.repro || [], reviewPassed: reviewed, preexisting: evidence.preexisting?.command })
   const result = completion({
     criteria,
     risk,
@@ -1827,7 +1849,12 @@ function finishTask(state, task, routing, { reviewed, tier }) {
   const line =
     `cc-tiers completion: ${task} ${result.status} on ${tier}${after}, ${risk} risk; confidence ${result.confidence.level} (${result.confidence.reasons.join('; ')}). ` +
     `Checks run ${checks.run}${reused}, passed ${checks.passed}, failed ${checks.failed}, not run ${checks.notRun}.${criteriaPart}${remaining}`
-  return { result: { status: result.status, confidence: result.confidence.level, risk }, line: criteria.length ? `${line}\n${criteriaTable(task, criteria)}` : line }
+  const finished = { result: { status: result.status, confidence: result.confidence.level, risk }, line: criteria.length ? `${line}\n${criteriaTable(task, criteria)}` : line }
+  const completions = state.completions && typeof state.completions === 'object' ? state.completions : (state.completions = {})
+  completions[task] = finished
+  const names = Object.keys(completions)
+  names.slice(0, Math.max(0, names.length - MAX_SEEN)).forEach((name) => delete completions[name])
+  return finished
 }
 
 /** The evaluated criteria as a markdown table the orchestrator can paste into a commit or PR body. */
@@ -1943,6 +1970,8 @@ function applyFailure(tasks, task, current, tier, role, reason, routing, detail 
   const diagnosis = diagnoseFailure({ reason, detail, source, reviewCategory, previous: current.diagnoses || [] })
   const diagnoses = [...(current.diagnoses || []), { category: diagnosis.category, signature: diagnosis.signature, confirmed: diagnosis.confirmed }].slice(-MAX_CARRIED)
   current = { ...current, diagnoses }
+  // Only the failure just counted can be the spec's: an earlier one's criteria no longer qualify.
+  delete current.specFailed
   const failures = [...(current.failures || [])]
   failures.push(`${tier}/${role}: ${reason}${detail ? `\n${detail}` : ''}`)
   current.failures = failures
@@ -2125,7 +2154,7 @@ export function checkDelegation(state, toolInput, routing, { history = null, pro
       'cc-tiers: the classifier is haiku, so a cc-tiers:worker prompt may not carry CC_TIERS_CLASSIFY: skip. Remove that line and call it again.',
     )
   }
-  const held = holdContract(state, task, prompt, headers, routing)
+  const held = holdContract(state, task, prompt, headers, routing, own(state.tasks, task)?.specFailed)
   if (held.deny) return refuse(held.deny)
   const routed = stripBriefs(prompt)
   const risk = taskRisk(routed, routing, { history, projectDir })
@@ -2208,6 +2237,10 @@ export function checkDelegation(state, toolInput, routing, { history = null, pro
     }
   }
 
+  // Same tier only: a respec after an escalation finds the failed criteria already dropped from the entry.
+  const uncounted = held.dropped?.length && current?.specFailed ? uncountSpecFailure(state, task, current, held.dropped, role, routing) : ''
+  if (uncounted) notes.push(uncounted)
+  if (current) delete current.specFailed
   const effort = attemptEffort(routing, role, tier, current, routed, history, input.effort, risk)
   if (effort.note) notes.push(effort.note)
   const level = effort.level || parseEffort(input.effort) || AGENT_EFFORT[role]
@@ -2223,7 +2256,7 @@ export function checkDelegation(state, toolInput, routing, { history = null, pro
 }
 
 /** Keeps the first spec a task was delegated with; a later attempt may add criteria, never drop or reword one silently. */
-function holdContract(state, task, prompt, headers, routing) {
+function holdContract(state, task, prompt, headers, routing, failed = []) {
   if (!routing.specify) return {}
   const contracts = state.contracts && typeof state.contracts === 'object' ? state.contracts : (state.contracts = {})
   const stored = own(contracts, task)
@@ -2257,7 +2290,25 @@ function holdContract(state, task, prompt, headers, routing) {
     const names = Object.keys(contracts)
     names.slice(0, Math.max(0, names.length - MAX_SEEN)).forEach((name) => delete contracts[name])
   }
-  return { commit, kept }
+  // The criteria a counted failure named that this respec drops or rewords: that failure was the spec's.
+  const dropped = respec && failed.length ? weakenedCriteria({ criteria: failed }, next) : []
+  return { commit, kept, dropped }
+}
+
+/** Removes the last counted failure when its own criteria were the ones a respec fixed; once per task, and the audit and telemetry say so. */
+function uncountSpecFailure(state, task, current, dropped, role, routing) {
+  if (current.respecUncounted || !current.failures?.length) return ''
+  const diagnosis = current.diagnoses?.at(-1)
+  current.failures = current.failures.slice(0, -1)
+  current.diagnoses = (current.diagnoses || []).slice(0, -1)
+  current.respecUncounted = 1
+  const entry = logEntry(state, task)
+  entry.failures = Math.max(0, (Number(entry.failures) || 0) - 1)
+  entry.uncounted = (Number(entry.uncounted) || 0) + 1
+  const list = dropped.map((item) => `${item.id} "${clip(item.text, 70)}"`).join('; ')
+  auditState(state, `${task}: ${current.tier} failure uncounted: the respec changed ${list}, which that failure named`)
+  queueEvent(state, { type: 'failure.uncounted', task, tier: current.tier, role, category: diagnosis?.category, source: 'respec' })
+  return `cc-tiers: the last ${current.tier} failure of ${task} named ${list}, and CC_TIERS_RESPEC changed it, so the spec was the cause. That failure is no longer counted (${current.failures.length} of ${routing.maxAttempts}); this happens once per task.`
 }
 
 /** Measured calls and minutes, and the estimated cost so far, against the task budget in /config. */
@@ -2277,12 +2328,14 @@ function noteDelegation(state, task, { role, tier, risk, effort, now, files, iso
   entry.risk = risk.level
   entry.factors = risk.factors.slice(0, 8)
   if (!entry.writer) entry.writer = mode
+  if (state.completions) delete state.completions[task]
   // A dispatcher's report is not released like a delegated writer's, so it is not registered as one.
   if (DELEGATED_WRITERS.has(role)) registerActive(state, { task, role, files, isolated, now })
   if (!state.snapshots || typeof state.snapshots !== 'object') state.snapshots = {}
   for (const name of Object.keys(state.snapshots)) if (!Object.hasOwn(state.active || {}, name)) delete state.snapshots[name]
   const snapshot = projectDir && !isolated ? workspaceSnapshot(projectDir) : null
-  if (snapshot) state.snapshots[task] = snapshot
+  // The time tells later edits by you or another session apart from the writer's.
+  if (snapshot) state.snapshots[task] = { ...snapshot, at: Number(now) }
   if (first) queueEvent(state, { type: 'task.received', task, role, tier })
   queueEvent(state, { type: 'risk.assessed', task, risk: risk.level, factors: risk.factors })
   queueEvent(state, { type: 'model.selected', task, tier, role, effort, risk: risk.level, mode: entry.writer })
@@ -2905,6 +2958,24 @@ function foldTrailer(text, owner, reportId, cursor, sink) {
   return true
 }
 
+const HANDBACK_FRAME = 'The report follows:\n'
+
+/**
+ * The agent and report of a peer hand-back row, or null: a user row (handbackReportText, else its framed body),
+ * or the queued_command attachment written when the hand-back arrives mid-turn. The frame indents each report line by two spaces.
+ */
+function handbackOf(row) {
+  const queued = row.type === 'attachment' && row.attachment?.type === 'queued_command'
+  if (row.type !== 'user' && !queued) return null
+  const origin = (queued ? row.attachment.origin : row.origin) || {}
+  if (typeof origin !== 'object' || origin.kind !== 'peer' || origin.handback !== true || !origin.from) return null
+  let text = typeof origin.handbackReportText === 'string' ? origin.handbackReportText : ''
+  if (!text && typeof origin.body === 'string' && origin.body.includes(HANDBACK_FRAME)) {
+    text = origin.body.slice(origin.body.indexOf(HANDBACK_FRAME) + HANDBACK_FRAME.length).replace(/^ {2}/gm, '')
+  }
+  return text ? { agent: String(origin.from), text } : null
+}
+
 /**
  * Fold one main-transcript row into the cursor.
  * - The session agent's own trailer opens a task with CC_TIERS_TASK + CC_TIERS_ROLE: orchestrator
@@ -2913,7 +2984,7 @@ function foldTrailer(text, owner, reportId, cursor, sink) {
  *   heredoc opened with `cat <<'CC_TIERS_ATTEMPT'` (the transcript does not always keep the text).
  * - An Agent call whose prompt carries CC_TIERS_TASK charges that one message to the task.
  * - Every other main-chain message is orchestration overhead.
- * - A peer hand-back row is the report of the background agent it names, pushed as a report with its agent_id.
+ * - A peer hand-back row (a user row or a queued_command attachment) is the report of the background agent it names, pushed as a report with its agent_id.
  * Sidechain rows are skipped: subagent usage comes from the Agent result or its own transcript.
  * Rows that repeat a message id (one row per content block) are counted once.
  */
@@ -2922,10 +2993,9 @@ function foldRow(row, line, cursor, sink, routing = null) {
   if (limits.five_hour) cursor.limits.five_hour = limits.five_hour
   if (limits.seven_day) cursor.limits.seven_day = limits.seven_day
   if (row.isSidechain === true) return
-  const origin = row.origin && typeof row.origin === 'object' ? row.origin : {}
-  if (row.type === 'user' && origin.kind === 'peer' && origin.handback === true && typeof origin.handbackReportText === 'string') {
-    const agent = String(origin.from || '')
-    if (agent) sink.reports.push({ id: `handback:${row.uuid || lineId(line)}`, agent_id: agent, text: origin.handbackReportText })
+  const handback = handbackOf(row)
+  if (handback) {
+    sink.reports.push({ id: `handback:${row.uuid || lineId(line)}`, agent_id: handback.agent, text: handback.text })
     return
   }
   if (row.type !== 'assistant') return
@@ -3092,7 +3162,10 @@ export function agentTranscriptUsage(file, routing = null) {
 export function agentHandbackReport(file) {
   let report = ''
   for (const row of transcriptRows(file)) {
-    if (row?.type !== 'assistant' || !row.message || typeof row.message !== 'object') continue
+    if (!row?.message || typeof row.message !== 'object') continue
+    // A SendMessage from the session (origin coordinator) starts a new run: an earlier hand-back is not its report. A harness nudge is not one.
+    if (row.type === 'user' && row.origin?.kind === 'coordinator') report = ''
+    if (row.type !== 'assistant') continue
     for (const block of messageBlocks(row.message)) {
       if (block?.type === 'tool_use' && block.name === 'SubagentHandback' && typeof block.input?.message === 'string') {
         report = block.input.message
@@ -3156,11 +3229,28 @@ const ANSWER_NOTE =
 
 // A question or an analysis opens the prompt: a whole first word or a stem of it, so a later "review" in a change request does not count.
 const ASK_FIRST_WORDS = ['qual', 'quais', 'como', 'vale', 'what', 'why', 'how', 'which', 'should']
-const ASK_STEMS = ['analis', 'reanalis', 'estud', 'explic', 'expliq', 'compar', 'avali', 'revis', 'evaluat', 'analyz', 'explain', 'study', 'review']
+const ASK_STEMS = [
+  'analis', 'reanalis', 'estud', 'explic', 'expliq', 'compar', 'avali', 'revis', 'evaluat', 'analyz', 'explain', 'study', 'review',
+  'pesquis', 'research', 'valid', 'confer', 'verifi', 'check',
+]
 const ASK_OPENER_RE = /^(?:o\s+que|por\s+que|da\s+pra)\b/
-// All, in parts, or a numbered range or pair with a task label ("itens 1 e 2", "step 1-3") or "do 1 ao 6"; "de 5 a 10" or "#1a2b3c" is a value.
+// All, in parts, a demonstrative or "both" over a set ("esses pontos", "ambos"), "o A e o B", "o 1-2", or a numbered range or pair with a task label ("itens 1 e 2", "step 1-3") or "do 1 ao 6"; "de 5 a 10" or "#1a2b3c" is a value.
 const SEVERAL_TASKS_RE =
-  /\b(?:todos|todas|all|em partes|in parts)\b|\b(?:prioridade|priority|priorities|parte|part|item|itens|passo|step|etapa|tarefa|task)s?\s+\d{1,2}\s*(?:ao|a|e|and|to|-|,)\s*\d{1,2}\b|\bdo\s+\d{1,2}\s+ao\s+\d{1,2}\b/
+  /\b(?:todos|todas|all|em partes|in parts|esses|essas|estes|estas|these|those|ambos|ambas|both|as\s+duas|os\s+dois)\b|\b(?:o|a)\s+[a-z0-9]\s+e\s+(?:o|a)\s+[a-z0-9]\b|\b(?:o|os|a|as)\s+\d{1,2}\s*-\s*\d{1,2}\b|\b(?:prioridade|priority|priorities|parte|part|item|itens|passo|step|etapa|tarefa|task)s?\s+\d{1,2}\s*(?:ao|a|e|and|to|-|,)\s*\d{1,2}\b|\bdo\s+\d{1,2}\s+ao\s+\d{1,2}\b/
+// A decision that only points back to an earlier proposal ("vamos fazer isso", "do that", "that one"), or a validation or research ask anywhere in the prompt; "this button" or "a test that checks" is part of a direct change.
+const POINTS_BACK_RE =
+  /\b(?:isso|assim|dessa\s+forma|desse\s+jeito|valida|valide|validar|pesquise|pesquisar|(?:this|that)\s+one|(?:do|go\s+with|implement|apply)\s+(?:this|that|it)(?=\s*(?:[.!,;:]|$)|\s+(?:and|please|now|then)\b))\b/
+// A verb that names a change, English and Portuguese imperative or infinitive; whole words on folded text. "deixa eu ver" is not a request.
+const CHANGE_VERB_RE = new RegExp(
+  `\\b(?:${[
+    'add', 'fix', 'change', 'rename', 'remove', 'update', 'make', 'set', 'replace', 'delete', 'move', 'create', 'implement',
+    'adicione', 'adiciona', 'corrija', 'corrige', 'mude', 'muda', 'troque', 'troca', 'remova', 'tira', 'tire', 'deixa(?!\\s+eu\\b)',
+    'deixe', 'faca', 'crie', 'cria', 'ajuste', 'ajusta', 'altere', 'altera', 'coloque', 'coloca', 'atualize', 'atualiza', 'renomeie',
+    'renomeia', 'substitua', 'apague', 'apaga', 'adicionar', 'corrigir', 'mudar', 'trocar', 'remover', 'ajustar', 'alterar', 'colocar',
+    'atualizar', 'renomear', 'substituir', 'apagar', 'arruma', 'arrume', 'conserta', 'conserte', 'bump', 'allow', 'convert', 'aumente', 'aumenta',
+    'diminua', 'diminui', 'suba', 'reinicie', 'reiniciar', 'write', 'escreva', 'escreve', 'escrever',
+  ].join('|')})\\b`,
+)
 
 function asksOrAnalyzes(text) {
   const head = fold(text).replace(/^[^a-z0-9]+/, '')
@@ -3170,9 +3260,15 @@ function asksOrAnalyzes(text) {
   return /^e\s+[oa]\b/.test(head) && head.split(/\s+/).length <= 4
 }
 
-// A question, an analysis or several tasks is not one small change. Unsure means no note: a missing hint costs nothing, a wrong one misroutes.
+// A question, an analysis, a research ask, several tasks or a pointer back is not one small change.
 function asksOrSpansTasks(text) {
-  return text.endsWith('?') || asksOrAnalyzes(text) || SEVERAL_TASKS_RE.test(fold(text))
+  const folded = fold(text)
+  return text.endsWith('?') || asksOrAnalyzes(text) || SEVERAL_TASKS_RE.test(folded) || POINTS_BACK_RE.test(folded)
+}
+
+// Unsure means no note: a missing hint costs nothing, a wrong one misroutes. The note needs a verb that names a change.
+function namesOneChange(text) {
+  return CHANGE_VERB_RE.test(fold(text)) && !asksOrSpansTasks(text)
 }
 
 /**
@@ -3189,7 +3285,7 @@ export function lightHint(prompt, routing, { history = null, conserve = false, p
   if (assessComplexity(text, routing, { projectDir }).score > 0) return ''
   // Delegating would be refused in opus mode, so the session does the task itself.
   const inline = routing.light === 'inline' || (writerMode(routing) === 'opus' && !conserve)
-  if (decision.tier === 'sonnet' && ['default', 'history'].includes(decision.because) && !isRisky(text, routing, { waivable: false }) && !asksOrSpansTasks(text)) {
+  if (decision.tier === 'sonnet' && ['default', 'history'].includes(decision.because) && !isRisky(text, routing, { waivable: false }) && namesOneChange(text)) {
     const small = 'cc-tiers small path: this request looks like one small change. Read the target first. If the change fits in about 20 lines of one file (its test file aside), has a clear expected result, and uses no library API you have not seen in the repo, '
     const risk = 'If it is bigger, touches risky code, or you are unsure, route it as usual.'
     if (inline && !conserve) {
@@ -3343,20 +3439,21 @@ export function prepareReport(ctx, event, payload = {}, { budgetS = ctx.routing.
   if (!WRITER_ROLES.has(event.role) && !SESSION_ROLES.has(event.role)) return event
   if (!slug(headers.TASK || '') || status !== 'pass') return event
   // Only an attempt with a snapshot from its delegation can be held to what it changed.
-  if (projectDir && peek?.snapshot) event = { ...event, workspace: inspectWorkspace(projectDir, peek.snapshot, event, headers) }
+  if (projectDir && peek?.snapshot) event = { ...event, workspace: inspectWorkspace(projectDir, peek.snapshot, event, headers, String(payload.transcript_path || '')) }
   if (!routing.verify) return event
   const tree = projectDir ? treeFingerprint(projectDir) : ''
   const cached = tree && peek?.cache ? (raw) => peek.cache[raw] === tree : null
   // Another writer sharing the tree may save files while the command runs; its edits are not this command's.
   const writing = peek?.writing || []
   const snapshot = projectDir && !writing.length ? () => workspaceSnapshot(projectDir) : null
-  const preexisting = declaredPreexisting(event.text)?.raw || ''
+  const preexisting = declaredPreexisting(event.text, projectDir)?.raw || ''
   const options = { projectDir, allow: routing.verifyAllow, detected: detectedChecks(projectDir), detectedIn: detectedChecks, timeoutS: routing.verifyTimeout, budgetS, cached, snapshot, preexisting, lock: gateLock(ctx.dataDir, projectDir) }
   if (projectDir) {
     const treeCheck = writing.length ? { treeCheck: `skipped: ${writing.join(', ')} still writing` } : {}
     const gate = { ...runGate(event.text, options), tree, ...treeCheck }
     const missing = missingFromGate(gate, projectDir)
-    return { ...event, gate: missing ? { ...gate, missing } : gate }
+    // applyEvent reads the declared pre-existing line again and needs the same dir to parse a cd to an absolute path.
+    return { ...event, projectDir, gate: missing ? { ...gate, missing } : gate }
   }
   // Nothing may run without a project dir; a declaration still tells missing from not validated.
   const gate = parseVerify(event.text).length ? 'unverified' : 'missing'
@@ -3390,14 +3487,66 @@ function missingFromGate(gate, projectDir) {
 }
 
 /** What one writer attempt changed in the tree: sensitive files it did not name, and files outside its CC_TIERS_FILES. */
-function inspectWorkspace(projectDir, before, event, headers) {
+function inspectWorkspace(projectDir, before, event, headers, transcript = '') {
   const after = workspaceSnapshot(projectDir)
   if (!after) return null
   const changed = attemptChanges(before, after)
   const named = new Set(extractFiles(`${stripBriefs(event.prompt || '')}\n${event.text || ''}`, 400))
-  const sensitive = sensitiveFiles(changed).filter((item) => !named.has(item.file))
   const declared = headers.FILES ? declaredFiles(headers, '').files.filter((file) => file !== '.') : []
-  return { changed: changed.slice(0, 50), sensitive, outOfScope: declared.length ? outOfScope(changed, declared) : [] }
+  // CC_TIERS_FILES names a file as much as the prompt text does, a file with no extension (Jenkinsfile) included; only its exact path or a listed dir, never outOfScope's test-name rule.
+  const listed = (file) => named.has(file) || declared.some((item) => file === item || file.startsWith(`${item.replace(/\/$/, '')}/`))
+  let sensitive = sensitiveFiles(changed).filter((item) => !listed(item.file))
+  let outside = declared.length ? outOfScope(changed, declared) : []
+  if (!sensitive.length && !outside.length) return { changed: changed.slice(0, 50), sensitive, outOfScope: outside }
+  const edited = editedBesideWriter(transcript, before.at, after.root)
+  const elsewhere = [...new Set([...sensitive.map((item) => item.file), ...outside])].filter((file) => edited.has(file))
+  sensitive = sensitive.filter((item) => !edited.has(item.file))
+  outside = outside.filter((file) => !edited.has(file))
+  return { changed: changed.slice(0, 50), sensitive, outOfScope: outside, ...(elsewhere.length ? { elsewhere } : {}) }
+}
+
+const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
+
+/**
+ * Repo files edited with an edit tool since `since` by this session's own turns or by another
+ * session in the same transcript folder (its subagents included); this session's subagents are
+ * the writers being judged, so they are not read. Edits made through Bash leave no path here.
+ */
+function editedBesideWriter(transcript, since, root) {
+  const edited = new Set()
+  if (!transcript || !root || !Number.isFinite(since)) return edited
+  const dir = path.dirname(transcript)
+  const own = path.basename(transcript, '.jsonl')
+  const files = [transcript]
+  try {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isFile() && entry.name.endsWith('.jsonl') && entry.name !== `${own}.jsonl`) files.push(path.join(dir, entry.name))
+      else if (entry.isDirectory() && entry.name !== own) {
+        const sub = path.join(dir, entry.name, 'subagents')
+        if (existsSync(sub)) for (const name of readdirSync(sub)) if (name.endsWith('.jsonl')) files.push(path.join(sub, name))
+      }
+    }
+  } catch {
+    return edited
+  }
+  for (const file of files) {
+    try {
+      if (statSync(file).mtimeMs < since) continue
+    } catch {
+      continue
+    }
+    for (const row of transcriptRows(file)) {
+      // In this session's own file a sidechain row is a subagent's turn, not yours.
+      if (row?.type !== 'assistant' || (file === transcript && row.isSidechain) || !(Date.parse(row.timestamp) >= since)) continue
+      for (const block of messageBlocks(row.message || {})) {
+        if (block?.type !== 'tool_use' || !EDIT_TOOLS.has(block.name)) continue
+        const target = String(block.input?.file_path || block.input?.notebook_path || '')
+        const relative = target ? path.relative(root, path.resolve(root, target)) : ''
+        if (relative && !relative.startsWith('..') && !path.isAbsolute(relative)) edited.add(relative.split(path.sep).join('/'))
+      }
+    }
+  }
+  return edited
 }
 
 /** What prepareReport needs from the state, read before the gate runs outside the lock; writing names the other writers on the shared tree. */

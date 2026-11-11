@@ -86,6 +86,30 @@ test('refuses metacharacters and dirs outside the project', () => {
   assert.equal(calls[0].cmd.cwd, 'api/./sub/..')
 })
 
+test('cd to an absolute dir inside the project runs as its relative form, one outside is not run', () => {
+  const { run, calls } = scripted()
+  const ran = (raw) => {
+    const result = gate(`CC_TIERS_VERIFY: ${raw}`, run)
+    assert.equal(result.status, 'pass', raw)
+    return calls.at(-1).cmd.cwd
+  }
+  assert.equal(ran(`cd ${PROJECT}/api && npm test`), 'api')
+  assert.equal(ran(`cd ${PROJECT}/api/sub/../lib && npm test`), 'api/lib')
+  assert.equal(ran(`cd "${PROJECT}/api" && npm test`), 'api')
+  assert.equal(ran(`cd ${PROJECT} && npm test`), '', 'the project dir itself is no cwd')
+  assert.equal(ran('cd api && npm test'), 'api', 'the relative form is unchanged')
+  const before = calls.length
+  for (const raw of ['cd /etc && npm test', `cd ${PROJECT}-other/api && npm test`, `cd ${PROJECT}/../etc && npm test`, `cd ${PROJECT}/api/../../etc && npm test`, 'cd C:\\Windows && npm test']) {
+    const result = gate(`CC_TIERS_VERIFY: ${raw}`, run)
+    assert.equal(result.status, 'unverified', raw)
+    assert.equal(result.failure, null, raw)
+    assert.match(result.unverified[0].reason, /^cd dir outside the project: /, raw)
+  }
+  assert.equal(calls.length, before, 'a dir outside the project never reaches the runner')
+  assert.equal(verify.parseVerify('CC_TIERS_VERIFY: cd /etc && npm test')[0].kind, 'invalid', 'with no project dir an absolute dir is refused')
+  assert.equal(verify.parseVerify(`CC_TIERS_VERIFY: cd ${PROJECT}/api && npm test`, { projectDir: PROJECT })[0].cwd, 'api')
+})
+
 test('allow list matches whole words', () => {
   const allow = verify.parseAllow(' npm test ,node --test,, docker  exec ')
   assert.deepEqual(allow, [['npm', 'test'], ['node', '--test'], ['docker', 'exec']])
@@ -185,14 +209,31 @@ test('out of list → unverified, not fail', () => {
   assert.equal(mixed.status, 'pass')
 })
 
-test('timeout → fail', () => {
-  const { run, calls } = scripted({ code: null, timedOut: true, tail: 'hung', ms: 300000 })
-  const result = gate('CC_TIERS_VERIFY: npm test', run)
-  assert.equal(result.status, 'fail')
-  assert.equal(result.failure.timedOut, true)
-  assert.equal(calls.length, 1, 'a timeout is not retried')
+test('a timeout at the full limit is not validated, not a failure, and the next lines still run', () => {
+  const { run, calls } = scripted({ code: null, timedOut: true, tail: 'hung', ms: 300000 }, { code: 0 })
+  const result = gate('CC_TIERS_VERIFY: npm test\nCC_TIERS_VERIFY: npx tsc', run)
+  assert.equal(result.failure, null)
+  assert.equal(result.status, 'pass')
+  assert.deepEqual(result.verified, ['npx tsc'])
+  assert.deepEqual(result.unverified, [{ raw: 'npm test', reason: 'timed out after 300 s: npm test' }])
+  assert.deepEqual(calls.map((call) => call.cmd.raw), ['npm test', 'npx tsc'], 'a timeout is not retried')
   assert.equal(calls[0].opts.timeoutS, 300)
-  assert.equal(verify.gateMessage('booking', result), 'cc-tiers gate: booking timed out: npm test after 300 s')
+  assert.equal(
+    verify.gateMessage('booking', result),
+    "cc-tiers gate: booking verified: npx tsc\ncc-tiers gate: booking not validated: timed out after 300 s: npm test - not re-run: the writer's own run stands only as declared evidence",
+  )
+  const alone = gate('CC_TIERS_VERIFY: npm test', scripted({ code: null, timedOut: true, ms: 300000 }).run)
+  assert.equal(alone.status, 'unverified')
+  assert.equal(alone.failure, null)
+})
+
+test('a retry that hits the full timeout leaves the first failure', () => {
+  const { run, calls } = scripted({ code: 1, tail: 'not ok 1', ms: 1000 }, { code: null, timedOut: true, tail: 'hung', ms: 300000 })
+  const result = gate('CC_TIERS_VERIFY: npm test', run)
+  assert.equal(calls.length, 2)
+  assert.equal(result.status, 'fail')
+  assert.deepEqual(result.failure, { raw: 'npm test', code: 1, timedOut: false, tail: 'not ok 1', seconds: 300 })
+  assert.deepEqual(result.unverified, [])
 })
 
 test('budget exhausted → unverified', () => {
@@ -437,6 +478,14 @@ test('a cd through a symlink out of the project is refused', async () => {
     assert.equal(inside.status, 'pass')
     const missing = verify.runGate('CC_TIERS_VERIFY: cd gone && npm test', { projectDir: project, allow: ALLOW, timeoutS: 300, budgetS: 600, run })
     assert.equal(missing.status, 'pass', 'a dir that does not exist is judged by its path')
+    // The same dirs written absolute: the real path decides, so a symlink out is refused and one that stays inside runs from its target.
+    calls.length = 0
+    const gateAt = (raw) => verify.runGate(`CC_TIERS_VERIFY: ${raw}`, { projectDir: project, allow: ALLOW, timeoutS: 300, budgetS: 600, run })
+    assert.equal(gateAt(`cd ${path.join(project, 'link')} && npm test`).status, 'unverified')
+    assert.equal(gateAt(`cd ${project}/api/../../outside && npm test`).status, 'unverified', 'a .. that leaves the project')
+    assert.equal(calls.length, 0)
+    assert.equal(gateAt(`cd ${path.join(project, 'api')} && npm test`).status, 'pass')
+    assert.equal(calls[0].cmd.cwd, 'api')
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
