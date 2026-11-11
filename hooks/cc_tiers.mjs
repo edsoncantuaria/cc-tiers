@@ -3212,11 +3212,28 @@ const ANSWER_NOTE =
 
 // A question or an analysis opens the prompt: a whole first word or a stem of it, so a later "review" in a change request does not count.
 const ASK_FIRST_WORDS = ['qual', 'quais', 'como', 'vale', 'what', 'why', 'how', 'which', 'should']
-const ASK_STEMS = ['analis', 'reanalis', 'estud', 'explic', 'expliq', 'compar', 'avali', 'revis', 'evaluat', 'analyz', 'explain', 'study', 'review']
+const ASK_STEMS = [
+  'analis', 'reanalis', 'estud', 'explic', 'expliq', 'compar', 'avali', 'revis', 'evaluat', 'analyz', 'explain', 'study', 'review',
+  'pesquis', 'research', 'valid', 'confer', 'verifi', 'check',
+]
 const ASK_OPENER_RE = /^(?:o\s+que|por\s+que|da\s+pra)\b/
-// All, in parts, or a numbered range or pair with a task label ("itens 1 e 2", "step 1-3") or "do 1 ao 6"; "de 5 a 10" or "#1a2b3c" is a value.
+// All, in parts, a demonstrative or "both" over a set ("esses pontos", "ambos"), "o A e o B", "o 1-2", or a numbered range or pair with a task label ("itens 1 e 2", "step 1-3") or "do 1 ao 6"; "de 5 a 10" or "#1a2b3c" is a value.
 const SEVERAL_TASKS_RE =
-  /\b(?:todos|todas|all|em partes|in parts)\b|\b(?:prioridade|priority|priorities|parte|part|item|itens|passo|step|etapa|tarefa|task)s?\s+\d{1,2}\s*(?:ao|a|e|and|to|-|,)\s*\d{1,2}\b|\bdo\s+\d{1,2}\s+ao\s+\d{1,2}\b/
+  /\b(?:todos|todas|all|em partes|in parts|esses|essas|estes|estas|these|those|ambos|ambas|both|as\s+duas|os\s+dois)\b|\b(?:o|a)\s+[a-z0-9]\s+e\s+(?:o|a)\s+[a-z0-9]\b|\b(?:o|os|a|as)\s+\d{1,2}\s*-\s*\d{1,2}\b|\b(?:prioridade|priority|priorities|parte|part|item|itens|passo|step|etapa|tarefa|task)s?\s+\d{1,2}\s*(?:ao|a|e|and|to|-|,)\s*\d{1,2}\b|\bdo\s+\d{1,2}\s+ao\s+\d{1,2}\b/
+// A decision that only points back to an earlier proposal ("vamos fazer isso", "do that", "that one"), or a validation or research ask anywhere in the prompt; "this button" or "a test that checks" is part of a direct change.
+const POINTS_BACK_RE =
+  /\b(?:isso|assim|dessa\s+forma|desse\s+jeito|valida|valide|validar|pesquise|pesquisar|(?:this|that)\s+one|(?:do|go\s+with|implement|apply)\s+(?:this|that|it)(?=\s*(?:[.!,;:]|$)|\s+(?:and|please|now|then)\b))\b/
+// A verb that names a change, English and Portuguese imperative or infinitive; whole words on folded text. "deixa eu ver" is not a request.
+const CHANGE_VERB_RE = new RegExp(
+  `\\b(?:${[
+    'add', 'fix', 'change', 'rename', 'remove', 'update', 'make', 'set', 'replace', 'delete', 'move', 'create', 'implement',
+    'adicione', 'adiciona', 'corrija', 'corrige', 'mude', 'muda', 'troque', 'troca', 'remova', 'tira', 'tire', 'deixa(?!\\s+eu\\b)',
+    'deixe', 'faca', 'crie', 'cria', 'ajuste', 'ajusta', 'altere', 'altera', 'coloque', 'coloca', 'atualize', 'atualiza', 'renomeie',
+    'renomeia', 'substitua', 'apague', 'apaga', 'adicionar', 'corrigir', 'mudar', 'trocar', 'remover', 'ajustar', 'alterar', 'colocar',
+    'atualizar', 'renomear', 'substituir', 'apagar', 'arruma', 'arrume', 'conserta', 'conserte', 'bump', 'allow', 'convert', 'aumente', 'aumenta',
+    'diminua', 'diminui', 'suba', 'reinicie', 'reiniciar', 'write', 'escreva', 'escreve', 'escrever',
+  ].join('|')})\\b`,
+)
 
 function asksOrAnalyzes(text) {
   const head = fold(text).replace(/^[^a-z0-9]+/, '')
@@ -3226,9 +3243,15 @@ function asksOrAnalyzes(text) {
   return /^e\s+[oa]\b/.test(head) && head.split(/\s+/).length <= 4
 }
 
-// A question, an analysis or several tasks is not one small change. Unsure means no note: a missing hint costs nothing, a wrong one misroutes.
+// A question, an analysis, a research ask, several tasks or a pointer back is not one small change.
 function asksOrSpansTasks(text) {
-  return text.endsWith('?') || asksOrAnalyzes(text) || SEVERAL_TASKS_RE.test(fold(text))
+  const folded = fold(text)
+  return text.endsWith('?') || asksOrAnalyzes(text) || SEVERAL_TASKS_RE.test(folded) || POINTS_BACK_RE.test(folded)
+}
+
+// Unsure means no note: a missing hint costs nothing, a wrong one misroutes. The note needs a verb that names a change.
+function namesOneChange(text) {
+  return CHANGE_VERB_RE.test(fold(text)) && !asksOrSpansTasks(text)
 }
 
 /**
@@ -3245,7 +3268,7 @@ export function lightHint(prompt, routing, { history = null, conserve = false, p
   if (assessComplexity(text, routing, { projectDir }).score > 0) return ''
   // Delegating would be refused in opus mode, so the session does the task itself.
   const inline = routing.light === 'inline' || (writerMode(routing) === 'opus' && !conserve)
-  if (decision.tier === 'sonnet' && ['default', 'history'].includes(decision.because) && !isRisky(text, routing, { waivable: false }) && !asksOrSpansTasks(text)) {
+  if (decision.tier === 'sonnet' && ['default', 'history'].includes(decision.because) && !isRisky(text, routing, { waivable: false }) && namesOneChange(text)) {
     const small = 'cc-tiers small path: this request looks like one small change. Read the target first. If the change fits in about 20 lines of one file (its test file aside), has a clear expected result, and uses no library API you have not seen in the repo, '
     const risk = 'If it is bigger, touches risky code, or you are unsure, route it as usual.'
     if (inline && !conserve) {

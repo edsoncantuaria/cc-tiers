@@ -1668,6 +1668,29 @@ test('a task that escalated past Sonnet starts similar work at the top of the So
   }
 })
 
+test('the small path note needs a positive sign of one direct change', () => {
+  const routing = defaultRouting()
+  const noted = (prompt) => tiers.lightHint(prompt, routing).includes('cc-tiers small path')
+  for (const prompt of [
+    'Add pagination to GET /users',
+    'deixa o video em 1366x768',
+    'corrija o rodape do README para citar a versao 0.13.2',
+    'deixa 1366x768, ta ruim de ver a pagina do chrome ainda',
+    'o limpar esta indo um por um, e esta demorando. Faça igual ao conferir resultado.',
+    'make this button blue', 'add a test that checks the empty list', 'remove the function that logs the token',
+    'write a test for parseDate', 'escreva um teste para o parser',
+  ]) assert.ok(noted(prompt), prompt)
+  for (const prompt of [
+    'continue', 'pode seguir', 'segue', 'sim', 'ok', 'feito', '2', '3 and 2', 'pode commitar', 'pode finalizar', 'travou, continue',
+    'pesquise na rede tambem.', 'estou usando a um tempo o ultimo update, valida como se saiu, se esta bom.',
+    'acha que ele serve para qualquer automacao?', 'finalizou a suite?', 'roda com tela, deixa eu ver',
+    'vamos ajustar esses pontos.', 'corrija esses', 'pode fazer ambos', 'vamos fazer o A e o B', 'vamos fazer o 1-2',
+    'siga com esses 4 itens como proxima tarefa', 'vamos fazer isso!', 'vamos seguir assim', 'vamos fazer dessa forma e testar',
+    'Fix both handlers', 'check the build and fix it', 'corrige isso', 'commita isso',
+    "let's do that", 'go with that one', 'sounds good, do it',
+  ]) assert.ok(!noted(prompt), prompt)
+})
+
 test('the light path flags a one-task trivial request only', () => {
   const routing = defaultRouting()
   assert.ok(tiers.lightHint('fix a typo in README', routing).includes('Do it yourself in this session'))
@@ -1724,18 +1747,14 @@ test('the light path keeps the small and trivial notes for a change request, how
   const routing = defaultRouting()
   const delegate = defaultRouting({ light_path: 'delegate' })
   const small = (note) => note.startsWith('cc-tiers small path: this request looks like one small change.')
-  assert.ok(tiers.lightHint('Vamos fazer a Prioridade 1', routing).includes('cc-tiers small path'))
   assert.ok(tiers.lightHint('Add pagination to GET /users', routing).includes('cc-tiers small path'))
   assert.ok(tiers.lightHint('fix a typo in README', routing).includes('cc-tiers light path'))
   // A change request keeps its note however it is phrased, unless it asks or names several tasks (next test).
   for (const change of [
-    'corrige isso',
     'arruma o teste que quebrou',
     'ajusta o layout do header',
     'muda a cor do botão',
-    'commita isso',
-    'pode subir a versão',
-    'pode commitar, pushar e montar a release',
+    'suba a versão',
     'veja se o teste passa e conserta',
     'can you make the button blue',
     'can you bump the version to 1.2',
@@ -1785,6 +1804,7 @@ test('the small path note stays off a question, an analysis or several tasks', (
     'e o Muster',
     'vamos ajustar todos, do 1 ao 6, em partes conforme ordem sugerida.',
     'Vamos fazer a Prioridade 1 e 2',
+    'Vamos fazer a Prioridade 1',
   ]) quiet(prompt)
   // A leading question or analysis word, in Portuguese or English.
   for (const prompt of [
@@ -1832,7 +1852,6 @@ test('the small path note stays off a question, an analysis or several tasks', (
   ]) quiet(prompt)
   // The same requests without the question or the span keep the note, and a lookup keeps the Haiku light-path note.
   assert.ok(tiers.lightHint('pode trocar o rótulo do botão para Salvar', routing).includes('cc-tiers small path'))
-  assert.ok(tiers.lightHint('Vamos fazer a Prioridade 1', routing).includes('cc-tiers small path'))
   for (const lookup of ['where is fetchUser defined?', 'onde fica o AcessoDAO?']) {
     assert.ok(tiers.lightHint(lookup, delegate).includes('cc-tiers light path'), lookup)
     assert.ok(tiers.lightHint(lookup, routing).includes('cc-tiers light path'), lookup)
