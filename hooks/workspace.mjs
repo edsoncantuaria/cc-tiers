@@ -78,7 +78,7 @@ function contentHash(dir, file) {
 }
 
 /**
- * { files, hashes, truncated } for every file that differs from HEAD or is untracked,
+ * { files, hashes, truncated, root } for every file that differs from HEAD or is untracked,
  * hashing the working-tree content, so a second edit to an already dirty file
  * (tracked or not) shows up. null outside a git repo.
  */
@@ -90,7 +90,7 @@ export function workspaceSnapshot(dir, run = git) {
   const { files, truncated } = parsePorcelainZ(status)
   const hashes = {}
   for (const file of files) hashes[file] = contentHash(root, file)
-  return { files, hashes, truncated }
+  return { files, hashes, truncated, root }
 }
 
 /** HEAD plus the snapshot of every dirty file; '' outside a git repo. */

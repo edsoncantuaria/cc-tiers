@@ -1789,7 +1789,11 @@ function workspaceNote(task, workspace, others) {
     lines.push(`cc-tiers scope: ${task} changed sensitive file(s) its prompt did not name: ${workspace.sensitive.map((item) => `${item.file} (${item.why})`).join(', ')}. Confirm they were intended.`)
   }
   if (workspace.outOfScope?.length) lines.push(`cc-tiers scope: ${task} changed files outside its CC_TIERS_FILES: ${workspace.outOfScope.slice(0, 12).join(', ')}.`)
-  if (lines.length && others.length) lines.push(`Other open tasks (${others.join(', ')}) share the working tree and may have made some of these changes.`)
+  const scoped = lines.length
+  if (workspace.elsewhere?.length) {
+    lines.push(`cc-tiers scope: you or another Claude session edited ${workspace.elsewhere.slice(0, 12).join(', ')} while ${task} ran, so they are not counted against it.`)
+  }
+  if (scoped && others.length) lines.push(`Other open tasks (${others.join(', ')}) share the working tree and may have made some of these changes.`)
   return lines.join('\n')
 }
 
@@ -2318,7 +2322,8 @@ function noteDelegation(state, task, { role, tier, risk, effort, now, files, iso
   if (!state.snapshots || typeof state.snapshots !== 'object') state.snapshots = {}
   for (const name of Object.keys(state.snapshots)) if (!Object.hasOwn(state.active || {}, name)) delete state.snapshots[name]
   const snapshot = projectDir && !isolated ? workspaceSnapshot(projectDir) : null
-  if (snapshot) state.snapshots[task] = snapshot
+  // The time tells later edits by you or another session apart from the writer's.
+  if (snapshot) state.snapshots[task] = { ...snapshot, at: Number(now) }
   if (first) queueEvent(state, { type: 'task.received', task, role, tier })
   queueEvent(state, { type: 'risk.assessed', task, risk: risk.level, factors: risk.factors })
   queueEvent(state, { type: 'model.selected', task, tier, role, effort, risk: risk.level, mode: entry.writer })
@@ -3422,7 +3427,7 @@ export function prepareReport(ctx, event, payload = {}, { budgetS = ctx.routing.
   if (!WRITER_ROLES.has(event.role) && !SESSION_ROLES.has(event.role)) return event
   if (!slug(headers.TASK || '') || status !== 'pass') return event
   // Only an attempt with a snapshot from its delegation can be held to what it changed.
-  if (projectDir && peek?.snapshot) event = { ...event, workspace: inspectWorkspace(projectDir, peek.snapshot, event, headers) }
+  if (projectDir && peek?.snapshot) event = { ...event, workspace: inspectWorkspace(projectDir, peek.snapshot, event, headers, String(payload.transcript_path || '')) }
   if (!routing.verify) return event
   const tree = projectDir ? treeFingerprint(projectDir) : ''
   const cached = tree && peek?.cache ? (raw) => peek.cache[raw] === tree : null
@@ -3470,14 +3475,66 @@ function missingFromGate(gate, projectDir) {
 }
 
 /** What one writer attempt changed in the tree: sensitive files it did not name, and files outside its CC_TIERS_FILES. */
-function inspectWorkspace(projectDir, before, event, headers) {
+function inspectWorkspace(projectDir, before, event, headers, transcript = '') {
   const after = workspaceSnapshot(projectDir)
   if (!after) return null
   const changed = attemptChanges(before, after)
   const named = new Set(extractFiles(`${stripBriefs(event.prompt || '')}\n${event.text || ''}`, 400))
-  const sensitive = sensitiveFiles(changed).filter((item) => !named.has(item.file))
   const declared = headers.FILES ? declaredFiles(headers, '').files.filter((file) => file !== '.') : []
-  return { changed: changed.slice(0, 50), sensitive, outOfScope: declared.length ? outOfScope(changed, declared) : [] }
+  // CC_TIERS_FILES names a file as much as the prompt text does, a file with no extension (Jenkinsfile) included; only its exact path or a listed dir, never outOfScope's test-name rule.
+  const listed = (file) => named.has(file) || declared.some((item) => file === item || file.startsWith(`${item.replace(/\/$/, '')}/`))
+  let sensitive = sensitiveFiles(changed).filter((item) => !listed(item.file))
+  let outside = declared.length ? outOfScope(changed, declared) : []
+  if (!sensitive.length && !outside.length) return { changed: changed.slice(0, 50), sensitive, outOfScope: outside }
+  const edited = editedBesideWriter(transcript, before.at, after.root)
+  const elsewhere = [...new Set([...sensitive.map((item) => item.file), ...outside])].filter((file) => edited.has(file))
+  sensitive = sensitive.filter((item) => !edited.has(item.file))
+  outside = outside.filter((file) => !edited.has(file))
+  return { changed: changed.slice(0, 50), sensitive, outOfScope: outside, ...(elsewhere.length ? { elsewhere } : {}) }
+}
+
+const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
+
+/**
+ * Repo files edited with an edit tool since `since` by this session's own turns or by another
+ * session in the same transcript folder (its subagents included); this session's subagents are
+ * the writers being judged, so they are not read. Edits made through Bash leave no path here.
+ */
+function editedBesideWriter(transcript, since, root) {
+  const edited = new Set()
+  if (!transcript || !root || !Number.isFinite(since)) return edited
+  const dir = path.dirname(transcript)
+  const own = path.basename(transcript, '.jsonl')
+  const files = [transcript]
+  try {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isFile() && entry.name.endsWith('.jsonl') && entry.name !== `${own}.jsonl`) files.push(path.join(dir, entry.name))
+      else if (entry.isDirectory() && entry.name !== own) {
+        const sub = path.join(dir, entry.name, 'subagents')
+        if (existsSync(sub)) for (const name of readdirSync(sub)) if (name.endsWith('.jsonl')) files.push(path.join(sub, name))
+      }
+    }
+  } catch {
+    return edited
+  }
+  for (const file of files) {
+    try {
+      if (statSync(file).mtimeMs < since) continue
+    } catch {
+      continue
+    }
+    for (const row of transcriptRows(file)) {
+      // In this session's own file a sidechain row is a subagent's turn, not yours.
+      if (row?.type !== 'assistant' || (file === transcript && row.isSidechain) || !(Date.parse(row.timestamp) >= since)) continue
+      for (const block of messageBlocks(row.message || {})) {
+        if (block?.type !== 'tool_use' || !EDIT_TOOLS.has(block.name)) continue
+        const target = String(block.input?.file_path || block.input?.notebook_path || '')
+        const relative = target ? path.relative(root, path.resolve(root, target)) : ''
+        if (relative && !relative.startsWith('..') && !path.isAbsolute(relative)) edited.add(relative.split(path.sep).join('/'))
+      }
+    }
+  }
+  return edited
 }
 
 /** What prepareReport needs from the state, read before the gate runs outside the lock; writing names the other writers on the shared tree. */
