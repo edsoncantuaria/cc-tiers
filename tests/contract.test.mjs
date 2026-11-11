@@ -580,6 +580,15 @@ test('checksCommand matches the command a criterion checks, by tokens and not by
   assert.equal(contract.checksCommand(parsed.criteria[1], ''), false, 'a criterion with no command checks nothing')
 })
 
+test('checksCommand follows the cd rule of the other matches', () => {
+  const parsed = contract.parseContract('Checks:\n- `make check-seed` passes\n- `cd a && make lint` passes')
+  assert.equal(contract.checksCommand(parsed.criteria[0], 'cd e2e && make check-seed'), true, 'a criterion without a cd is checked behind any cd')
+  assert.equal(contract.checksCommand(parsed.criteria[0], 'cd e2e && make check-seed-all'), false)
+  assert.equal(contract.checksCommand(parsed.criteria[1], 'cd ./a/ && make lint'), true)
+  assert.equal(contract.checksCommand(parsed.criteria[1], 'cd b && make lint'), false, 'another dir is another command')
+  assert.equal(contract.checksCommand(parsed.criteria[1], 'make lint'), false)
+})
+
 test('evaluateCriteria: a failed report on a check of the declared pre-existing command is inherited, never failed or evidenced', () => {
   const parsed = contract.parseContract('Criteria:\n- it loads\nChecks:\n- `make check-seed` passes')
   const reports = [{ id: 'C1', state: 'pass', evidence: 'loads' }, { id: 'C2', state: 'fail', evidence: 'fails on (f) vendas.carteira' }]
@@ -594,6 +603,13 @@ test('evaluateCriteria: a failed report on a check of the declared pre-existing 
   assert.equal(functional[0].state, 'fail', 'a criterion that is not a check of it still fails')
 })
 
+test('evaluateCriteria: a pre-existing command declared behind a cd is inherited by the criterion that checks it without one', () => {
+  const parsed = contract.parseContract('Checks:\n- `make check-seed` passes')
+  const reports = [{ id: 'C1', state: 'fail', evidence: 'known' }]
+  const [seed] = contract.evaluateCriteria(parsed, { reports, preexisting: 'cd e2e && make check-seed' })
+  assert.deepEqual([seed.state, seed.inherited], ['unverifiable', true])
+})
+
 test('completion: a criterion inherited from the declared pre-existing check keeps the task at most partial', () => {
   const parsed = contract.parseContract('Criteria:\n- it loads\nChecks:\n- `make check-seed` passes')
   const reports = [{ id: 'C1', state: 'pass', evidence: 'node --test tests/x.test.mjs' }, { id: 'C2', state: 'fail', evidence: 'known' }]
@@ -603,4 +619,37 @@ test('completion: a criterion inherited from the declared pre-existing check kee
   assert.ok(done.confidence.reasons.includes('`make check-seed` failed and was declared pre-existing'))
   assert.ok(done.remaining.includes('criterion C2 unverifiable: declared pre-existing: known'))
   assert.equal(done.criteria.failed.length, 0)
+})
+
+test('evaluateCriteria: a check without a cd is credited by the same command verified behind a cd', () => {
+  const parsed = contract.parseContract('Checks:\n- `make lint` exits 0 (repo: Makefile)')
+  const out = contract.evaluateCriteria(parsed, { verified: ['cd integracao-e2e && make lint'] })
+  assert.deepEqual([out[0].state, out[0].evidenced, out[0].evidence], ['pass', true, 'cd integracao-e2e && make lint'])
+  const other = contract.evaluateCriteria(parsed, { verified: ['cd integracao-e2e && make lint-fix'] })
+  assert.equal(other[0].state, 'pending')
+})
+
+test('evaluateCriteria: a declared pass that names the command is evidenced when the gate verified it behind a cd', () => {
+  const parsed = contract.parseContract('Criteria:\n- the lint is clean')
+  const reports = [{ id: 'C1', state: 'pass', evidence: 'ran `make lint`, clean' }]
+  const out = contract.evaluateCriteria(parsed, { reports, verified: ['cd integracao-e2e && make lint'] })
+  assert.deepEqual([out[0].state, out[0].evidenced, out[0].evidence], ['pass', true, 'cd integracao-e2e && make lint'])
+})
+
+test('evaluateCriteria: a criterion with a cd needs the same dir', () => {
+  const parsed = contract.parseContract('Checks:\n- `cd a && make lint`')
+  assert.equal(contract.evaluateCriteria(parsed, { verified: ['cd b && make lint'] })[0].state, 'pending')
+  assert.equal(contract.evaluateCriteria(parsed, { verified: ['make lint'] })[0].state, 'pending')
+  assert.equal(contract.evaluateCriteria(parsed, { verified: ['cd ./a/ && make lint'] })[0].evidenced, true)
+})
+
+test('evaluateCriteria: a repro matches its passes-now command and its REPRO line behind a cd', () => {
+  const parsed = contract.parseContract('Repro:\n- `node --test tests/a.test.mjs` fails before the fix (request)')
+  const verified = ['cd pkg && node --test tests/a.test.mjs']
+  const repro = contract.parseReproLines('CC_TIERS_REPRO: `cd pkg && node --test tests/a.test.mjs` - 2 tests failed')
+  const out = contract.evaluateCriteria(parsed, { verified, repro, reviewPassed: true })[0]
+  assert.deepEqual([out.state, out.evidenced], ['pass', true])
+  assert.match(out.evidence, /failed before \(declared\): 2 tests failed; passes now: `cd pkg && node --test tests\/a\.test\.mjs`/)
+  const crossed = contract.evaluateCriteria(contract.parseContract('Repro:\n- `cd a && node --test`'), { verified: ['cd a && node --test'], repro: contract.parseReproLines('CC_TIERS_REPRO: `cd b && node --test` - failed'), reviewPassed: true })[0]
+  assert.equal(crossed.state, 'pending', 'a REPRO line for another dir is not the failure before')
 })

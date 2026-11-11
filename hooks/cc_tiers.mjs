@@ -1158,6 +1158,7 @@ export function emptyState(sessionId) {
     cursor: freshCursor(),
     contracts: {},
     evidence: {},
+    completions: {},
     snapshots: {},
     verifyCache: {},
     active: {},
@@ -1178,7 +1179,7 @@ export function loadState(file, sessionId) {
     if (!data || typeof data !== 'object' || !data.tasks || typeof data.tasks !== 'object') return emptyState(sessionId)
     const base = emptyState(sessionId)
     for (const key of ['seen', 'spent', 'pending', 'awaiting', 'events', 'audit']) if (!Array.isArray(data[key])) data[key] = base[key]
-    for (const key of ['spend', 'cost', 'log', 'background', 'finished', 'researched', 'contracts', 'evidence', 'snapshots', 'verifyCache', 'active']) {
+    for (const key of ['spend', 'cost', 'log', 'background', 'finished', 'researched', 'contracts', 'evidence', 'completions', 'snapshots', 'verifyCache', 'active']) {
       if (!data[key] || typeof data[key] !== 'object' || Array.isArray(data[key])) data[key] = base[key]
     }
     if (!data.cursor || typeof data.cursor !== 'object') data.cursor = base.cursor
@@ -1449,6 +1450,8 @@ export function applyEvent(state, event, routing) {
   if (role === 'researcher') return applyResearch(state, meta, task, headers, event)
   // A delegated writer that reported, or crashed, is no longer editing the tree.
   if (DELEGATED_WRITERS.has(role)) releaseActive(state, task)
+  // Any writer report, a failure or crash too, makes the completion printed before it stale.
+  if (!REVIEW_ROLES.has(role) && state.completions) delete state.completions[task]
   let tier = (headers.TIER || '').toLowerCase()
   const defaultTier = role === 'checker' ? 'haiku' : role === 'reviewer' ? 'sonnet' : ROLES[role]
   if (!TIERS.includes(tier)) tier = defaultTier
@@ -1811,6 +1814,9 @@ function rememberGate(state, gate) {
  * and not run, and a qualitative confidence. A pass is never more than the evidence shows.
  */
 function finishTask(state, task, routing, { reviewed, tier }) {
+  // A writer report or delegation drops the stored line, so one still there is a review asked again: it repeats that completion.
+  const printed = own(state.completions, task)
+  if (printed) return printed
   const evidence = own(state.evidence, task) || {}
   const contract = own(state.contracts, task) || { criteria: [] }
   const entry = own(state.log, task)
@@ -1843,7 +1849,12 @@ function finishTask(state, task, routing, { reviewed, tier }) {
   const line =
     `cc-tiers completion: ${task} ${result.status} on ${tier}${after}, ${risk} risk; confidence ${result.confidence.level} (${result.confidence.reasons.join('; ')}). ` +
     `Checks run ${checks.run}${reused}, passed ${checks.passed}, failed ${checks.failed}, not run ${checks.notRun}.${criteriaPart}${remaining}`
-  return { result: { status: result.status, confidence: result.confidence.level, risk }, line: criteria.length ? `${line}\n${criteriaTable(task, criteria)}` : line }
+  const finished = { result: { status: result.status, confidence: result.confidence.level, risk }, line: criteria.length ? `${line}\n${criteriaTable(task, criteria)}` : line }
+  const completions = state.completions && typeof state.completions === 'object' ? state.completions : (state.completions = {})
+  completions[task] = finished
+  const names = Object.keys(completions)
+  names.slice(0, Math.max(0, names.length - MAX_SEEN)).forEach((name) => delete completions[name])
+  return finished
 }
 
 /** The evaluated criteria as a markdown table the orchestrator can paste into a commit or PR body. */
@@ -2317,6 +2328,7 @@ function noteDelegation(state, task, { role, tier, risk, effort, now, files, iso
   entry.risk = risk.level
   entry.factors = risk.factors.slice(0, 8)
   if (!entry.writer) entry.writer = mode
+  if (state.completions) delete state.completions[task]
   // A dispatcher's report is not released like a delegated writer's, so it is not registered as one.
   if (DELEGATED_WRITERS.has(role)) registerActive(state, { task, role, files, isolated, now })
   if (!state.snapshots || typeof state.snapshots !== 'object') state.snapshots = {}

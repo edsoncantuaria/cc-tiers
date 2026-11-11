@@ -3117,6 +3117,20 @@ test('a pass whose only failed criteria check the declared pre-existing command 
   assert.match(reviewed.message, /criterion C2 unverifiable: declared pre-existing: make check-seed fails on \(f\) vendas\.carteira/)
 })
 
+test('a pre-existing declaration behind a cd covers the criterion that checks the command without one', () => {
+  const routing = defaultRouting()
+  const state = seedState()
+  const command = 'cd e2e && make check-seed'
+  const text = [report('implementer', 'sonnet', 'pass'), 'CC_TIERS_VERIFY: npm test', `CC_TIERS_VERIFY: ${command}`, SEED_C1_PASS, SEED_C2_FAIL, `CC_TIERS_PREEXISTING: ${command} - fails on (f) vendas.carteira`].join('\n')
+  const notRun = { ...SEED_NOT_RUN, unverified: [{ raw: command, reason: `outside verify_allow: ${command}` }] }
+  const applied = tiers.applyEvent(state, gateEvent('a', text, notRun), routing)
+  assert.equal(applied.meta.outcome, 'review')
+  assert.equal(state.evidence[SEED_TASK].preexisting.command, command)
+  const reviewed = apply(state, routing, 'k', 'reviewer', report('reviewer', 'opus', 'pass'))
+  assert.equal(reviewed.meta.completion.status, 'partial')
+  assert.match(reviewed.message, /criterion C2 unverifiable: declared pre-existing: make check-seed fails on \(f\) vendas\.carteira/)
+})
+
 test('the pre-existing path of a gate that ran the command also accepts its failed check criteria, and no others', () => {
   const routing = defaultRouting()
   const ran = { ...GATE_BASE, status: 'fail', verified: ['npm test'], preexisting: { raw: 'make check-seed', code: 1, timedOut: false, tail: 'FAIL (f)', seconds: 2 } }
@@ -3541,4 +3555,94 @@ test('review floor: a change to a sensitive file the prompt did not name cannot 
   const applied = tiers.applyEvent(state, flagged, routing)
   assert.equal(applied.meta.outcome, 'review')
   assert.match(applied.message, /Review cannot be skipped: it changed a sensitive file the prompt did not name/)
+})
+
+const LINT_SPEC = 'Criteria:\n- the lint is clean (request)\nChecks:\n- `make lint` exits 0 (repo: Makefile)'
+const LINT_GATE = { ...GATE_BASE, status: 'pass', verified: ['cd integracao-e2e && make lint'] }
+const lintReport = `${report('implementer', 'sonnet', 'pass')}\nCC_TIERS_CRITERION: C1 pass - ran \`make lint\`\nCC_TIERS_CRITERION: C2 pass - ran it\nCC_TIERS_VERIFY: cd integracao-e2e && make lint`
+const completionLine = (message) => message.split('\n').find((line) => line.startsWith('cc-tiers completion:'))
+
+test('a check run behind a cd by the gate evidences the criterion in the completion line', () => {
+  const routing = defaultRouting({ review_policy: 'always' })
+  const state = tiers.emptyState('s')
+  state.contracts = { 'users-pagination': parseContract(LINT_SPEC) }
+  assert.equal(tiers.applyEvent(state, gateEvent('a', lintReport, LINT_GATE), routing).meta.outcome, 'review')
+  const reviewed = apply(state, routing, 'b', 'reviewer', report('reviewer', 'opus', 'pass'))
+  assert.match(reviewed.message, /Criteria with evidence: 2\/2\./)
+  assert.match(reviewed.message, /\| C2 `make lint` exits 0 \| pass \| cd integracao-e2e && make lint \|/)
+  assert.doesNotMatch(reviewed.message, /did not run/)
+})
+
+// The log entry is what lets a review of a finished task find its writer's tier.
+const logged = (state, applied) => {
+  tiers.logReport(state, applied.meta)
+  return applied
+}
+
+test('a second review pass of a finished task repeats its completion, and a new writer pass computes its own', () => {
+  const routing = defaultRouting({ review_policy: 'always' })
+  const state = tiers.emptyState('s')
+  state.contracts = { 'users-pagination': parseContract(LINT_SPEC) }
+  logged(state, tiers.applyEvent(state, gateEvent('a', lintReport, LINT_GATE), routing))
+  const first = logged(state, apply(state, routing, 'b', 'reviewer', report('reviewer', 'opus', 'pass')))
+  assert.ok(completionLine(first.message))
+  const again = logged(state, apply(state, routing, 'c', 'reviewer', report('reviewer', 'opus', 'pass')))
+  assert.equal(completionLine(again.message), completionLine(first.message))
+  assert.deepEqual(again.meta.completion, first.meta.completion)
+  assert.doesNotMatch(again.message, /No spec criteria/)
+
+  const plain = `${report('implementer', 'sonnet', 'pass')}\nCC_TIERS_VERIFY: npm test`
+  logged(state, tiers.applyEvent(state, gateEvent('d', plain, { ...GATE_BASE, status: 'pass', verified: ['npm test'] }), routing))
+  const next = logged(state, apply(state, routing, 'e', 'reviewer', report('reviewer', 'opus', 'pass')))
+  assert.match(completionLine(next.message), /Checks run 1, passed 1/)
+  assert.match(completionLine(next.message), /No spec criteria/)
+})
+
+const orchestratorReport = (status) => ({
+  kind: 'report',
+  id: 'o1',
+  role: 'orchestrator',
+  prompt: '',
+  text: `CC_TIERS_TASK: users-pagination\nCC_TIERS_TIER: opus\nCC_TIERS_ROLE: orchestrator\nCC_TIERS_STATUS: ${status}\nCC_TIERS_REASON: x`,
+})
+const WRITER_ATTEMPTS = {
+  'a writer pass whose gate failed': (state, routing) =>
+    tiers.applyEvent(state, gateEvent('c', lintReport, { ...GATE_BASE, status: 'fail', failure: { raw: 'make lint', code: 1, timedOut: false, tail: 'boom', seconds: 1 } }), routing),
+  'a writer that failed': (state, routing) => tiers.applyEvent(state, gateEvent('c', report('implementer', 'sonnet', 'fail')), routing),
+  'a writer that crashed': (state, routing) =>
+    tiers.applyEvent(state, tiers.normalizeEvent(event('c', 'implementer', '', 'CC_TIERS_TASK: users-pagination', true)), routing),
+  'the orchestrator attempt that failed': (state, routing) => tiers.applyEvent(state, orchestratorReport('fail'), routing),
+  'a new writer delegation': (state, routing) => {
+    const prompt = 'CC_TIERS_TASK: users-pagination\nCC_TIERS_TIER: sonnet\nCC_TIERS_ROLE: implementer\n'
+    assert.equal(tiers.checkDelegation(state, { subagent_type: 'cc-tiers:implementer', prompt }, defaultRouting({ research: 'off', specify: 'off' })).deny, '')
+  },
+}
+
+for (const [name, attempt] of Object.entries(WRITER_ATTEMPTS)) {
+  test(`a review pass never repeats a completion older than ${name}`, () => {
+    const routing = defaultRouting({ review_policy: 'always' })
+    const state = tiers.emptyState('s')
+    state.contracts = { 'users-pagination': parseContract(LINT_SPEC) }
+    logged(state, tiers.applyEvent(state, gateEvent('a', lintReport, LINT_GATE), routing))
+    const first = logged(state, apply(state, routing, 'b', 'reviewer', report('reviewer', 'opus', 'pass')))
+    assert.match(completionLine(first.message), /verified on sonnet/)
+    assert.ok(state.completions['users-pagination'])
+
+    const attempted = attempt(state, routing)
+    if (attempted) logged(state, attempted)
+    assert.equal(state.completions['users-pagination'], undefined, 'the stored line is dropped')
+    const later = apply(state, routing, 'd', 'reviewer', report('reviewer', 'opus', 'pass'))
+    assert.doesNotMatch(later.message, /Criteria with evidence: 2\/2|users-pagination verified on sonnet/)
+  })
+}
+
+test('stored completions stay bounded', () => {
+  const state = tiers.emptyState('s')
+  state.completions = Object.fromEntries(Array.from({ length: 205 }, (_, index) => [`t${index}`, { result: {}, line: '' }]))
+  const routing = defaultRouting({ review_policy: 'always' })
+  tiers.applyEvent(state, gateEvent('a', lintReport, LINT_GATE), routing)
+  apply(state, routing, 'b', 'reviewer', report('reviewer', 'opus', 'pass'))
+  assert.equal(Object.keys(state.completions).length, 200)
+  assert.ok(state.completions['users-pagination'])
+  assert.equal(state.completions.t0, undefined)
 })
