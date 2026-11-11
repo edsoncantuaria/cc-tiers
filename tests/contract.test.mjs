@@ -571,3 +571,36 @@ test('completion: the checks of an inherited failure count the commands that ran
   const criteria = contract.evaluateCriteria(contract.parseContract('Criteria:\n- it paginates'), { reports: report, verified: ran.verified, reviewPassed: false })
   assert.equal(criteria[0].evidenced, false, 'npm test failed and was not verified, so citing it proves nothing without a review')
 })
+
+test('checksCommand matches the command a criterion checks, by tokens and not by prefix', () => {
+  const parsed = contract.parseContract('Checks:\n- `make  check-seed` passes\nCriteria:\n- it loads')
+  assert.equal(contract.checksCommand(parsed.criteria[0], 'make check-seed'), true)
+  assert.equal(contract.checksCommand(parsed.criteria[0], 'make check-seed-all'), false)
+  assert.equal(contract.checksCommand(parsed.criteria[0], 'make'), false)
+  assert.equal(contract.checksCommand(parsed.criteria[1], ''), false, 'a criterion with no command checks nothing')
+})
+
+test('evaluateCriteria: a failed report on a check of the declared pre-existing command is inherited, never failed or evidenced', () => {
+  const parsed = contract.parseContract('Criteria:\n- it loads\nChecks:\n- `make check-seed` passes')
+  const reports = [{ id: 'C1', state: 'pass', evidence: 'loads' }, { id: 'C2', state: 'fail', evidence: 'fails on (f) vendas.carteira' }]
+  assert.equal(contract.evaluateCriteria(parsed, { reports })[1].state, 'fail', 'without a declaration it fails as always')
+  assert.equal(contract.evaluateCriteria(parsed, { reports, preexisting: 'make other' })[1].state, 'fail', 'another declared command changes nothing')
+  const [, seed] = contract.evaluateCriteria(parsed, { reports, preexisting: 'make check-seed' })
+  assert.equal(seed.state, 'unverifiable')
+  assert.equal(seed.evidenced, false)
+  assert.equal(seed.inherited, true)
+  assert.equal(seed.evidence, 'declared pre-existing: fails on (f) vendas.carteira')
+  const functional = contract.evaluateCriteria(parsed, { reports: [{ id: 'C1', state: 'fail', evidence: 'broke' }], preexisting: 'make check-seed' })
+  assert.equal(functional[0].state, 'fail', 'a criterion that is not a check of it still fails')
+})
+
+test('completion: a criterion inherited from the declared pre-existing check keeps the task at most partial', () => {
+  const parsed = contract.parseContract('Criteria:\n- it loads\nChecks:\n- `make check-seed` passes')
+  const reports = [{ id: 'C1', state: 'pass', evidence: 'node --test tests/x.test.mjs' }, { id: 'C2', state: 'fail', evidence: 'known' }]
+  const criteria = contract.evaluateCriteria(parsed, { reports, verified: ['node --test tests/x.test.mjs'], reviewPassed: true, preexisting: 'make check-seed' })
+  const done = contract.completion({ criteria, gate: gate({ unverified: [{ raw: 'make check-seed', reason: 'outside verify_allow' }] }), review: 'pass', preexisting: 'make check-seed' })
+  assert.equal(done.status, 'partial')
+  assert.ok(done.confidence.reasons.includes('`make check-seed` failed and was declared pre-existing'))
+  assert.ok(done.remaining.includes('criterion C2 unverifiable: declared pre-existing: known'))
+  assert.equal(done.criteria.failed.length, 0)
+})

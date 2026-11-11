@@ -78,7 +78,7 @@ export function renderReport(states) {
       .map(([tier, level]) => `${tier} ${level}`)
       .join(', ')
     const reviews = [...new Set(entry.reviews || [])].join(', ')
-    const status = entry.status === 'done' && entry.finished ? `done on ${entry.finished}` : entry.status
+    const status = `${entry.status === 'done' && entry.finished ? `done on ${entry.finished}` : entry.status}${entry.uncounted ? ` (${entry.uncounted} failure uncounted: spec corrected)` : ''}`
     lines.push(
       `| ${cell(task)} | ${cell((entry.tiers || []).join(' → '))} | ${entry.attempts ?? 0} | ${entry.escalations ?? 0} | ${cell(effort)} | ${cell(reviews)} | ${verifyCell(entry.verify, entry.hookErrors)} | ${cell(status)} | ${row ? dollars(costTotal(row)) : '—'} | ${row ? dollars(row.opusRate) : '—'} | ${cell(entry.risk)} | ${cell(entry.completion)} | ${cell(entry.confidence)} | ${minutes(entry.durationMs)} |`,
     )

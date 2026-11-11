@@ -53,7 +53,7 @@ function matchRow() {
 
 /** What happened to one task, folded from its events in order. */
 function journeyOf(journeys, task) {
-  if (!journeys.has(task)) journeys.set(task, { start: '', risk: '', escalated: false, blocking: false, passed: false, stopped: false, finish: '', matches: new Set(), redone: 0, redoTier: '', mode: '', usd: 0 })
+  if (!journeys.has(task)) journeys.set(task, { start: '', risk: '', escalated: false, blocking: false, passed: false, stopped: false, finish: '', matches: new Set(), redone: 0, redoTier: '', mode: '', usd: 0, diagnosed: 0 })
   return journeys.get(task)
 }
 
@@ -72,6 +72,7 @@ export function summarize(events, { minSample = 10 } = {}) {
     confidence: {},
     hindsight: { byStart: {}, overRouted: 0 },
     redone: { tasks: 0, byTier: {} },
+    uncounted: 0,
     byMode: {},
     failureResearch: {},
     sample: 'small',
@@ -97,7 +98,18 @@ export function summarize(events, { minSample = 10 } = {}) {
       case 'failure.diagnosed':
         bump(summary.byCategory, event.category || 'unknown')
         if (event.task) reworked.add(event.task)
+        if (journey) journey.diagnosed += 1
         break
+      case 'failure.uncounted': {
+        // A respec showed the spec, not the model, caused that failure: it is no rework and no failure category.
+        summary.uncounted += 1
+        const category = event.category || 'unknown'
+        if (summary.byCategory[category] > 1) summary.byCategory[category] -= 1
+        else delete summary.byCategory[category]
+        if (journey) journey.diagnosed = Math.max(0, journey.diagnosed - 1)
+        if (journey && !journey.diagnosed) reworked.delete(event.task)
+        break
+      }
       case 'research.failure': {
         const match = event.outcome || 'unknown'
         slot(summary.failureResearch, match, matchRow).searches += 1
@@ -208,6 +220,7 @@ export function renderInsights(summary) {
     `Sample: ${summary.sample}.`,
   ]
   if (summary.redone.tasks) lines.splice(3, 0, `Sent back by the user: ${summary.redone.tasks} of ${summary.rework.total} tasks.`)
+  if (summary.uncounted) lines.splice(3, 0, `Failures not counted after a spec correction (CC_TIERS_RESPEC): ${summary.uncounted}.`)
   lines.push(...table('Failures by category', ['category', 'count'], counts(summary.byCategory)))
   lines.push(...table('Escalation reasons', ['reason', 'count'], counts(summary.escalationReasons)))
   const costRows = Object.entries(summary.costByRisk)

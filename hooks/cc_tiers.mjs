@@ -21,7 +21,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { TIERS, dollars, extractFiles, slug, writeAtomic } from './base.mjs'
 import { BUDGET_OVERRIDE_RE, budgetMessage, budgetStatus, parseTaskBudget } from './budget.mjs'
-import { completion, evaluateCriteria, oneSpacing, parseContract, parseCriterionReports, parseReproLines, plural, weakenedCriteria } from './contract.mjs'
+import { checksCommand, completion, evaluateCriteria, oneSpacing, parseContract, parseCriterionReports, parseReproLines, plural, weakenedCriteria } from './contract.mjs'
 import { declaresPackage, diagnoseFailure, failureResearchLines, missingPackage, nextAction } from './diagnose.mjs'
 import { MEMORY_BEGIN, MEMORY_END, MEMORY_IGNORE, addRecord, formatRecall, loadMemory, memoryPath, recall, sanitize, saveMemory } from './memory.mjs'
 import { checkParallel, declaredFiles, overlaps, pruneActive, registerActive, releaseActive } from './parallel.mjs'
@@ -1059,10 +1059,10 @@ function coveredByReview(state, tasks, task, event) {
   return Boolean(launched && !own(tasks, task) && Number(own(state.log, task)?.reviewLaunched) > launched)
 }
 
-/** The skipped infra and pre-existing failures and the failure searches suggested travel with the task across tiers, so their limits bound the whole task. */
+/** The skipped infra and pre-existing failures, the failure searches suggested and the one respec uncount travel with the task across tiers, so their limits bound the whole task. */
 function infraKept(entry) {
   const kept = {}
-  for (const key of ['infra', 'preexisting', 'searches']) if (Number(entry?.[key])) kept[key] = Number(entry[key])
+  for (const key of ['infra', 'preexisting', 'searches', 'respecUncounted']) if (Number(entry?.[key])) kept[key] = Number(entry[key])
   return kept
 }
 
@@ -1533,17 +1533,17 @@ export function applyEvent(state, event, routing) {
     rememberGate(state, gate)
   }
 
-  // A pass that reports a mandatory criterion as failed is a failure, whatever the status line says.
+  // A pass that reports a mandatory criterion as failed is a failure, whatever the status line says, unless it is a check of the command the writer declared pre-existing.
   const contract = own(state.contracts, task)
   const criterionReports = REVIEW_ROLES.has(role) ? [] : parseCriterionReports(event.text || '')
   const repro = REVIEW_ROLES.has(role) ? [] : parseReproLines(stripBriefs(event.text || ''))
-  if (status === 'pass' && contract && criterionReports.length) {
-    const mandatory = new Set(contract.criteria.filter((item) => item.mandatory).map((item) => item.id))
-    const failedIds = criterionReports.filter((item) => item.state === 'fail' && mandatory.has(item.id)).map((item) => item.id)
-    if (failedIds.length) {
-      status = 'fail'
-      gateReason = `the report says pass but criteria ${failedIds.join(', ')} failed`
-    }
+  const failedCriteria = (contract?.criteria || []).filter((item) => item.mandatory && criterionReports.some((report) => report.id === item.id && report.state === 'fail'))
+  const declared = REVIEW_ROLES.has(role) ? null : declaredPreexisting(event.text || '', event.projectDir)
+  const preexistingUsed = Number(own(tasks, task)?.preexisting) || 0
+  const inherited = preexistingAccepted({ declared, gate: meta.gate, failed: failedCriteria, used: preexistingUsed, routing })
+  if (status === 'pass' && failedCriteria.length && !inherited) {
+    status = 'fail'
+    gateReason = `the report says pass but criteria ${failedCriteria.map((item) => item.id).join(', ')} failed`
   }
   const covered = status === 'pass' && !REVIEW_ROLES.has(role) && coveredByReview(state, tasks, task, event)
   if (status === 'pass' && !REVIEW_ROLES.has(role) && !covered) recordEvidence(state, task, criterionReports, meta.gate || null, { repro })
@@ -1620,23 +1620,21 @@ export function applyEvent(state, event, routing) {
           `It was not counted as a failure (${skipped + 1} of ${MAX_INFRA_SKIPS}). ${uninstalled ? `Install ${uninstalled}` : 'Fix the environment'} and run the same tier again; the next environment failure after that counts.`,
       }
     }
-    // A failure the writer declares the base already had: not counted once per task, and only an Opus review that confirms it lets the task finish.
-    // Only when every other command ran and passed: any other failing command is gate.failure and counts as always.
-    const declared = declaredPreexisting(event.text, event.projectDir)
-    const used = Number(current.preexisting) || 0
-    const othersPassed = !meta.gate.failure && !meta.gate.unverified.length
-    if (declared && declared.raw === meta.gate.preexisting?.raw && othersPassed && used < MAX_PREEXISTING_SKIPS && routing.reviewPolicy !== 'never') {
-      tasks[task] = { ...current, tier, failures: current.failures || [], preexisting: used + 1 }
-      recordEvidence(state, task, criterionReports, meta.gate, { preexisting: { command: declared.command, evidence: declared.evidence }, repro })
-      meta.outcome = 'review'
-      meta.floor = reviewFloor(state, task, routing, flagged)
-      return {
-        state,
-        meta,
-        message:
-          `${gateNote}${task}: \`${declared.command}\` failed, and the writer declares it fails without this change too (${declared.evidence}). ` +
-          `Not counted as a failure (${used + 1} of ${MAX_PREEXISTING_SKIPS}). Send it to cc-tiers:reviewer (Opus): the review must confirm the failure exists without this change; a review that cannot confirm it rejects.`,
-      }
+  }
+
+  // A failure the writer declares the base already had: not counted once per task, and only an Opus review that confirms it lets the task finish.
+  if (inherited) {
+    tasks[task] = { ...current, tier, failures: current.failures || [], preexisting: preexistingUsed + 1 }
+    recordEvidence(state, task, criterionReports, meta.gate, { preexisting: { command: declared.command, evidence: declared.evidence }, repro })
+    meta.outcome = 'review'
+    meta.floor = reviewFloor(state, task, routing, flagged)
+    const what = declared.raw === meta.gate.preexisting?.raw ? `\`${declared.command}\` failed` : `the writer reports \`${declared.command}\` failing (criteria ${failedCriteria.map((item) => item.id).join(', ')}) and the gate did not run it`
+    return {
+      state,
+      meta,
+      message:
+        `${gateNote}${task}: ${what}, and the writer declares it fails without this change too (${declared.evidence}). ` +
+        `Not counted as a failure (${preexistingUsed + 1} of ${MAX_PREEXISTING_SKIPS}). Send it to cc-tiers:reviewer (Opus): the review must confirm the failure exists without this change; a review that cannot confirm it rejects.`,
     }
   }
 
@@ -1716,6 +1714,9 @@ export function applyEvent(state, event, routing) {
     }
   } else {
     const applied = applyFailure(tasks, task, current, tier, role, reason, routing, gateDetail, { source: event.kind === 'error' ? 'error' : meta.gate?.status === 'fail' ? 'gate' : 'report' })
+    // A retry that counted on criteria the writer reported failed remembers them: a respec of those criteria on the next delegation removes it.
+    const onCriteria = failedCriteria.length > 0 && event.kind !== 'error' && !['fail', 'missing'].includes(meta.gate?.status)
+    if (applied.outcome === 'retry' && onCriteria) tasks[task].specFailed = failedCriteria.map(({ id, text, mandatory }) => ({ id, text, mandatory }))
     meta.outcome = applied.outcome
     message = applied.message
     meta.haikuFailure = applied.haikuFailure
@@ -1742,6 +1743,17 @@ function declaredPreexisting(text, projectDir = '') {
     if (command && declared.startsWith(`${command} - `)) return { raw: line.raw, command, evidence: clip(declared.slice(command.length + 3), 200) }
   }
   return null
+}
+
+/**
+ * Whether a declared pre-existing failure is accepted: once per task, and only when everything else the report says held up.
+ * Either the gate ran the declared command and it failed, or the gate never ran it and the report fails the checks of it.
+ */
+function preexistingAccepted({ declared, gate, failed, used, routing }) {
+  if (!declared || !gate || used >= MAX_PREEXISTING_SKIPS || routing.reviewPolicy === 'never') return false
+  if (gate.failure || gate.unverified.some((item) => item.raw !== declared.raw)) return false
+  if (failed.some((criterion) => !checksCommand(criterion, declared.command))) return false
+  return declared.raw === gate.preexisting?.raw || (failed.length > 0 && gate.unverified.some((item) => item.raw === declared.raw))
 }
 
 /** What a writer's report and gate proved, kept until the task finishes; preexisting is the failure the writer declared it did not cause, repro how its commands failed before the fix. */
@@ -1799,7 +1811,7 @@ function finishTask(state, task, routing, { reviewed, tier }) {
   const contract = own(state.contracts, task) || { criteria: [] }
   const entry = own(state.log, task)
   const risk = entry?.risk || 'medium'
-  const criteria = evaluateCriteria(contract, { reports: evidence.reports || [], verified: evidence.verified || [], repro: evidence.repro || [], reviewPassed: reviewed })
+  const criteria = evaluateCriteria(contract, { reports: evidence.reports || [], verified: evidence.verified || [], repro: evidence.repro || [], reviewPassed: reviewed, preexisting: evidence.preexisting?.command })
   const result = completion({
     criteria,
     risk,
@@ -1943,6 +1955,8 @@ function applyFailure(tasks, task, current, tier, role, reason, routing, detail 
   const diagnosis = diagnoseFailure({ reason, detail, source, reviewCategory, previous: current.diagnoses || [] })
   const diagnoses = [...(current.diagnoses || []), { category: diagnosis.category, signature: diagnosis.signature, confirmed: diagnosis.confirmed }].slice(-MAX_CARRIED)
   current = { ...current, diagnoses }
+  // Only the failure just counted can be the spec's: an earlier one's criteria no longer qualify.
+  delete current.specFailed
   const failures = [...(current.failures || [])]
   failures.push(`${tier}/${role}: ${reason}${detail ? `\n${detail}` : ''}`)
   current.failures = failures
@@ -2125,7 +2139,7 @@ export function checkDelegation(state, toolInput, routing, { history = null, pro
       'cc-tiers: the classifier is haiku, so a cc-tiers:worker prompt may not carry CC_TIERS_CLASSIFY: skip. Remove that line and call it again.',
     )
   }
-  const held = holdContract(state, task, prompt, headers, routing)
+  const held = holdContract(state, task, prompt, headers, routing, own(state.tasks, task)?.specFailed)
   if (held.deny) return refuse(held.deny)
   const routed = stripBriefs(prompt)
   const risk = taskRisk(routed, routing, { history, projectDir })
@@ -2208,6 +2222,10 @@ export function checkDelegation(state, toolInput, routing, { history = null, pro
     }
   }
 
+  // Same tier only: a respec after an escalation finds the failed criteria already dropped from the entry.
+  const uncounted = held.dropped?.length && current?.specFailed ? uncountSpecFailure(state, task, current, held.dropped, role, routing) : ''
+  if (uncounted) notes.push(uncounted)
+  if (current) delete current.specFailed
   const effort = attemptEffort(routing, role, tier, current, routed, history, input.effort, risk)
   if (effort.note) notes.push(effort.note)
   const level = effort.level || parseEffort(input.effort) || AGENT_EFFORT[role]
@@ -2223,7 +2241,7 @@ export function checkDelegation(state, toolInput, routing, { history = null, pro
 }
 
 /** Keeps the first spec a task was delegated with; a later attempt may add criteria, never drop or reword one silently. */
-function holdContract(state, task, prompt, headers, routing) {
+function holdContract(state, task, prompt, headers, routing, failed = []) {
   if (!routing.specify) return {}
   const contracts = state.contracts && typeof state.contracts === 'object' ? state.contracts : (state.contracts = {})
   const stored = own(contracts, task)
@@ -2257,7 +2275,25 @@ function holdContract(state, task, prompt, headers, routing) {
     const names = Object.keys(contracts)
     names.slice(0, Math.max(0, names.length - MAX_SEEN)).forEach((name) => delete contracts[name])
   }
-  return { commit, kept }
+  // The criteria a counted failure named that this respec drops or rewords: that failure was the spec's.
+  const dropped = respec && failed.length ? weakenedCriteria({ criteria: failed }, next) : []
+  return { commit, kept, dropped }
+}
+
+/** Removes the last counted failure when its own criteria were the ones a respec fixed; once per task, and the audit and telemetry say so. */
+function uncountSpecFailure(state, task, current, dropped, role, routing) {
+  if (current.respecUncounted || !current.failures?.length) return ''
+  const diagnosis = current.diagnoses?.at(-1)
+  current.failures = current.failures.slice(0, -1)
+  current.diagnoses = (current.diagnoses || []).slice(0, -1)
+  current.respecUncounted = 1
+  const entry = logEntry(state, task)
+  entry.failures = Math.max(0, (Number(entry.failures) || 0) - 1)
+  entry.uncounted = (Number(entry.uncounted) || 0) + 1
+  const list = dropped.map((item) => `${item.id} "${clip(item.text, 70)}"`).join('; ')
+  auditState(state, `${task}: ${current.tier} failure uncounted: the respec changed ${list}, which that failure named`)
+  queueEvent(state, { type: 'failure.uncounted', task, tier: current.tier, role, category: diagnosis?.category, source: 'respec' })
+  return `cc-tiers: the last ${current.tier} failure of ${task} named ${list}, and CC_TIERS_RESPEC changed it, so the spec was the cause. That failure is no longer counted (${current.failures.length} of ${routing.maxAttempts}); this happens once per task.`
 }
 
 /** Measured calls and minutes, and the estimated cost so far, against the task budget in /config. */

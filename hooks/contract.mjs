@@ -109,8 +109,13 @@ function namesCommand(evidence, command) {
   return new RegExp(`(?<=^|[\\s\`'"(])${escaped}(?=$|[\\s\`'"]|[.,;:!?)\\]](?:\\s|$))`).test(oneSpacing(evidence))
 }
 
+/** True when the criterion is a check of exactly this command. */
+export function checksCommand(criterion, command) {
+  return Boolean(criterion?.check) && oneSpacing(criterion.check) === oneSpacing(command)
+}
+
 /** The criteria with the state the evidence supports: a declared pass alone is not evidence until a verified command or a passed review backs it. */
-export function evaluateCriteria(contract, { reports = [], verified = [], repro = [], reviewPassed = false, failedCriteria = [] } = {}) {
+export function evaluateCriteria(contract, { reports = [], verified = [], repro = [], reviewPassed = false, failedCriteria = [], preexisting = '' } = {}) {
   const reported = new Map()
   for (const report of reports) reported.set(String(report.id).toUpperCase(), report)
   const failed = new Set(failedCriteria.map(criterionKey))
@@ -118,6 +123,10 @@ export function evaluateCriteria(contract, { reports = [], verified = [], repro 
     const report = reported.get(criterion.id)
     const evaluated = (state, evidenced, evidence) => ({ ...criterion, state, evidenced, evidence })
     if (failed.has(criterionKey(criterion.text))) return evaluated('fail', false, report?.evidence || 'reviewer finding')
+    // A check of the command the writer declared pre-existing is reported, not failed: it never counts as evidence either.
+    if (report?.state === 'fail' && preexisting && checksCommand(criterion, preexisting)) {
+      return { ...evaluated('unverifiable', false, `declared pre-existing: ${report.evidence}`), inherited: true }
+    }
     if (report?.state === 'fail') return evaluated('fail', false, report.evidence)
     const command = criterion.check && verified.find((item) => oneSpacing(item) === oneSpacing(criterion.check))
     const isRepro = criterion.kind === 'repro' && criterion.check
@@ -181,7 +190,7 @@ export function completion({
   const declaredPass = mandatory.filter((criterion) => criterion.state === 'pass' && !criterion.evidenced).map((criterion) => criterion.id)
   const gateFailed = gate.status === 'fail'
   // A failing command the writer declared pre-existing is reported, not counted against the change, but it never lets the task reach 'verified'.
-  const inherited = gateFailed && Boolean(preexisting)
+  const inherited = Boolean(preexisting) && (gateFailed || mandatory.some((criterion) => criterion.inherited))
   const hasVerified = passed.length > 0 || gate.status === 'pass'
   const strict = riskRank(risk) >= riskRank(strictFrom)
   const needsReview = riskRank(risk) >= RISK_RANK.high

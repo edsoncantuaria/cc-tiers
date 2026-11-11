@@ -29,9 +29,10 @@ export const EVENT_TYPES = [
   'state.recovered',
   'task.redone',
   'task.redo.undone',
+  'failure.uncounted',
 ]
 
-export const REDUCED_TYPES = ['escalated', 'failure.diagnosed', 'task.passed', 'task.stopped', 'budget.warning', 'task.redone', 'task.redo.undone']
+export const REDUCED_TYPES = ['escalated', 'failure.diagnosed', 'task.passed', 'task.stopped', 'budget.warning', 'task.redone', 'task.redo.undone', 'failure.uncounted']
 
 const TEXT_KEYS = ['ts', 'type', 'session', 'task', 'tier', 'role', 'risk', 'because', 'category', 'outcome', 'status', 'confidence', 'effort', 'source', 'mode']
 const NUMBER_KEYS = ['attempt', 'costUsd', 'tokens', 'durationMs', 'calls']
