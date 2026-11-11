@@ -2905,6 +2905,24 @@ function foldTrailer(text, owner, reportId, cursor, sink) {
   return true
 }
 
+const HANDBACK_FRAME = 'The report follows:\n'
+
+/**
+ * The agent and report of a peer hand-back row, or null: a user row (handbackReportText, else its framed body),
+ * or the queued_command attachment written when the hand-back arrives mid-turn. The frame indents each report line by two spaces.
+ */
+function handbackOf(row) {
+  const queued = row.type === 'attachment' && row.attachment?.type === 'queued_command'
+  if (row.type !== 'user' && !queued) return null
+  const origin = (queued ? row.attachment.origin : row.origin) || {}
+  if (typeof origin !== 'object' || origin.kind !== 'peer' || origin.handback !== true || !origin.from) return null
+  let text = typeof origin.handbackReportText === 'string' ? origin.handbackReportText : ''
+  if (!text && typeof origin.body === 'string' && origin.body.includes(HANDBACK_FRAME)) {
+    text = origin.body.slice(origin.body.indexOf(HANDBACK_FRAME) + HANDBACK_FRAME.length).replace(/^ {2}/gm, '')
+  }
+  return text ? { agent: String(origin.from), text } : null
+}
+
 /**
  * Fold one main-transcript row into the cursor.
  * - The session agent's own trailer opens a task with CC_TIERS_TASK + CC_TIERS_ROLE: orchestrator
@@ -2913,7 +2931,7 @@ function foldTrailer(text, owner, reportId, cursor, sink) {
  *   heredoc opened with `cat <<'CC_TIERS_ATTEMPT'` (the transcript does not always keep the text).
  * - An Agent call whose prompt carries CC_TIERS_TASK charges that one message to the task.
  * - Every other main-chain message is orchestration overhead.
- * - A peer hand-back row is the report of the background agent it names, pushed as a report with its agent_id.
+ * - A peer hand-back row (a user row or a queued_command attachment) is the report of the background agent it names, pushed as a report with its agent_id.
  * Sidechain rows are skipped: subagent usage comes from the Agent result or its own transcript.
  * Rows that repeat a message id (one row per content block) are counted once.
  */
@@ -2922,10 +2940,9 @@ function foldRow(row, line, cursor, sink, routing = null) {
   if (limits.five_hour) cursor.limits.five_hour = limits.five_hour
   if (limits.seven_day) cursor.limits.seven_day = limits.seven_day
   if (row.isSidechain === true) return
-  const origin = row.origin && typeof row.origin === 'object' ? row.origin : {}
-  if (row.type === 'user' && origin.kind === 'peer' && origin.handback === true && typeof origin.handbackReportText === 'string') {
-    const agent = String(origin.from || '')
-    if (agent) sink.reports.push({ id: `handback:${row.uuid || lineId(line)}`, agent_id: agent, text: origin.handbackReportText })
+  const handback = handbackOf(row)
+  if (handback) {
+    sink.reports.push({ id: `handback:${row.uuid || lineId(line)}`, agent_id: handback.agent, text: handback.text })
     return
   }
   if (row.type !== 'assistant') return
@@ -3092,7 +3109,10 @@ export function agentTranscriptUsage(file, routing = null) {
 export function agentHandbackReport(file) {
   let report = ''
   for (const row of transcriptRows(file)) {
-    if (row?.type !== 'assistant' || !row.message || typeof row.message !== 'object') continue
+    if (!row?.message || typeof row.message !== 'object') continue
+    // A SendMessage from the session (origin coordinator) starts a new run: an earlier hand-back is not its report. A harness nudge is not one.
+    if (row.type === 'user' && row.origin?.kind === 'coordinator') report = ''
+    if (row.type !== 'assistant') continue
     for (const block of messageBlocks(row.message)) {
       if (block?.type === 'tool_use' && block.name === 'SubagentHandback' && typeof block.input?.message === 'string') {
         report = block.input.message

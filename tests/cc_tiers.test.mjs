@@ -1424,9 +1424,9 @@ test('a background report delivered through SubagentHandback is counted at Subag
     const file = tiers.sessionPath(path.join(dir, 'data'), 'sess-1')
     assert.deepEqual(tiers.loadState(file, 'sess-1').researched, { 'users-pagination': true })
 
-    // A last message that carries the trailer wins over the transcript.
+    // The hand-back wins over a last message with its own trailer: it is the text the orchestrator and the hand-back row get.
     launch('researcher', 'agent-w', 'csv')
-    stop('researcher', 'agent-w', 'brief\nCC_TIERS_STATUS: fail', 'CC_TIERS_TASK: csv\nCC_TIERS_ROLE: researcher\nCC_TIERS_STATUS: pass')
+    stop('researcher', 'agent-w', 'CC_TIERS_TASK: csv\nCC_TIERS_ROLE: researcher\nCC_TIERS_STATUS: pass', 'brief\nCC_TIERS_STATUS: fail')
     assert.deepEqual(tiers.loadState(file, 'sess-1').researched, { 'users-pagination': true, csv: true })
   } finally {
     await rm(dir, { recursive: true, force: true })

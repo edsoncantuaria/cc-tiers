@@ -12,6 +12,9 @@
 
 import { runHook } from './integrity.mjs'
 
+const HANDBACK_TRIES = 10
+const HANDBACK_WAIT_MS = 200
+
 async function main(payload) {
   const {
     agentEntry,
@@ -33,9 +36,17 @@ async function main(payload) {
   const agentId = String(payload.agent_id || '')
   if (!agentId) return
   const ctx = openContext(payload)
-  // A background agent delivers its report through the SubagentHandback tool, so the last message is not the trailer.
-  let text = String(payload.last_assistant_message || '')
-  if (!parseHeaders(text).STATUS) text = agentHandbackReport(payload.agent_transcript_path) || text
+  // Only an agent cc-tiers launched in the background has a report to wait for.
+  if (!withSession(ctx, payload, (state) => Boolean(agentEntry(state, agentId)))) return
+  // A background agent delivers its report through the SubagentHandback tool, the text its hand-back row also carries,
+  // so that one is read even when the last message has a reworded trailer. The hand-back can reach the file just after this stop.
+  const last = String(payload.last_assistant_message || '')
+  let text = agentHandbackReport(payload.agent_transcript_path)
+  for (let tries = 0; !text && !parseHeaders(last).STATUS && tries < HANDBACK_TRIES; tries += 1) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, HANDBACK_WAIT_MS)
+    text = agentHandbackReport(payload.agent_transcript_path)
+  }
+  text = text || last
 
   // Read the launch first, run the gate with no lock held, then count under the lock.
   const { launched, peek, twin } = withSession(ctx, payload, (state) => {
