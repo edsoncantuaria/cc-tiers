@@ -9,7 +9,7 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { OVERHEAD, TIERS, costSummary, costTotal, dollars, formatSpend, own } from './cc_tiers.mjs'
+import { OVERHEAD, TIERS, costSummary, costTotal, dollars, formatSpend, isStudy, own } from './cc_tiers.mjs'
 
 export function readState(file) {
   try {
@@ -67,11 +67,13 @@ export function renderReport(states) {
   const tasks = [...new Set([...Object.keys(log), ...Object.keys(cost)])].filter((task) => task !== OVERHEAD)
   if (!tasks.length && !cost[OVERHEAD]) return 'cc-tiers has not recorded a task in this session yet.\n'
 
-  const lines = [
+  const codeTasks = tasks.filter((task) => !isStudy(task))
+  const studies = tasks.filter(isStudy)
+  const lines = codeTasks.length || cost[OVERHEAD] ? [
     '| Task | Tiers | Attempts | Escalated | Effort | Review | Verify | Status | Cost | At Opus rates | Risk | Completion | Confidence | Time |',
     '| --- | --- | --: | --: | --- | --- | --- | --- | --: | --: | --- | --- | --- | --: |',
-  ]
-  for (const task of tasks) {
+  ] : []
+  for (const task of codeTasks) {
     const entry = own(log, task) || {}
     const row = own(cost, task)
     const effort = Object.entries(entry.effort || {})
@@ -85,6 +87,16 @@ export function renderReport(states) {
   }
   if (cost[OVERHEAD]) {
     lines.push(`| ${OVERHEAD} | — | — | — | — | — | — | — | ${dollars(costTotal(cost[OVERHEAD]))} | ${dollars(cost[OVERHEAD].opusRate)} | — | — | — | — |`)
+  }
+  if (studies.length) {
+    lines.push(
+      ...(lines.length ? [''] : []),
+      'Studies (they change no code and are not code tasks):',
+      '',
+      '| Study | Status | Cost |',
+      '| --- | --- | --: |',
+      ...studies.map((task) => `| ${cell(task)} | ${cell(own(log, task)?.status)} | ${own(cost, task) ? dollars(costTotal(own(cost, task))) : '—'} |`),
+    )
   }
   const summary = costSummary(cost)
   const hookErrors = states.reduce((sum, state) => sum + (Number.isInteger(state.hookErrorsSeen) ? state.hookErrorsSeen : 0), 0)

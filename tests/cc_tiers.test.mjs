@@ -89,6 +89,7 @@ test('required files are present and Python hooks are gone', () => {
     'skills/tiers/SKILL.md',
     'commands/route.md',
     'commands/escalate.md',
+    'commands/study.md',
     'config/routing.default.json',
     'agents/orchestrator.md',
     'agents/worker.md',

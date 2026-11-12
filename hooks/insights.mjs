@@ -10,7 +10,7 @@
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { TIERS } from './base.mjs'
-import { OVERHEAD, WRITER_MODES, costTotal, own } from './cc_tiers.mjs'
+import { OVERHEAD, WRITER_MODES, costTotal, isStudy, own } from './cc_tiers.mjs'
 import { readState, sessionFiles, verifyCell } from './report.mjs'
 import { readEvents, telemetryPath } from './telemetry.mjs'
 
@@ -57,6 +57,16 @@ function journeyOf(journeys, task) {
   return journeys.get(task)
 }
 
+/** Adds the studies in `outcomes` (slug to its last review outcome) to `total`: a front (`study-<topic>-<front>`) belongs to the seen slug that prefixes it, so only the roots count. */
+function addStudies(total, outcomes) {
+  for (const [slug, outcome] of outcomes) {
+    if ([...outcomes.keys()].some((other) => slug.startsWith(`${other}-`))) continue
+    total.tasks += 1
+    if (outcome === 'study-pass') total.checked += 1
+    if (outcome === 'study-fail') total.rejected += 1
+  }
+}
+
 export function summarize(events, { minSample = 10 } = {}) {
   const summary = {
     events: 0,
@@ -75,14 +85,22 @@ export function summarize(events, { minSample = 10 } = {}) {
     uncounted: 0,
     byMode: {},
     failureResearch: {},
+    studies: { tasks: 0, checked: 0, rejected: 0 },
     sample: 'small',
     notes: [],
   }
   const tasks = new Set()
+  const studies = new Map()
   const reworked = new Set()
   const journeys = new Map()
   for (const event of events) {
     if (!event || typeof event !== 'object') continue
+    if (isStudy(event.task)) {
+      // A study changes no code: it stays out of every code-task figure.
+      if (!studies.has(event.task)) studies.set(event.task, '')
+      if (event.type === 'review.done' && (event.outcome === 'study-pass' || event.outcome === 'study-fail')) studies.set(event.task, event.outcome)
+      continue
+    }
     summary.events += 1
     if (event.task) tasks.add(event.task)
     const journey = event.task ? journeyOf(journeys, event.task) : null
@@ -152,6 +170,7 @@ export function summarize(events, { minSample = 10 } = {}) {
     }
   }
   summary.tasks = tasks.size
+  addStudies(summary.studies, studies)
   summary.rework = { tasks: reworked.size, total: tasks.size }
   for (const journey of journeys.values()) {
     for (const match of journey.matches) {
@@ -211,6 +230,10 @@ function dollars(value) {
   return `$${value.toFixed(value >= 1 ? 2 : 4)}`
 }
 
+function studiesLine(studies) {
+  return `Studies: ${studies.tasks} (claims checked ${studies.checked}, rejected ${studies.rejected}); not counted as tasks.`
+}
+
 export function renderInsights(summary) {
   const lines = [
     '## cc-tiers insights',
@@ -221,6 +244,7 @@ export function renderInsights(summary) {
   ]
   if (summary.redone.tasks) lines.splice(3, 0, `Sent back by the user: ${summary.redone.tasks} of ${summary.rework.total} tasks.`)
   if (summary.uncounted) lines.splice(3, 0, `Failures not counted after a spec correction (CC_TIERS_RESPEC): ${summary.uncounted}.`)
+  if (summary.studies.tasks) lines.push(studiesLine(summary.studies))
   lines.push(...table('Failures by category', ['category', 'count'], counts(summary.byCategory)))
   lines.push(...table('Escalation reasons', ['reason', 'count'], counts(summary.escalationReasons)))
   const costRows = Object.entries(summary.costByRisk)
@@ -286,6 +310,7 @@ export function summarizeSessions(states, { minSample = 10 } = {}) {
     startedOn: {},
     finishedOn: {},
     byMode: {},
+    studies: { tasks: 0, checked: 0, rejected: 0 },
     clean: 0,
     afterFailure: 0,
     escalated: 0,
@@ -308,6 +333,7 @@ export function summarizeSessions(states, { minSample = 10 } = {}) {
     if (!projects.has(key)) projects.set(key, projectRow())
     const project = projects.get(key)
     const log = state.log && typeof state.log === 'object' && !Array.isArray(state.log) ? state.log : {}
+    const studies = new Map()
     for (const slug of Object.keys(log)) {
       if (slug === OVERHEAD) continue
       if (typeof state.session_id === 'string') {
@@ -317,6 +343,10 @@ export function summarizeSessions(states, { minSample = 10 } = {}) {
       }
       const entry = own(log, slug)
       const task = entry && typeof entry === 'object' ? entry : {}
+      if (isStudy(slug)) {
+        studies.set(slug, task.status === 'done' ? 'study-pass' : task.status === 'rejected' ? 'study-fail' : '')
+        continue
+      }
       const done = task.status === 'done'
       const failures = Number(task.failures) || 0
       summary.tasks += 1
@@ -352,6 +382,7 @@ export function summarizeSessions(states, { minSample = 10 } = {}) {
       bump(summary.verify, verifyCell(task.verify, task.hookErrors))
       if (task.completion) bump(summary.completion, COMPLETIONS.includes(task.completion) ? task.completion : 'other')
     }
+    addStudies(summary.studies, studies)
     const cost = state.cost && typeof state.cost === 'object' ? state.cost : {}
     for (const row of Object.values(cost)) {
       const usd = costTotal(row)
@@ -387,6 +418,7 @@ export function renderRealUse(summary) {
     `${summary.redone} of the ${summary.done} done tasks were sent back by the user.`,
     `Sample: ${summary.sample}.`,
   ]
+  if (summary.studies.tasks) lines.push(studiesLine(summary.studies))
   const tierNames = [...new Set([...TIERS, ...Object.keys(summary.startedOn), ...Object.keys(summary.finishedOn)])]
   lines.push(...table('Tiers', ['tier', 'started on', 'finished on'], tierNames.map((tier) => [tier, String(summary.startedOn[tier] || 0), String(summary.finishedOn[tier] || 0)])))
   lines.push(

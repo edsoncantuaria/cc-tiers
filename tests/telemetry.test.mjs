@@ -623,3 +623,114 @@ test('summarizeSessions and renderRealUse compare tasks by the recorded writer m
   assert.ok(!out.includes('DISTINCT') && !out.includes('bogus'))
   assert.ok(!renderRealUse(summarizeSessions([sessionState('s2', 'p', { one: logEntry() })])).includes('By writer mode'))
 })
+
+const { renderReport } = await import(pathToFileURL(path.join(ROOT, 'hooks', 'report.mjs')).href)
+
+function withoutStudies(summary) {
+  const { studies, ...rest } = summary
+  return rest
+}
+
+test('studies stay out of every insights code-task figure and show on one separate line', () => {
+  const code = [
+    { type: 'model.selected', task: 'a', tier: 'sonnet', risk: 'low', mode: 'tiers' },
+    { type: 'review.done', task: 'a', outcome: 'pass', review: { blocking: 1 } },
+    { type: 'task.passed', task: 'a', tier: 'sonnet', risk: 'low', confidence: 'high', costUsd: 0.5 },
+    { type: 'task.stopped', task: 'b', tier: 'haiku' },
+  ]
+  const studies = [
+    { type: 'research.done', task: 'study-x', tier: 'sonnet' },
+    { type: 'review.done', task: 'study-x', outcome: 'study-fail' },
+    { type: 'review.done', task: 'study-x', outcome: 'study-pass' },
+    { type: 'research.done', task: 'study-y' },
+    { type: 'review.done', task: 'study-y', outcome: 'study-fail' },
+  ]
+  const plain = summarize(code)
+  const mixed = summarize([studies[0], ...code.slice(0, 2), ...studies.slice(1), ...code.slice(2)])
+  assert.deepEqual(withoutStudies(mixed), withoutStudies(plain))
+  // study-x was rejected, then passed: it counts once, as checked.
+  assert.deepEqual(mixed.studies, { tasks: 2, checked: 1, rejected: 1 })
+  assert.match(renderInsights(mixed), /^Studies: 2 \(claims checked 1, rejected 1\); not counted as tasks\.$/m)
+  // Dropping the Studies line must give exactly the code-only output.
+  const withoutLine = renderInsights(mixed).split('\n').filter((line) => !line.startsWith('Studies:')).join('\n')
+  assert.equal(withoutLine, renderInsights(plain))
+  assert.ok(!renderInsights(plain).includes('Studies'))
+})
+
+test('a study rejected and then passed counts as checked once in both insights sections', () => {
+  const events = [
+    { type: 'review.done', task: 'study-x', outcome: 'study-fail' },
+    { type: 'review.done', task: 'study-x', outcome: 'study-pass' },
+    { type: 'research.done', task: 'study-x-front' },
+  ]
+  assert.deepEqual(summarize(events).studies, { tasks: 1, checked: 1, rejected: 0 })
+  const sessions = summarizeSessions([sessionState('s1', 'p-a', { 'study-x': { tiers: ['sonnet'], reviews: ['reviewer', 'reviewer'], status: 'done', kind: 'study' } }, {})])
+  assert.deepEqual(sessions.studies, { tasks: 1, checked: 1, rejected: 0 })
+  assert.match(renderInsights(summarize(events)), /^Studies: 1 \(claims checked 1, rejected 0\)/m)
+  assert.match(renderRealUse(sessions), /^Studies: 1 \(claims checked 1, rejected 0\)/m)
+})
+
+test('a study with several fronts counts once in both insights sections', () => {
+  const events = [
+    { type: 'research.done', task: 'study-gate-gate' },
+    { type: 'research.done', task: 'study-gate-report' },
+    { type: 'review.done', task: 'study-gate', outcome: 'study-fail' },
+    { type: 'review.done', task: 'study-gate', outcome: 'study-pass' },
+  ]
+  assert.deepEqual(summarize(events).studies, { tasks: 1, checked: 1, rejected: 0 })
+  assert.match(renderInsights(summarize(events)), /^Studies: 1 \(claims checked 1, rejected 0\); not counted as tasks\.$/m)
+  const open = { tiers: ['sonnet'], reviews: [], status: 'study-open', kind: 'study' }
+  const log = {
+    'study-gate-gate': open,
+    'study-gate-report': open,
+    'study-gate': { ...open, reviews: ['reviewer', 'reviewer'], status: 'done' },
+  }
+  const sessions = summarizeSessions([sessionState('s1', 'p-a', log, {})])
+  assert.deepEqual(sessions.studies, { tasks: 1, checked: 1, rejected: 0 })
+  assert.match(renderRealUse(sessions), /^Studies: 1 \(claims checked 1, rejected 0\); not counted as tasks\.$/m)
+  // A rejected root with fronts is one rejected study, not three.
+  assert.deepEqual(summarizeSessions([sessionState('s1', 'p-a', { ...log, 'study-gate': { ...open, status: 'rejected' } }, {})]).studies, { tasks: 1, checked: 0, rejected: 1 })
+})
+
+test('fronts whose study never reached review count one study each, and sessions are not merged', () => {
+  const events = [
+    { type: 'research.done', task: 'study-gate-gate' },
+    { type: 'research.done', task: 'study-gate-report' },
+  ]
+  assert.deepEqual(summarize(events).studies, { tasks: 2, checked: 0, rejected: 0 })
+  const open = { tiers: ['sonnet'], reviews: [], status: 'study-open', kind: 'study' }
+  const fronts = summarizeSessions([sessionState('s1', 'p-a', { 'study-gate-gate': open, 'study-gate-report': open }, {})])
+  assert.deepEqual(fronts.studies, { tasks: 2, checked: 0, rejected: 0 })
+  assert.match(renderRealUse(fronts), /^Studies: 2 \(claims checked 0, rejected 0\)/m)
+  // A task is one (session, slug) pair: a front in another session is not a front of this root.
+  const split = summarizeSessions([sessionState('s1', 'p-a', { 'study-gate': { ...open, status: 'done' } }, {}), sessionState('s2', 'p-a', { 'study-gate-gate': open }, {})])
+  assert.deepEqual(split.studies, { tasks: 2, checked: 1, rejected: 0 })
+})
+
+test('studies stay out of Real use and the report table, and have their own section only when present', () => {
+  const code = { one: logEntry({ reviews: ['reviewer'] }), two: logEntry({ status: 'open', finished: undefined }) }
+  const study = {
+    'study-x': { tiers: ['sonnet'], reviews: ['reviewer'], status: 'done', kind: 'study' },
+    'study-y': { tiers: ['sonnet'], reviews: ['reviewer'], status: 'rejected', kind: 'study' },
+    'study-z': { tiers: ['sonnet'], reviews: [], status: 'study-open', kind: 'study' },
+  }
+  const cost = { one: { haiku: 1, opusRate: 4 }, 'study-x': { sonnet: 2, opusRate: 5 } }
+  const plain = [sessionState('s1', 'p-a', code, { one: cost.one })]
+  const mixed = [sessionState('s1', 'p-a', { ...code, ...study }, cost)]
+  // Spend is real money whoever incurred it, so cost totals keep a study's tokens; the task figures must not move.
+  const sessions = summarizeSessions([sessionState('s1', 'p-a', { ...code, ...study }, { one: cost.one })])
+  const { studies, ...rest } = sessions
+  const { studies: none, ...plainRest } = summarizeSessions(plain)
+  assert.deepEqual(rest, plainRest)
+  assert.deepEqual(studies, { tasks: 3, checked: 1, rejected: 1 })
+  assert.match(renderRealUse(sessions), /^Studies: 3 \(claims checked 1, rejected 1\)/m)
+  assert.ok(!renderRealUse(summarizeSessions(plain)).includes('Studies'))
+
+  const report = renderReport(mixed)
+  const table = report.split('\nStudies')[0]
+  assert.ok(!table.includes('study-'))
+  assert.match(report, /Studies \(they change no code[^\n]*\n\n\| Study \| Status \| Cost \|\n\| --- \| --- \| --: \|\n\| study-x \| done \| \$[\d.]+ \|\n\| study-y \| rejected \| — \|\n\| study-z \| study-open \| — \|/)
+  assert.ok(!renderReport(plain).includes('Studies'))
+  assert.ok(renderReport(plain).startsWith('| Task | Tiers'))
+  assert.ok(!renderReport([sessionState('s1', 'p-a', study, { 'study-x': cost['study-x'] })]).includes('| Task |'))
+})
