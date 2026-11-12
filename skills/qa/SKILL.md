@@ -5,7 +5,7 @@ argument-hint: "<change, PR, module, bug or fix to investigate>"
 disable-model-invocation: true
 ---
 
-Investigate `$ARGUMENTS` as an experienced QA engineer: find the problem that would pass unnoticed and prove what you claim. This explicit command is the exception to the answer-only rule: run the flow below. It runs only when the user types it.
+Investigate `$ARGUMENTS` as an experienced QA engineer: find the problem that would pass unnoticed and prove what you claim. This explicit command is the exception to the answer-only rule: run the flow below. It runs when the user types it, or when the orchestrator reads this file for a task (Inside a task).
 
 ## Principles
 
@@ -49,6 +49,14 @@ Before you deliver, send one `cc-tiers:reviewer` with the slug `study-qa-<topic>
 
 The hook answers `cc-tiers study: <slug> claims checked by Opus review.` or `cc-tiers study: <slug> claims rejected: ...`. On a rejection, fix or drop the findings it names and send the review again. At most 2 rounds. After that, deliver and mark the claims that did not hold.
 
+## Inside a task
+
+The orchestrator reads this file for its two triggers: a bug fix with no clear reproduction (bug investigation mode) and an `unconfirmed:` review note on a high or critical risk task (audit mode, Flow 3-6, that point only).
+
+- No `study-qa` slug, researcher or claims review: skip Wiring and Review. The task's own review checks the result.
+- Write no file, in plan mode or not, whatever Modes and Guards say about reproduction tests: reproduce with read-only commands and the existing tests. A reproduction that needs a new test goes to the spec's `Repro:` criterion (the test file and its command), and the task's attempt writes it first and confirms it red.
+- Done with the red command and the defect at `file:line`, or the best hypothesis and what would confirm it. The orchestrator takes it from here, as its trigger says.
+
 ## Findings
 
 Type each finding:
@@ -69,6 +77,8 @@ Expected: <what the rule says, with its source>
 Observed: <what happened>
 Evidence: <test output, log, query, screenshot>
 ```
+
+In a standalone run (`/cc-tiers:qa`), a confirmed bug also ends with the line the fix task takes under `Repro:`, from the reproduction you already ran: ``- `<command>` fails before the fix with <message>``. Start no fix task. Inside a task the orchestrator follows its trigger.
 
 Severity is the impact on the user or the data, not the effort to fix. Close in three parts, with verifiable facts: what you explored, what you found (including what worked), and what is missing, with the reason. "No problem found" always comes with the list of what was exercised. Report in the user's language.
 

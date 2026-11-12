@@ -118,6 +118,8 @@ The block also accepts `Preserve:`, `Checks:`, `Security:`, `Evidence:`, and `Am
 
 Bug flow: failure, reproduce, research when useful, fix, rerun the test, run the regression checks, review. A new test is required only when it is viable and relevant. For a bug that can be reproduced in code, add a `Repro:` section to the block with the command that reproduces it: ``- `node --test tests/x.test.mjs` fails before the fix with <message> (request)``. Skip it for an infrastructure, environment or flaky failure or a bug that cannot be reproduced; validate that fix by other means, in proportion to the risk. Paste the same block, `Repro:` included, into the review prompt. Only an independent review confirms a `Repro:` criterion, so do not set `CC_TIERS_REVIEW: skip` on a task that has one; without a review it ends as a declared pass. On a retry or an escalation, keep the earlier `CC_TIERS_REPRO` line in the failure notes, so the next writer can repeat it.
 
+QA trigger 1: a bug fix that starts on Opus for lack of a clear reproduction runs, before its spec, the bug investigation mode of `${CLAUDE_PLUGIN_ROOT}/skills/qa/SKILL.md`. Read that file and follow its Principles, Modes and Flow 1-6, reading `techniques.md` beside it on demand; skip its Wiring and Review sections. The investigation writes no file, in plan mode or not: reproduce with read-only commands and the existing tests, and read production code only. A red command becomes the `Repro:` criterion and the defect `file:line` goes into the spec. When the reproduction needs a new test, the `Repro:` criterion names that test file and its command, and your attempt writes it first and confirms it red, reporting `CC_TIERS_REPRO` as the attempt rule says. With no reproduction, put the best hypothesis under `Assumed:` and report `CC_TIERS_REPRO: none - <reason>` in the attempt. Skip this trigger under hard start `sonnet` or while conserving.
+
 ## Delegation prompt
 
 Start every delegation with a `CC_TIERS_TASK: <slug>` line, then the task, the acceptance check, and any failure notes. cc-tiers reads the role and the tier from the subagent type, and charges a review to the tier that wrote the diff, so `CC_TIERS_TIER` and `CC_TIERS_ROLE` lines are optional.
@@ -170,6 +172,8 @@ A writer that reports `CC_TIERS_PREEXISTING: <command> - <evidence it fails with
 
 On the re-review after a retry, put the previous blocking findings in the reviewer prompt (the findings, not the writer's report). The reviewer checks whether they are fixed and whether the fix broke something, and does not reopen criteria a previous review passed unless the new diff touches them.
 
+QA trigger 2: after a review that passes a task of high or critical risk, a `note` finding whose `observed` starts with `unconfirmed:` gets one QA charter on that point only, at most once per task. You decide it, never the reviewer. Read `${CLAUDE_PLUGIN_ROOT}/skills/qa/SKILL.md` and run its audit mode, Flow 3-6, without Wiring and Review. Confirmed (a command red for the suspected reason): send the same slug back to the tier that wrote it (the hook reopens a finished task), with the finding and the command as failure notes and a `Repro:` criterion added to the spec under `CC_TIERS_RESPEC: <reason>`. Not confirmed: report it as refuted, with what was exercised; when the diff was your own Opus attempt, a refutation needs a command that exercises the point, and reading the code alone does not refute it. A second `unconfirmed:` note on the same task is reported, never investigated.
+
 A `cc-tiers recorded a Haiku failure` note means the next similar task starts on Sonnet. A `cc-tiers spend` note is fresh tokens for that task, using the same rule as cc-cost. If the session says cc-cost is not installed, do not invent a spend figure.
 
 ## Risk, profile, and budget
@@ -184,6 +188,8 @@ A `cc-tiers recorded a Haiku failure` note means the next similar task starts on
 ## Reports back to the user
 
 Keep the plan short: a one-sentence title line, then slug, tier, why. After each task, say the tier that finished it, the effort when it was raised, whether it escalated, who reviewed it, what the hook reported for verification (`verified`, `flaky`, or `not validated` with the reason), and the spend and cost lines when the hook reported them. A `cc-tiers cost` line is an estimate at API list prices next to the same tokens at Opus rates; quote it, do not compute your own. Do not dump subagent transcripts.
+
+When a QA trigger ran for the task, add the line `QA trigger 1|2: <result>` with what it found: the red command and the defect `file:line`, the hypothesis it left, the point it refuted and what was exercised, or the `unconfirmed:` note it did not investigate.
 
 When the hook prints `cc-tiers completion: <task> <verified|partial|failed|unverified> on <tier>, <risk> risk; confidence <high|moderate|low> (<reasons>)`, quote that line with its criteria and checks lines, and never claim more than it says.
 

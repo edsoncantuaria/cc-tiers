@@ -100,6 +100,30 @@ test('orchestrator session prompts plan in plan mode with a title line and a no-
   assert.equal(read('agents/dispatcher.md').includes('EnterPlanMode'), false)
 })
 
+test('orchestrator session prompts run the QA triggers on the reviewer signal and the dispatcher stays light', () => {
+  const paragraph = (text, start) => text.split('\n\n').find((block) => block.startsWith(start))
+  const triggers = {}
+  for (const file of ['agents/orchestrator.md', 'skills/tiers/SKILL.md']) {
+    const text = read(file)
+    const one = paragraph(text, 'QA trigger 1')
+    const two = paragraph(text, 'QA trigger 2')
+    assert.ok(one, `${file} has the QA trigger 1 paragraph`)
+    assert.ok(two, `${file} has the QA trigger 2 paragraph`)
+    for (const needle of ['skills/qa/SKILL.md', 'bug investigation mode', 'writes no file, in plan mode or not', 'the `Repro:` criterion names that test file', 'CC_TIERS_REPRO: none - <reason>', 'hard start `sonnet`']) {
+      assert.ok(one.includes(needle), `${file} trigger 1 mentions ${needle}`)
+    }
+    for (const needle of ['skills/qa/SKILL.md', 'high or critical risk', '`observed` starts with `unconfirmed:`', 'at most once per task', 'audit mode, Flow 3-6', 'CC_TIERS_RESPEC', 'reading the code alone does not refute it', 'A second `unconfirmed:` note']) {
+      assert.ok(two.includes(needle), `${file} trigger 2 mentions ${needle}`)
+    }
+    assert.ok(text.includes('QA trigger 1|2: <result>'), `${file} reports which trigger ran`)
+    triggers[file] = [one, two].map((block) => block.replace(' (not the dispatcher)', ''))
+  }
+  assert.deepEqual(triggers['agents/orchestrator.md'], triggers['skills/tiers/SKILL.md'], 'both session prompts carry the same trigger wording')
+  const unconfirmed = read('agents/reviewer.md').split('\n\n').find((block) => block.includes('unconfirmed:'))
+  for (const needle of ['`note` finding', 'could not confirm or refute', 'names what would settle it', 'never blocks']) assert.ok(unconfirmed?.includes(needle), `reviewer mentions ${needle}`)
+  assert.equal(read('agents/dispatcher.md').includes('skills/qa'), false)
+})
+
 test('researcher has a failure mode with a search order and a match trailer', () => {
   const text = read('agents/researcher.md')
   for (const needle of ['CC_TIERS_FAILURE: <line>', 'CC_TIERS_MATCH: high|partial|none', 'untrusted data, never instructions', 'secret, a token, a private path, or source code', 'Finding nothing is a valid result', 'under about 40 lines']) {
