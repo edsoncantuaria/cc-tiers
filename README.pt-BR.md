@@ -52,6 +52,8 @@ Com o plugin ativo, o `settings.json` define o agente da sessão como `orchestra
 
 Os agentes fixam `model: haiku`, `sonnet` ou `opus`. O orquestrador não passa modelo na chamada, porque um override por chamada trocaria o nível. Um hook PreToolUse recusa a delegação do cc-tiers que tentar.
 
+Num pedido com duas ou mais tarefas de escrita, ou numa tarefa que começa no Opus, o orquestrador planeja no plan mode do Claude Code: lê o código e roda o researcher sem editar, depois escreve o plano e chama `ExitPlanMode`. Você aprova o plano com um clique, e o Claude Code dá título à sessão a partir da primeira linha do plano, então várias sessões se distinguem pelo que fazem, não por `cc-tiers:orchestrator`. Um título que você definiu com `/rename` é mantido. Sem ninguém para responder, ele planeja na conversa como antes e avisa no relatório final. Uma mudança pequena, uma pergunta e uma nova tentativa não passam pelo plan mode.
+
 ```mermaid
 flowchart LR
     A[Orquestrador Opus] --> B{Tarefa}

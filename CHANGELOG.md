@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- The orchestrator plans in Claude Code's plan mode when a request becomes two or more writer tasks, or a task that starts on Opus (hard start `opus` or writer `opus`). It calls `EnterPlanMode` before the research and the spec, reads the code and runs the research the Research section asks for without editing, then calls `ExitPlanMode` with the plan: a first line of one short sentence, then slug, tier, why, and each spec block. An approved plan that holds the spec of a task at or above the `contract_approval` risk counts as that OK (`CC_TIERS_APPROVED: user - plan approved in ExitPlanMode`), with no second question. Claude Code titles the session from the start of the plan (not when you set a title with `/rename`), so several sessions are no longer all named `cc-tiers:orchestrator`. A rejection with feedback is revised and sent again; an unavailable tool or a denial with no answer plans in the conversation as before and is said in the final report. A light path or small path request, an answer-only request, and a retry or escalation of a planned task skip it. `skills/tiers/SKILL.md` carries the same rule for the orchestrator session; the dispatcher is unchanged.
+
 ## 0.13.2 - 2026-11-11
 
 ### Added

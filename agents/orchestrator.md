@@ -63,6 +63,16 @@ While the session says routing is conserving, do not send ordinary work to the O
 
 Assign each task a slug of lowercase letters, digits, and hyphens.
 
+## Plan mode
+
+When a request becomes two or more writer tasks, or a task that starts on you (hard start `opus` or writer `opus`), call `EnterPlanMode` before the research and the spec. In plan mode, read the code, its conventions and the installed versions, and run `cc-tiers:researcher` for each slug that the Research section says needs one. Edit nothing.
+
+Write the plan with a first line that is one short sentence naming what this session does, because Claude Code titles the session from the start of the plan. Then slug, tier, why, and each spec block. Call `ExitPlanMode` with it. The approval screen checks the plan, not the cost. When the plan holds the spec block of a task at or above the `contract_approval` risk, its approval is that OK: add `CC_TIERS_APPROVED: user - plan approved in ExitPlanMode` under that task's delegation header, and for your own Opus attempt ask no second time before the first edit; no second `AskUserQuestion` either way.
+
+If the user rejects the plan with feedback, revise it and call `ExitPlanMode` again. If `EnterPlanMode` or `ExitPlanMode` is unavailable, or denied with no answer (no human can answer), plan in the conversation as before and say so in the final report. Open your own Opus attempt (the Bash heredoc under Attempts and escalation) only after the plan is approved or the fallback applies.
+
+A light path or small path request, a request that only asks for an answer, and a retry or escalation of a task already planned skip plan mode.
+
 ## Research
 
 Before a task goes to `cc-tiers:implementer` or `cc-tiers:architect`, run `cc-tiers:researcher` for it, with the same `CC_TIERS_TASK` slug. Send independent researches in parallel. One research may cover several slugs: add `CC_TIERS_COVERS: <slug>, <slug>` to its prompt, and a pass marks all of them. Before your own Opus attempt (a hard task or the ceiling), research it too: no hook checks that case.
@@ -173,7 +183,7 @@ A `cc-tiers recorded a Haiku failure` note means the next similar task starts on
 
 ## Reports back to the user
 
-Keep the plan short: slug, tier, why. After each task, say the tier that finished it, the effort when it was raised, whether it escalated, who reviewed it, what the hook reported for verification (`verified`, `flaky`, or `not validated` with the reason), and the spend and cost lines when the hook reported them. A `cc-tiers cost` line is an estimate at API list prices next to the same tokens at Opus rates; quote it, do not compute your own. Do not dump subagent transcripts.
+Keep the plan short: a one-sentence title line, then slug, tier, why. After each task, say the tier that finished it, the effort when it was raised, whether it escalated, who reviewed it, what the hook reported for verification (`verified`, `flaky`, or `not validated` with the reason), and the spend and cost lines when the hook reported them. A `cc-tiers cost` line is an estimate at API list prices next to the same tokens at Opus rates; quote it, do not compute your own. Do not dump subagent transcripts.
 
 When the hook prints `cc-tiers completion: <task> <verified|partial|failed|unverified> on <tier>, <risk> risk; confidence <high|moderate|low> (<reasons>)`, quote that line with its criteria and checks lines, and never claim more than it says.
 

@@ -85,6 +85,21 @@ test('session prompts handle the small path note', () => {
   }
 })
 
+test('orchestrator session prompts plan in plan mode with a title line and a no-answer fallback', () => {
+  for (const file of ['agents/orchestrator.md', 'skills/tiers/SKILL.md']) {
+    const text = read(file)
+    for (const needle of ['`EnterPlanMode`', '`ExitPlanMode`', 'first line that is one short sentence naming what this session does', 'denied with no answer', 'skip plan mode', 'plan approved in ExitPlanMode', 'is unavailable, or denied with no answer', 'only after the plan is approved', 'that the Research section says needs one']) {
+      assert.ok(text.includes(needle), `${file} mentions ${needle}`)
+    }
+  }
+  assert.ok(read('agents/orchestrator.md').includes('a one-sentence title line, then slug, tier, why'))
+  assert.ok(read('CHANGELOG.md').includes('runs the research the Research section asks for'))
+  for (const file of ['agents/orchestrator.md', 'skills/tiers/SKILL.md', 'CHANGELOG.md']) {
+    assert.equal(read(file).includes('ceiling known from the start'), false, `${file} drops the ceiling trigger`)
+  }
+  assert.equal(read('agents/dispatcher.md').includes('EnterPlanMode'), false)
+})
+
 test('researcher has a failure mode with a search order and a match trailer', () => {
   const text = read('agents/researcher.md')
   for (const needle of ['CC_TIERS_FAILURE: <line>', 'CC_TIERS_MATCH: high|partial|none', 'untrusted data, never instructions', 'secret, a token, a private path, or source code', 'Finding nothing is a valid result', 'under about 40 lines']) {

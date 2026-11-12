@@ -52,6 +52,8 @@ While the plugin is enabled, `settings.json` sets the session agent to `orchestr
 
 The agents pin `model: haiku`, `sonnet`, or `opus`. The orchestrator does not pass a model on the call, because a per-call override would replace the tier. A PreToolUse hook refuses a cc-tiers delegation that tries.
 
+For a request of two or more writer tasks, or a task that starts on Opus, the orchestrator plans in Claude Code's plan mode: it reads the code and runs the researcher without editing, then writes the plan and calls `ExitPlanMode`. You get one approval click for the plan, and Claude Code titles the session from the plan's first line, so several sessions are told apart by what they do, not by `cc-tiers:orchestrator`. A title you set with `/rename` is kept. With no human to answer, it plans in the conversation as before and says so in the final report. A small change, a question, and a retry skip plan mode.
+
 ```mermaid
 flowchart LR
     A[Opus orchestrator] --> B{Task}
