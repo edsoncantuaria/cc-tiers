@@ -98,6 +98,8 @@ O hook PreToolUse garante isso. Ele recusa a chamada ao implementer ou ao archit
 
 **Estudo.** O `/cc-tiers:study <pergunta>` serve para trabalho que não muda código: entender um sistema, avaliar viabilidade, levantar requisitos. Roda só quando você digita o comando, e nada o dispara sozinho. O orquestrador divide a pergunta em 2 a 5 frentes e manda um `cc-tiers:researcher` por frente, em paralelo; cada um devolve afirmações com fonte (`file:line`, um link da doc da versão instalada ou um commit), ou "não encontrado" com onde procurou. O orquestrador sintetiza a resposta, as contradições entre frentes, o que ficou em aberto e um veredito de viabilidade se você pediu, e então um `cc-tiers:reviewer` Opus abre as fontes citadas e rejeita a afirmação que contradiz a própria fonte ou em que a resposta se apoia sem fonte. Ele corrige as afirmações e pede de novo, no máximo 2 rodadas, depois entrega com as fontes e marca o que não se confirmou. Um estudo nunca conta como tarefa de código: seus slugs começam com `study-`, nenhum worker, implementer, architect ou checker roda nele, e uma revisão de estudo rejeitada não é tentativa que falhou. A sessão recebe o título `Study: <pergunta>`.
 
+**QA.** O `/cc-tiers:qa <mudança, PR, módulo, bug ou correção>` investiga como um engenheiro de QA. Roda só quando você digita o comando (`disable-model-invocation: true`), e nada o dispara sozinho. Tem três modos: auditoria de uma mudança, de um PR ou de um módulo; investigação de bug, que reproduz o bug antes de explicá-lo; e validação de correção, que confere a confirmação (a reprodução que estava vermelha agora está verde) e a regressão ao redor da correção. Segue Agile Testing, Explore It! e ISTQB CTFL 4.0, com um `techniques.md` lido só quando os casos são desenhados. Não edita código de produção: o teste de reprodução vai só em arquivo de teste e é citado no relatório, e você decide se ele fica. Roda como estudo: os slugs são `study-qa-<assunto>`, sem spec, tentativa nem verify, e um `cc-tiers:researcher` só para dúvida de biblioteca ou versão que o repositório não resolve. Cada achado recebe um tipo (bug confirmado, suspeita, risco, lacuna de cobertura, teste não executado), e então um `cc-tiers:reviewer` os confere no modo Claims, no máximo 2 rodadas. O revisor roda o comando por trás de cada bug confirmado e compara a saída com a afirmação, e uma afirmação que não se sustenta vira achado `trace`.
+
 ---
 
 ## 🧹 Código limpo sem pedir
@@ -629,6 +631,7 @@ Um erro interno num hook do cc-tiers nunca vale como sucesso. `before_agent`, `a
 | `/cc-tiers:route [tarefa]` | Diz o nível e para. Usa a mesma heurística dos hooks. Sem editar |
 | `/cc-tiers:escalate [slug]` | Sobe essa tarefa um nível agora, com as notas |
 | `/cc-tiers:study <pergunta>` | Estuda um sistema, uma viabilidade ou requisitos, sem mudar código: pesquisadores respondem cada frente com fontes, e uma revisão do Opus confere as afirmações. Roda só com este comando |
+| `/cc-tiers:qa <mudança, PR, módulo, bug ou correção>` | Investigação de QA: auditoria, reprodução de bug ou validação de correção. Não edita código de produção, e uma revisão do Opus confere os achados tipados. Roda só com este comando |
 | `/cc-tiers:report [--all]` | Tabela por tarefa da sessão: níveis, tentativas, effort, revisão, verify, status e custo ao lado do preço do Opus, depois risco, conclusão, confiança e tempo medido. A coluna Verify diz `ok`, `flaky` ou `not validated` |
 | `/cc-tiers:memory [list\|add\|invalidate\|delete\|prune\|clear]` | Lista, adiciona, invalida, apaga, limpa os vencidos ou zera o que o cc-tiers lembra deste projeto. Não edita código |
 | `/cc-tiers:redo <slug> [motivo]` | Marca uma tarefa concluída como devolvida por você, para os números de devolvidas do `/cc-tiers:insights` a contarem. `--undo <slug>` tira uma marca. Não edita código |
@@ -765,6 +768,8 @@ claude --plugin-dir .
 | `settings.json` | Agente da sessão: `orchestrator` |
 | `agents/*.md` | Orquestrador, revisor, planner e architect Opus, researcher, implementer, checker e dispatcher Sonnet, worker Haiku |
 | `skills/tiers/SKILL.md` | `/cc-tiers:tiers` |
+| `skills/qa/SKILL.md` | `/cc-tiers:qa` |
+| `skills/qa/techniques.md` | Técnicas para desenhar casos, lidas pelo `/cc-tiers:qa` sob demanda |
 | `commands/route.md` | `/cc-tiers:route` |
 | `commands/escalate.md` | `/cc-tiers:escalate` |
 | `commands/study.md` | `/cc-tiers:study` |

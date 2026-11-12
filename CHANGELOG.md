@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `/cc-tiers:qa <change, PR, module, bug or fix>` investigates a change as a QA engineer would, in `skills/qa/SKILL.md` with a `skills/qa/techniques.md` read only when the cases are designed. It runs only on that command (`disable-model-invocation: true`), and nothing triggers it on its own. It has three modes: an audit, a bug investigation that reproduces the bug before explaining it, and a fix validation (confirmation, then regression). It follows Agile Testing, Explore It! and ISTQB CTFL 4.0. It edits no production code: a reproduction test goes only in a test file and is cited. It runs as a study with `study-qa-<topic>` slugs (and `study-qa-<topic>-<front>` for a `cc-tiers:researcher`, only for a library or version question), with no spec, attempt or verify. Each finding is typed (confirmed bug, suspicion, risk, coverage gap, test not run) and one `cc-tiers:reviewer` checks them in Claims mode, at most 2 rounds.
+
+### Changed
+
+- The reviewer's Claims mode runs the command behind a claim whose source is a command (a confirmed bug in a QA run) and compares its output with the claim. A claim that does not hold is a finding with `evidence: trace`, never `evidence: command`, because the hook re-runs a command finding and discards it when it passes.
+
 ## 0.13.3 - 2026-11-12
 
 ### Added

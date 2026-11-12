@@ -98,6 +98,8 @@ The PreToolUse hook enforces this. It refuses a call to the implementer or the a
 
 **Study.** `/cc-tiers:study <question>` is for work that changes no code: understanding a system, judging feasibility, gathering requirements. It runs only when you type it, and nothing starts it on its own. The orchestrator splits the question into 2 to 5 fronts, sends one `cc-tiers:researcher` per front in parallel, and each reports claims with a source (`file:line`, a doc link for the installed version, or a commit), or "not found" with where it looked. The orchestrator synthesizes the answer, the contradictions between fronts, the unknowns, and a feasibility verdict if you asked for one, then one Opus `cc-tiers:reviewer` opens the cited sources and rejects a claim that contradicts its source or that the answer rests on without one. It fixes the claims and asks again, at most 2 rounds, then delivers with the sources and marks what did not hold. A study never counts as a code task: its slugs start with `study-`, no worker, implementer, architect, or checker runs on it, and a rejected study review is not a failed attempt. The session is titled `Study: <question>`.
 
+**QA.** `/cc-tiers:qa <change, PR, module, bug or fix>` investigates as a QA engineer would. It runs only when you type it (`disable-model-invocation: true`), and nothing starts it on its own. It has three modes: an audit of a change, a PR or a module, a bug investigation that reproduces the bug before explaining it, and a fix validation that checks the confirmation (the reproduction that was red is now green) and the regression around the fix. It follows Agile Testing, Explore It! and ISTQB CTFL 4.0, with a `techniques.md` that is read only when the cases are designed. It edits no production code: a reproduction test goes only in a test file and is cited in the report, and you decide whether it stays. It runs as a study: slugs are `study-qa-<topic>`, with no spec, attempt, or verify, and a `cc-tiers:researcher` only for a library or version question the repo cannot settle. Each finding is typed (confirmed bug, suspicion, risk, coverage gap, test not run), then one `cc-tiers:reviewer` checks them in Claims mode, at most 2 rounds. The reviewer runs the command behind each confirmed bug and compares its output with the claim, and a claim that does not hold is a `trace` finding.
+
 ---
 
 ## 🧹 Clean code without asking
@@ -629,6 +631,7 @@ An internal error in a cc-tiers hook is never taken as a success. `before_agent`
 | `/cc-tiers:route [task]` | Name the tier and stop. Runs the same heuristic as the hooks. No edits |
 | `/cc-tiers:escalate [slug]` | Move that task up one tier now, notes included |
 | `/cc-tiers:study <question>` | Study a system, a feasibility question, or requirements, with no code change: researchers answer each front with sources, and an Opus review checks the claims. Runs only on this command |
+| `/cc-tiers:qa <change, PR, module, bug or fix>` | QA investigation: audit, bug reproduction, or fix validation. Edits no production code, and an Opus review checks the typed findings. Runs only on this command |
 | `/cc-tiers:report [--all]` | Per-task table for this session: tiers, attempts, effort, review, verify, status, and cost next to Opus rates, then risk, completion, confidence, and measured time. The Verify column says `ok`, `flaky`, or `not validated` |
 | `/cc-tiers:memory [list\|add\|invalidate\|delete\|prune\|clear]` | List, add, invalidate, delete, prune, or clear what cc-tiers remembers about this project. No edits to code |
 | `/cc-tiers:redo <slug> [reason]` | Mark a done task as sent back by you, so the sent-back figures in `/cc-tiers:insights` count it. `--undo <slug>` removes one mark. No edits to code |
@@ -765,6 +768,8 @@ claude --plugin-dir .
 | `settings.json` | Session agent: `orchestrator` |
 | `agents/*.md` | Opus orchestrator, reviewer, planner, and architect, Sonnet researcher, implementer, checker, and dispatcher, Haiku worker |
 | `skills/tiers/SKILL.md` | `/cc-tiers:tiers` |
+| `skills/qa/SKILL.md` | `/cc-tiers:qa` |
+| `skills/qa/techniques.md` | Techniques for designing cases, read by `/cc-tiers:qa` on demand |
 | `commands/route.md` | `/cc-tiers:route` |
 | `commands/escalate.md` | `/cc-tiers:escalate` |
 | `commands/study.md` | `/cc-tiers:study` |
