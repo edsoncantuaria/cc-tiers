@@ -87,6 +87,8 @@ test('required files are present and Python hooks are gone', () => {
     '.gitattributes',
     '.github/workflows/ci.yml',
     'skills/tiers/SKILL.md',
+    'skills/qa/SKILL.md',
+    'skills/qa/techniques.md',
     'commands/route.md',
     'commands/escalate.md',
     'commands/study.md',
