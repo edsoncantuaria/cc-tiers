@@ -89,6 +89,7 @@ test('required files are present and Python hooks are gone', () => {
     'skills/tiers/SKILL.md',
     'commands/route.md',
     'commands/escalate.md',
+    'commands/study.md',
     'config/routing.default.json',
     'agents/orchestrator.md',
     'agents/worker.md',
@@ -109,7 +110,7 @@ test('required files are present and Python hooks are gone', () => {
 test('manifest declares the 0.5.0 knobs', () => {
   const manifest = JSON.parse(readFileSync(path.join(ROOT, '.claude-plugin/plugin.json'), 'utf8'))
   assert.equal(manifest.name, 'cc-tiers')
-  assert.equal(manifest.version, '0.13.2')
+  assert.equal(manifest.version, '0.13.3')
   assert.equal(JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version, manifest.version)
   assert.equal(/\s|@|:|\/|\\/.test(manifest.name), false)
   assert.equal(RESERVED_PREFIXES.some((prefix) => manifest.name.startsWith(prefix)), false)

@@ -2,7 +2,8 @@
 /**
  * Stop and UserPromptSubmit hook. Catches up on the transcript (which counts an
  * Opus ceiling trailer) and delivers reports that are still waiting. On
- * UserPromptSubmit it also adds the light-path note for a one-task trivial request.
+ * UserPromptSubmit it also adds the light-path note for a one-task trivial request
+ * and titles the session for a /cc-tiers:study prompt.
  * On Stop it also runs the verification gate of ceiling and dispatcher passes
  * parked by the scan, and the judgment of a background agent's hand-back row
  * (outside the session lock, the commands can take minutes)
@@ -26,6 +27,7 @@ async function main(payload) {
     prepareParked,
     redoFromPrompt,
     releaseIdleWriters,
+    studyTitle,
     takePending,
     withSession,
   } = await import('./cc_tiers.mjs')
@@ -40,7 +42,8 @@ async function main(payload) {
       const hint = lightHint(payload.prompt, ctx.routing, { history, conserve: ctx.routing.conserve === true, projectDir: ctx.projectDir })
       return [pending, ...redoFromPrompt(state, payload.prompt, payload.origin), hint].filter(Boolean).join('\n\n')
     })
-    if (message) process.stdout.write(`${JSON.stringify(hookOutput('UserPromptSubmit', message))}\n`)
+    const title = studyTitle(payload.prompt)
+    if (message || title) process.stdout.write(`${JSON.stringify(hookOutput('UserPromptSubmit', message, title))}\n`)
     return
   }
   const { awaiting, peeks, pending } = withSession(ctx, payload, (state) => {

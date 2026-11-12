@@ -85,6 +85,21 @@ test('session prompts handle the small path note', () => {
   }
 })
 
+test('orchestrator session prompts plan in plan mode with a title line and a no-answer fallback', () => {
+  for (const file of ['agents/orchestrator.md', 'skills/tiers/SKILL.md']) {
+    const text = read(file)
+    for (const needle of ['`EnterPlanMode`', '`ExitPlanMode`', 'first line that is one short sentence naming what this session does', 'denied with no answer', 'skip plan mode', 'plan approved in ExitPlanMode', 'is unavailable, or denied with no answer', 'only after the plan is approved', 'that the Research section says needs one']) {
+      assert.ok(text.includes(needle), `${file} mentions ${needle}`)
+    }
+  }
+  assert.ok(read('agents/orchestrator.md').includes('a one-sentence title line, then slug, tier, why'))
+  assert.ok(read('CHANGELOG.md').includes('runs the research the Research section asks for'))
+  for (const file of ['agents/orchestrator.md', 'skills/tiers/SKILL.md', 'CHANGELOG.md']) {
+    assert.equal(read(file).includes('ceiling known from the start'), false, `${file} drops the ceiling trigger`)
+  }
+  assert.equal(read('agents/dispatcher.md').includes('EnterPlanMode'), false)
+})
+
 test('researcher has a failure mode with a search order and a match trailer', () => {
   const text = read('agents/researcher.md')
   for (const needle of ['CC_TIERS_FAILURE: <line>', 'CC_TIERS_MATCH: high|partial|none', 'untrusted data, never instructions', 'secret, a token, a private path, or source code', 'Finding nothing is a valid result', 'under about 40 lines']) {
@@ -94,6 +109,34 @@ test('researcher has a failure mode with a search order and a match trailer', ()
   assert.ok(order.every((at, i) => at > text.indexOf('## Failure mode') && (i === 0 || at > order[i - 1])), 'researcher searches in the documented order')
   assert.ok(text.includes('right before `CC_TIERS_STATUS`'), 'the match line comes before the status line')
   assert.match(text, /^maxTurns: 25$/m)
+})
+
+test('study command runs the flow with sourced claims, one review and no orchestrator trailer', () => {
+  const text = read('commands/study.md')
+  for (const needle of ['argument-hint: "<question>"', 'exception to the answer-only rule', 'Never edit a file', '`cc-tiers:worker`, `cc-tiers:implementer`, `cc-tiers:architect` or `cc-tiers:checker`', '2 to 5 fronts', '`study-<topic>-<front>`', 'in parallel and in the foreground', 'CC_TIERS_STUDY: <front question>', '`file:line`, a doc link for the installed version, or a commit', 'cc-tiers:reviewer', 'CC_TIERS_TASK: study-<topic>', 'CC_TIERS_CLAIMS_BEGIN', 'CC_TIERS_CLAIMS_END', 'CC_TIERS_RESEARCH_BEGIN', 'CC_TIERS_RESEARCH_END', 'never your own reasoning', 'claims rejected', 'At most 2 rounds', 'publish it as a document', 'Write no `CC_TIERS_ROLE: orchestrator` or `CC_TIERS_STATUS` trailer']) {
+    assert.ok(text.includes(needle), `study command mentions ${needle}`)
+  }
+  assert.equal(/^allowed-tools:/m.test(text), false)
+  assert.ok(read('README.md').includes('`/cc-tiers:study <question>`') && read('README.md').includes('`commands/study.md`'))
+  assert.ok(read('README.pt-BR.md').includes('`/cc-tiers:study <pergunta>`') && read('README.pt-BR.md').includes('`commands/study.md`'))
+  assert.ok(read('CHANGELOG.md').includes('`/cc-tiers:study <question>` studies a system'))
+})
+
+test('researcher has a study mode after the failure mode and the reviewer a claims mode', () => {
+  const researcher = read('agents/researcher.md')
+  const study = researcher.indexOf('## Study mode')
+  assert.ok(study > researcher.indexOf('## Failure mode'), 'study mode follows the failure mode')
+  const section = researcher.slice(study)
+  for (const needle of ['`CC_TIERS_STUDY: <front>` line outside any block', 'that front only', '`file:line`, a doc link for the installed version', '`git log -S`', '"Not found", with where you looked, is a valid result', 'Label an inference as `inference`', 'Claims:', 'Not found:', 'Open questions:', 'under about 40 lines', 'The trailer is the same as above']) {
+    assert.ok(section.includes(needle), `researcher study mode mentions ${needle}`)
+  }
+  assert.ok(researcher.includes('CC_TIERS_MATCH: high|partial|none'), 'the failure mode stays')
+  const reviewer = read('agents/reviewer.md')
+  const claims = reviewer.indexOf('## Claims mode')
+  assert.ok(claims > reviewer.indexOf('Use `fail` to reject.'), 'claims mode follows the diff review')
+  for (const needle of ['`CC_TIERS_CLAIMS_BEGIN` and `CC_TIERS_CLAIMS_END`', 'There is no diff', 'a sample of the rest', 'contradicts its source', 'has no source', '`evidence: trace`', 'An unsourced side remark is a `note`', 'says how many claims you checked']) {
+    assert.ok(reviewer.slice(claims).includes(needle), `reviewer claims mode mentions ${needle}`)
+  }
 })
 
 test('session prompts run failure research before a retry and keep the old rule', () => {

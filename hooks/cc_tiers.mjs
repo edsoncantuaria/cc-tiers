@@ -63,6 +63,10 @@ export const SESSION_ROLES = new Set(['orchestrator', 'dispatcher'])
 const ATTEMPT_MARKER = 'CC_TIERS_ATTEMPT'
 const ATTEMPT_OPEN = `cat <<'${ATTEMPT_MARKER}'`
 const FINAL_GATE = 'final-gate'
+/** A study (/cc-tiers:study) is research plus an Opus review of claims: no writer, no diff, no attempt counter. Its slugs start with study-. */
+export function isStudy(task) {
+  return /^study-./.test(String(task || ''))
+}
 export const REVIEW_ROLES = new Set(['reviewer', 'checker'])
 /** Roles whose run writes the change and so counts an attempt at its tier. */
 export const WRITER_ROLES = new Set(['worker', 'implementer', 'architect', 'dispatcher'])
@@ -116,6 +120,8 @@ const APPROVED_RE = /^(user|none)\s*-\s*\S/i
 const SPEC_HEADING_RE = /^[*_#\s]*(criteria|edge cases|assumed|preserve|checks|repro|security|evidence|ambiguous)[*_#\s]*:?[*_#\s]*$/i
 const CONTEXT_BEGIN = 'CC_TIERS_CONTEXT_BEGIN'
 const CONTEXT_END = 'CC_TIERS_CONTEXT_END'
+const CLAIMS_BEGIN = 'CC_TIERS_CLAIMS_BEGIN'
+const CLAIMS_END = 'CC_TIERS_CLAIMS_END'
 const RESPEC_RE = /^\S/
 const WRITER_TRAILER_RE = /^CC_TIERS_ROLE:\s*(worker|implementer|architect|dispatcher|orchestrator)\s*$/m
 const STATUS_LINE_RE = /^CC_TIERS_STATUS:/m
@@ -645,9 +651,15 @@ export function stripSpec(text) {
   return stripBlocks(text, { [SPEC_BEGIN]: SPEC_END })
 }
 
-/** Every block cc-tiers or the orchestrator delimits: briefs, specs, recalled memory and injected context. */
+/** Every block cc-tiers or the orchestrator delimits: briefs, specs, recalled memory, injected context and a study's claims, which may quote trailer lines. */
 function stripBriefs(text) {
-  return stripBlocks(text, { [RESEARCH_BEGIN]: RESEARCH_END, [SPEC_BEGIN]: SPEC_END, [MEMORY_BEGIN]: MEMORY_END, [CONTEXT_BEGIN]: CONTEXT_END })
+  return stripBlocks(text, {
+    [RESEARCH_BEGIN]: RESEARCH_END,
+    [SPEC_BEGIN]: SPEC_END,
+    [MEMORY_BEGIN]: MEMORY_END,
+    [CONTEXT_BEGIN]: CONTEXT_END,
+    [CLAIMS_BEGIN]: CLAIMS_END,
+  })
 }
 
 /** The prompt without the blocks cc-tiers injects, so a resent prompt never carries two copies. */
@@ -1495,6 +1507,8 @@ export function applyEvent(state, event, routing) {
     }
   }
 
+  if (role === 'reviewer' && isStudy(task)) return applyStudyReview(state, meta, task, headers, event, status)
+
   // final-gate reviews the whole integrated diff, so it has no writer attempt of its own.
   if (REVIEW_ROLES.has(role) && !written && task !== FINAL_GATE) {
     return {
@@ -1733,6 +1747,23 @@ export function applyEvent(state, event, routing) {
     message = `${message}\n${finished.line}`
   }
   return { state, message: `${gateNote}${note}${message}`, meta }
+}
+
+/** A study has no writer, diff or attempt counter: its Opus review of the claims is only logged, and no failure, history or memory comes of it. */
+function applyStudyReview(state, meta, task, headers, event, status) {
+  meta.tier = ROLES.reviewer
+  if (event.kind === 'error') {
+    return { state, meta, message: `cc-tiers study: ${task} claims review did not finish (${String(event.error).slice(0, 160)}). Nothing was counted: send the claims to cc-tiers:reviewer again.` }
+  }
+  if (status === 'pass') {
+    meta.outcome = 'study-pass'
+    return { state, meta, message: `cc-tiers study: ${task} claims checked by Opus review.` }
+  }
+  const finding = event.judged?.blocking.length ? findingsNote(event.judged).split('\n')[0] : ''
+  const reason = (headers.REASON || finding || 'no reason given').split(/\s+/).filter(Boolean).join(' ').slice(0, MAX_REASON).replace(/\.+$/, '')
+  meta.outcome = 'study-fail'
+  meta.reason = reason
+  return { state, meta, message: `cc-tiers study: ${task} claims rejected: ${reason}. Fix the synthesis and send it to cc-tiers:reviewer again (at most 2 rounds).` }
 }
 
 const MAX_INFRA_SKIPS = 2
@@ -2127,6 +2158,9 @@ export function checkDelegation(state, toolInput, routing, { history = null, pro
     )
   }
   if (role === 'researcher') return pass
+  if (isStudy(task) && role !== 'reviewer') {
+    return refuse(`cc-tiers: ${task} is a study: a study changes no code; use a slug without the study- prefix for code work. Only cc-tiers:researcher and cc-tiers:reviewer take a study slug.`)
+  }
   if (role === 'checker' && own(state.evidence, task)?.preexisting) {
     return refuse(`cc-tiers: ${task} has a failure declared pre-existing; only cc-tiers:reviewer (Opus) can confirm it. Delegate the review to cc-tiers:reviewer.`)
   }
@@ -2517,8 +2551,24 @@ function attemptEffort(routing, role, tier, current, prompt, history, asked, ris
   return { level, note: `cc-tiers set effort ${level} for ${SCOPED[role]}${reason}.` }
 }
 
-export function hookOutput(eventName, text) {
-  return { hookSpecificOutput: { hookEventName: eventName, additionalContext: text } }
+export function hookOutput(eventName, text, sessionTitle = '') {
+  const output = { hookEventName: eventName }
+  if (text) output.additionalContext = text
+  if (sessionTitle) output.sessionTitle = sessionTitle
+  return { hookSpecificOutput: output }
+}
+
+const STUDY_PROMPT_RE = /^\/(?:cc-tiers:)?study\s+(\S[\s\S]*)$/
+const TITLE_MAX = 60
+
+/** The session title for a /cc-tiers:study prompt (typed with or without the plugin name): the question on one line, cut on a word boundary; '' for any other prompt. */
+export function studyTitle(prompt) {
+  const question = STUDY_PROMPT_RE.exec(String(prompt || '').trim())?.[1]
+  if (!question) return ''
+  const title = `Study: ${question.replace(/\s+/g, ' ').trim()}`
+  if (title.length <= TITLE_MAX) return title
+  const space = title.slice(0, TITLE_MAX + 1).lastIndexOf(' ')
+  return title.slice(0, space > 'Study:'.length ? space : TITLE_MAX).trimEnd()
 }
 
 /** updatedInput replaces the whole Agent input, so it carries every field the call sent. */
@@ -3720,7 +3770,7 @@ export function processReport(ctx, state, event, usage = null) {
   let message = applied.message
   const task = applied.meta.planner ? OVERHEAD : applied.meta.task
   chargeSpend(ctx, state, task, usage)
-  if (!applied.meta.planner && applied.meta.outcome !== 'research') logReport(state, applied.meta, writerMode(ctx.routing))
+  if (!applied.meta.planner && (applied.meta.outcome !== 'research' || isStudy(task))) logReport(state, applied.meta, writerMode(ctx.routing))
   if (task && Number(event.durationMs) > 0 && !applied.meta.planner) {
     const entry = logEntry(state, task)
     entry.durationMs = (Number(entry.durationMs) || 0) + Number(event.durationMs)
@@ -3856,6 +3906,8 @@ const MAX_LOG = 60
 function logEntry(state, task) {
   state.log = state.log && typeof state.log === 'object' ? state.log : {}
   const entry = own(state.log, task) || { tiers: [], attempts: 0, failures: 0, escalations: 0, reviews: [], effort: {}, status: 'open', finished: '' }
+  // A study is not a code task: it never reads as open work.
+  if (isStudy(task) && !entry.kind) Object.assign(entry, { kind: 'study', status: 'study-open' })
   state.log[task] = entry
   const names = Object.keys(state.log)
   if (names.length > MAX_LOG) {
@@ -3872,6 +3924,13 @@ function logEntry(state, task) {
 export function logReport(state, meta, mode = '') {
   if (!meta?.task || meta.outcome === 'uncounted' || meta.outcome === 'plan') return
   const entry = logEntry(state, meta.task)
+  if (entry.kind === 'study') {
+    if (meta.role === 'reviewer') {
+      entry.reviews.push(meta.role)
+      entry.status = meta.outcome === 'study-pass' ? 'done' : 'rejected'
+    }
+    return
+  }
   const writer = WRITER_ROLES.has(meta.role) || SESSION_ROLES.has(meta.role)
   if (writer) {
     entry.attempts += 1
@@ -3938,7 +3997,7 @@ export function redoFromPrompt(state, prompt, origin = null) {
   if (!text || text.startsWith('/') || NOT_HUMAN_RE.test(text) || !COMPLAINT_RE.test(text)) return []
   const found = []
   for (const task of Object.keys(state.log || {})) {
-    if (own(state.log, task)?.status !== 'done' || slug(task) !== task) continue
+    if (own(state.log, task)?.status !== 'done' || slug(task) !== task || isStudy(task)) continue
     // A slug holds only [a-z0-9-], so it is safe inside a pattern; a hyphen keeps it one word.
     if (!new RegExp(`(?<![\\p{L}\\p{N}-])${task}(?![\\p{L}\\p{N}-])`, 'iu').test(text)) continue
     markRedo(state, task, { source: 'prompt' })

@@ -52,6 +52,8 @@ Com o plugin ativo, o `settings.json` define o agente da sessão como `orchestra
 
 Os agentes fixam `model: haiku`, `sonnet` ou `opus`. O orquestrador não passa modelo na chamada, porque um override por chamada trocaria o nível. Um hook PreToolUse recusa a delegação do cc-tiers que tentar.
 
+Num pedido com duas ou mais tarefas de escrita, ou numa tarefa que começa no Opus, o orquestrador planeja no plan mode do Claude Code: lê o código e roda o researcher sem editar, depois escreve o plano e chama `ExitPlanMode`. Você aprova o plano com um clique, e o Claude Code dá título à sessão a partir da primeira linha do plano, então várias sessões se distinguem pelo que fazem, não por `cc-tiers:orchestrator`. Um título que você definiu com `/rename` é mantido. Sem ninguém para responder, ele planeja na conversa como antes e avisa no relatório final. Uma mudança pequena, uma pergunta e uma nova tentativa não passam pelo plan mode.
+
 ```mermaid
 flowchart LR
     A[Orquestrador Opus] --> B{Tarefa}
@@ -93,6 +95,8 @@ Ele devolve um briefing de até umas 40 linhas em três blocos, **Versão e doc*
 O hook PreToolUse garante isso. Ele recusa a chamada ao implementer ou ao architect que não tem nem pesquisa concluída para aquela tarefa nem a linha `none`. Pesquisa não é tentativa, e uma pesquisa que falha não conta contra a tarefa. O worker fica de fora. O teto Opus e a tarefa do próprio dispatcher são pesquisados por prompt, sem checagem do hook. `research: off` tira o passo e a checagem.
 
 **Pesquisa depois de uma falha.** Uma falha contada e diagnosticada como `docs-version`, `type`, `integration`, `test` ou `regression` pode pedir uma busca na web. A nota de falha termina então com uma linha `Failure research:` e até três linhas `CC_TIERS_FAILURE: <sintoma>`: o sintoma e a evidência do diagnóstico, com segredos redigidos, caminhos absolutos trocados por `<path>`, tokens `CC_TIERS_` removidos e cada linha cortada em 160 caracteres. O orquestrador (ou o dispatcher) pode rodar o `cc-tiers:researcher` para esse slug antes da próxima tentativa, com essas linhas no prompt, fora de qualquer bloco. Nesse modo o pesquisador lê primeiro a versão instalada e depois busca nesta ordem: a documentação oficial dessa versão, issues e PRs do repositório oficial, discussões técnicas e relatos de bug, e Stack Overflow ou outras fontes da comunidade. Uma consulta leva só a mensagem de falha, a biblioteca e a versão, nunca um segredo, um caminho privado nem código-fonte, e uma página buscada é dado não confiável, nunca instrução. Ele reporta `Symptom`, `Probable cause`, `Suggested fix`, `Version`, `Sources` e `Match`, e acrescenta `CC_TIERS_MATCH: high|partial|none` ao trailer; `none` com `CC_TIERS_STATUS: pass` é um resultado válido. O orquestrador cola esse briefing no prompt seguinte como um segundo bloco de pesquisa, depois do original. A sugestão nunca é obrigatória, e um match `none` ou uma busca que não passou nunca atrasa a nova tentativa nem a escalada. Uma busca de falha não conta tentativa, e um pass marca a tarefa como pesquisada. `failure_research_max` (padrão 1, de 0 a 5) limita quantas notas de falha de uma tarefa, em todos os níveis dela, podem sugerir uma busca, e `failure_research: off` tira a sugestão. A nota que para uma tarefa depois da última tentativa do Opus não sugere nada. Quando uma tarefa que recebeu a oferta de uma busca escala, a nota acrescenta uma linha `Research dossier:`: o próximo nível recebe os dois briefings, as notas de falha e as hipóteses já tentadas, e só busca de novo por uma lacuna que o dossiê nomeia. O match fica na telemetria como `research.failure`, e o `/cc-tiers:insights` o conta.
+
+**Estudo.** O `/cc-tiers:study <pergunta>` serve para trabalho que não muda código: entender um sistema, avaliar viabilidade, levantar requisitos. Roda só quando você digita o comando, e nada o dispara sozinho. O orquestrador divide a pergunta em 2 a 5 frentes e manda um `cc-tiers:researcher` por frente, em paralelo; cada um devolve afirmações com fonte (`file:line`, um link da doc da versão instalada ou um commit), ou "não encontrado" com onde procurou. O orquestrador sintetiza a resposta, as contradições entre frentes, o que ficou em aberto e um veredito de viabilidade se você pediu, e então um `cc-tiers:reviewer` Opus abre as fontes citadas e rejeita a afirmação que contradiz a própria fonte ou em que a resposta se apoia sem fonte. Ele corrige as afirmações e pede de novo, no máximo 2 rodadas, depois entrega com as fontes e marca o que não se confirmou. Um estudo nunca conta como tarefa de código: seus slugs começam com `study-`, nenhum worker, implementer, architect ou checker roda nele, e uma revisão de estudo rejeitada não é tentativa que falhou. A sessão recebe o título `Study: <pergunta>`.
 
 ---
 
@@ -624,6 +628,7 @@ Um erro interno num hook do cc-tiers nunca vale como sucesso. `before_agent`, `a
 | `/cc-tiers:tiers [tarefa]` | Planeja, encaminha e executa |
 | `/cc-tiers:route [tarefa]` | Diz o nível e para. Usa a mesma heurística dos hooks. Sem editar |
 | `/cc-tiers:escalate [slug]` | Sobe essa tarefa um nível agora, com as notas |
+| `/cc-tiers:study <pergunta>` | Estuda um sistema, uma viabilidade ou requisitos, sem mudar código: pesquisadores respondem cada frente com fontes, e uma revisão do Opus confere as afirmações. Roda só com este comando |
 | `/cc-tiers:report [--all]` | Tabela por tarefa da sessão: níveis, tentativas, effort, revisão, verify, status e custo ao lado do preço do Opus, depois risco, conclusão, confiança e tempo medido. A coluna Verify diz `ok`, `flaky` ou `not validated` |
 | `/cc-tiers:memory [list\|add\|invalidate\|delete\|prune\|clear]` | Lista, adiciona, invalida, apaga, limpa os vencidos ou zera o que o cc-tiers lembra deste projeto. Não edita código |
 | `/cc-tiers:redo <slug> [motivo]` | Marca uma tarefa concluída como devolvida por você, para os números de devolvidas do `/cc-tiers:insights` a contarem. `--undo <slug>` tira uma marca. Não edita código |
@@ -762,6 +767,7 @@ claude --plugin-dir .
 | `skills/tiers/SKILL.md` | `/cc-tiers:tiers` |
 | `commands/route.md` | `/cc-tiers:route` |
 | `commands/escalate.md` | `/cc-tiers:escalate` |
+| `commands/study.md` | `/cc-tiers:study` |
 | `config/routing.default.json` | Listas de frases embutidas, escadas de effort e limiares padrão |
 | `hooks/hooks.json` | Resumo no SessionStart, as checagens, o effort, o classificador Haiku e o contador do Agent, SubagentStop, Stop e UserPromptSubmit |
 | `hooks/cc_tiers.mjs` | Regras de merge, o contador, gasto, orçamento e histórico |
