@@ -86,7 +86,7 @@ Código escrito de memória, com uma versão antiga da API em mente, falha de je
 - A documentação dessa versão, vinda de `vendor/` ou `node_modules/` quando instalada, nunca a da última release por padrão.
 - Como a documentação dessa versão recomenda fazer a tarefa e o que ela marca como obsoleto.
 - Como o repositório já chama a API, como `arquivo:linha`.
-- Reuso: código que o repositório já tem e que faz tudo ou parte da tarefa, como `arquivo:linha`.
+- Reuso: código que o repositório já tem e que faz tudo ou parte da tarefa, como `arquivo:linha`. A busca cobre funções, queries e métodos de acesso a dados (incluindo os finders do próprio framework), componentes de UI (templates, partials, scripts, estilos) e constantes ou enums. Cada item diz `call as is` ou `needs a change to <arquivo:linha>, called by <arquivo:linha>`. Código específico do projeto (uma query, um componente, uma regra de domínio) vem só do repositório, nunca da web.
 - Convenções: um ou dois trechos próximos a seguir (nomes, tratamento de erro, estilo de teste, quantidade de comentário).
 - Referências fora do repositório, só quando se aplicam.
 
@@ -106,7 +106,8 @@ O hook PreToolUse garante isso. Ele recusa a chamada ao implementer ou ao archit
 
 Quem escreve já leva estas regras, então um projeto não precisa de regras no CLAUDE.md para isso:
 
-- Reaproveitar ou estender o que existe, nunca forkar. O bloco Reuso do briefing diz onde olhar.
+- Chamar o código que existe do jeito que ele está. Mudar código que outro código chama (corpo, assinatura ou visibilidade, uma extração, uma remoção) só quando o spec ou a tarefa nomeia essa mudança; fora disso, parar e reportar. Nunca forkar uma cópia, a menos que o spec a nomeie. Código que este trabalho criou (este diff ou um commit anterior do mesmo trabalho) não é "outro código". O bloco Reuso do briefing diz onde olhar.
+- Query, método de acesso a dados ou componente de UI novo só quando o repositório não tem nenhum. A linha de motivo diz o que foi buscado.
 - Seguir a documentação da versão instalada e as convenções do arquivo editado.
 - Mexer só no que a tarefa exige: sem refator, reformat, rename ou bump de dependência de passagem.
 - Sem proteção hipotética: retry, cache, fallback ou compatibilidade só quando algo real consome.
@@ -115,7 +116,9 @@ Quem escreve já leva estas regras, então um projeto não precisa de regras no 
 - Comentário só para o que o código não consegue dizer.
 - Parar quando estiver verificado. Sem passes extras.
 
-O revisor bloqueia código que recria o que o projeto já tem e mudanças fora da tarefa (ambos achados de `scope`). Também bloqueia mudança que esconde uma falha em vez de corrigir a causa, sem comentário dizendo o porquê (`correctness`), e arquivo novo de que a tarefa não precisa (`scope`). Proteção hipotética, código especulativo, log de debug esquecido, estilo, ruído de comentário e gosto de nome são notas: vão para o relatório final e nunca reprovam uma tarefa.
+Quando o briefing diz que um reuso precisa de mudança, o orquestrador (ou o dispatcher) mantém o código como está com uma linha `Preserve:` se a tarefa dá para fazer chamando-o do jeito que ele está. Se não dá, pergunta a você antes de delegar, com a opção recomendada primeiro: manter o código como está e copiar só a parte de que a tarefa precisa (o spec nomeia a cópia), ou mudar o código (o spec nomeia a mudança e uma checagem dos chamadores). Sem ninguém para responder, fica com a opção recomendada, nomeada em `Assumed:`. Um escritor que para porque o reuso precisa de uma mudança que o spec não nomeia traz a mesma pergunta antes da nova tentativa.
+
+O revisor bloqueia código que recria o que o projeto já tem e mudanças fora da tarefa (ambos achados de `scope`). O revisor e o checker também bloqueiam um diff que muda ou remove código existente que outro código chama quando o spec ou a tarefa não o nomeia (achado `regression`: os chamadores em `arquivo:linha` devem manter o comportamento). Antes de aprovar, eles buscam no repositório cada query, método de acesso a dados, componente ou constante nova por tabela e coluna, conceito e valor literal, e um equivalente é o achado de código recriado, exceto quando o spec nomeia a cópia. O revisor também bloqueia mudança que esconde uma falha em vez de corrigir a causa, sem comentário dizendo o porquê (`correctness`), e arquivo novo de que a tarefa não precisa (`scope`). Proteção hipotética, código especulativo, log de debug esquecido, estilo, ruído de comentário e gosto de nome são notas: vão para o relatório final e nunca reprovam uma tarefa.
 
 ---
 
@@ -131,7 +134,7 @@ Os critérios vão no prompt da delegação, entre duas linhas que só têm `CC_
 
 Cada linha diz de onde veio: `(request)`, `(repo: arquivo:linha)`, `(docs: <link ou caminho>)`, `(decided: <motivo>)`, ou `(user)` para uma resposta. O mesmo bloco vai para o implementer e para o reviewer ou checker daquela tarefa. O implementer constrói e testa cada linha, e o reviewer rejeita um critério ou caso de borda não atendido ou sem teste. Uma nova tentativa ou uma escalação reaproveita o bloco.
 
-**Quando pergunta.** Só quando duas leituras razoáveis levam a código diferente e nem o projeto nem a documentação da versão em uso decidem. O resto ele decide e marca `(decided: ...)`. Pergunta uma vez, antes de implementar, todas as perguntas juntas, no máximo 3, com `AskUserQuestion` de múltipla escolha e a opção recomendada primeiro, com o motivo. Sua resposta entra no bloco como `(user)`.
+**Quando pergunta.** Só quando duas leituras razoáveis levam a código diferente e nem o projeto nem a documentação da versão em uso decidem. O resto ele decide e marca `(decided: ...)`. Pergunta uma vez, antes de implementar (a única exceção é a pergunta de reuso acima, depois que um escritor parou por ela), todas as perguntas juntas, no máximo 3, com `AskUserQuestion` de múltipla escolha e a opção recomendada primeiro, com o motivo. Sua resposta entra no bloco como `(user)`.
 
 **Quando ninguém pode responder.** Se o `AskUserQuestion` não estiver disponível ou for negado, ele segue com a opção recomendada, registra em `Assumed:`, diz isso no relatório final e não espera.
 

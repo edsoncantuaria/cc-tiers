@@ -86,7 +86,7 @@ Code written from memory of an old API version fails in ways a test does not alw
 - The docs of that version, from `vendor/` or `node_modules/` when installed, never the docs of the latest release by default.
 - How that version's docs recommend doing the task, and what they mark deprecated.
 - How the repo already calls the API, as `file:line`.
-- Reuse: code the repo already has that does all or part of the task, as `file:line`.
+- Reuse: code the repo already has that does all or part of the task, as `file:line`. The search covers functions, queries and data-access methods (including the framework's own finders), UI components (templates, partials, scripts, styles), and constants or enums. Each entry says `call as is` or `needs a change to <file:line>, called by <file:line>`. Project-specific code (a query, a component, a domain rule) comes only from the repo, never from the web.
 - Conventions: one or two nearby snippets to follow (naming, error handling, test style, comment density).
 - Prior art outside the repo, only when it applies.
 
@@ -106,7 +106,8 @@ The PreToolUse hook enforces this. It refuses a call to the implementer or the a
 
 The writers carry these rules, so a project needs no CLAUDE.md rules for them:
 
-- Reuse or extend what exists, never fork it. The brief's Reuse block says where to look.
+- Call existing code as it is. Change code that other code calls (its body, signature, or visibility, an extraction, a removal) only when the spec or the task names that change; otherwise stop and report. Never fork a copy unless the spec names it. Code this work created (this diff or an earlier commit of the same work) is not "other code". The brief's Reuse block says where to look.
+- A new query, data-access method, or UI component only when the repo has none. The reason line says what was searched.
 - Follow the docs of the installed version, and the conventions of the file being edited.
 - Touch only what the task needs: no drive-by refactor, reformat, rename, or dependency bump.
 - No hypothetical protection: retry, cache, fallback, or compatibility only when something real consumes it.
@@ -115,7 +116,9 @@ The writers carry these rules, so a project needs no CLAUDE.md rules for them:
 - Comments only for what the code cannot say.
 - Stop when it is verified. No extra passes.
 
-The reviewer blocks code that recreates what the project already has, and changes outside the task (both `scope` findings). It also blocks a change that hides a failure instead of fixing its cause, with no comment saying why (`correctness`), and a new file the task does not need (`scope`). Hypothetical protection, speculative code, leftover debug output, style, comment noise, and naming taste are notes: they reach the final report and never fail a task.
+When the brief says a reuse needs a change, the orchestrator (or the dispatcher) keeps the code unchanged with a `Preserve:` line if the task can be done calling it as is. If not, it asks you before delegating, with the recommended option first: keep it unchanged and copy only the part the task needs (the spec names the copy), or change it (the spec names the change and a callers check). With nobody to answer, it takes the recommended option, named under `Assumed:`. A writer that stops because the reuse needs a change the spec does not name brings the same question before the retry.
+
+The reviewer blocks code that recreates what the project already has, and changes outside the task (both `scope` findings). The reviewer and the checker also block a diff that changes or removes existing code other code calls when the spec or the task does not name it (a `regression` finding: the callers at `file:line` must keep their behaviour). Before passing, they search the repo for each new query, data-access method, component, or constant by table and column, concept, and literal value, and an equivalent is the recreated-code finding, except when the spec names the copy. The reviewer also blocks a change that hides a failure instead of fixing its cause, with no comment saying why (`correctness`), and a new file the task does not need (`scope`). Hypothetical protection, speculative code, leftover debug output, style, comment noise, and naming taste are notes: they reach the final report and never fail a task.
 
 ---
 
@@ -131,7 +134,7 @@ The criteria ride in the delegation prompt between two lines that hold only `CC_
 
 Every line says where it came from: `(request)`, `(repo: file:line)`, `(docs: <link or path>)`, `(decided: <why>)`, or `(user)` for an answer. The same block goes to the implementer and to the reviewer or checker of that task. The implementer builds and tests each line, and the reviewer rejects a criterion or edge case that is not met or not tested. A retry or an escalation reuses the block.
 
-**When it asks.** Only when two reasonable readings lead to different code and neither the project nor the docs of the version in use decide. Everything else it decides and marks `(decided: ...)`. It asks once, before implementing, all questions together, at most 3, with `AskUserQuestion` as multiple choice and the recommended option first, with its reason. Your answer goes into the block as `(user)`.
+**When it asks.** Only when two reasonable readings lead to different code and neither the project nor the docs of the version in use decide. Everything else it decides and marks `(decided: ...)`. It asks once, before implementing (the one exception is the reuse question above, after a writer stopped for it), all questions together, at most 3, with `AskUserQuestion` as multiple choice and the recommended option first, with its reason. Your answer goes into the block as `(user)`.
 
 **When nobody can answer.** If `AskUserQuestion` is unavailable or denied, it takes the recommended option, lists it under `Assumed:`, says so in the final report, and does not wait.
 

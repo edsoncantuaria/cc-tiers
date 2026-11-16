@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- The Reuse rule changes from "extend it, never fork" to "call it as it is". Extending stays allowed for code nothing else calls, or for a change the spec or the task names. The researcher's Reuse search also covers queries and data-access methods (including the framework's own finders), UI components (templates, partials, scripts, styles), and constants or enums. Each Reuse entry says `call as is` or `needs a change to <file:line>, called by <file:line>`. Project-specific code (a query, a component, a domain rule) comes only from the repo, never from the web.
+- The writers (implementer, architect, and the orchestrator or dispatcher when they write) call existing code as it is. They change code that other code calls (body, signature, visibility, an extraction, a removal) only when the spec or the task names that change, and otherwise stop and report. They never fork a copy unless the spec names it. Code the same work created (this diff or an earlier commit of it) is not "other code". A new query, data-access method or UI component is written only when the repo has none, and the reason line says what was searched. The worker never changes or removes code other code calls beyond the lines the task names, and code the same work created is not other code to it either.
+- The reviewer and the checker report a new blocking `regression` finding when the diff changes or removes existing code other code calls and neither the spec nor the task names it (expected: the callers at `file:line` keep their behaviour). Before passing, they search the repo for each new query, data-access method, component or constant by table and column, concept and literal value, and an equivalent is the existing "recreates code" finding, except when the spec names the copy.
+- When the brief says a reuse needs a change, the orchestrator (Specify) keeps the code unchanged with a `Preserve:` line if the task can be done calling it as is. If not, it asks before delegating, with the recommended option first: keep it unchanged and copy only the part the task needs (the spec names the copy), or change it (the spec names the change and a callers check). With no human to answer, it takes the recommended option, named in the spec under `Assumed:`. A writer that stops because the reuse needs a change the spec does not name gets the same question before the retry, the one exception to asking once.
+- Why: "extend it, never fork" let a writer change a private method another class relied on, then copy it when told not to, and write queries the repo already had.
+
 ## 0.13.4 - 2026-11-12
 
 ### Added
