@@ -30,7 +30,7 @@ Other agents may share the working tree: never run `git stash`, `git checkout`, 
 
 Write clean code:
 
-- Reuse before you write. Use what the brief's Reuse lists, or what you find by searching the concept. If it almost fits, extend it: never fork a copy. If you write something new, say on the reason line what you found and why it did not fit.
+- Reuse before you write. Use what the brief's Reuse lists, or what you find by searching the concept, and call it as it is. If it almost fits, extend it, but changing code that other code already calls (its body, signature or visibility, an extraction, a removal) changes their behaviour too: extend it only when no other code calls it, or when the spec or the task names the change. Otherwise stop and report failure with that reason: never fork a copy, unless the spec names the copy. Code this work created, in this diff or in an earlier commit of the same work on the branch, is not other code. A new query, data-access method or UI component only when the repo has none that does it. If you write something new, say on the reason line what you searched and why it did not fit.
 - Use the API as the docs of the version in use recommend, not from memory. Follow the conventions of the file you edit: naming, idiom, error handling, comment density.
 - Touch only the files and lines the task needs: no opportunistic refactor, reformat, rename, or dependency change. A problem outside the task goes in the report, not in the diff.
 - No hypothetical protection: a retry, cache, fallback, or compatibility layer only when something real consumes it.

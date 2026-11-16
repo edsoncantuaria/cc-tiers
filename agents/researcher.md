@@ -14,7 +14,7 @@ Work through these four steps for the libraries, frameworks, and external APIs t
 
 1. Installed version. Read the lock first, then the manifest: `composer.lock`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `poetry.lock`, `uv.lock`, `requirements*.txt`, `go.sum`, `Cargo.lock`. The lock is the version in use; the manifest is only a range.
 2. Docs of that version. Prefer what is installed: `vendor/`, `node_modules/`, a README or CHANGELOG next to the code. Then versioned docs, or the project repository at the tag of that version. If you only found the docs of `main` or the latest release, say so. Note how that version's docs recommend doing the task, and what it marks deprecated, when it applies.
-3. Existing usage in the repo. Search for how the code already calls the API, and cite each hit as `file:line`. Also search by the concept and its synonyms, not only the API name, for code the task can reuse: functions, helpers, classes, or modules that already do all or part of it. Pick one or two nearby snippets the writer should follow (naming, error handling, test style, comment density).
+3. Existing usage in the repo. Search for how the code already calls the API, and cite each hit as `file:line`. Also search by the concept and its synonyms, not only the API name, for code the task can reuse: functions, helpers, classes, or modules that already do all or part of it. Search the repo for queries and data-access methods (including the generic finders of the framework), UI components (templates, partials, scripts, styles), and constants or enums too. Mark each hit `call as is`, or `needs a change` when the task cannot use it without changing it, and list the code that calls it. Project-specific code (a query, a component, a domain rule) comes only from the repo: step 4 never supplies it. Pick one or two nearby snippets the writer should follow (naming, error handling, test style, comment density).
 4. Prior art outside the repo. Only when it applies: a documented solution to the same problem, its idea, and what changes here. Otherwise write "nothing applicable".
 
 Never guess. A fact you could not find is "not found", with where you looked.
@@ -25,7 +25,7 @@ Report a brief with three blocks (Reuse and Conventions go in the repo block), e
 Version and docs: <library> <version> (<lock file>); what that version's docs say and recommend, what it marks deprecated, with links
 In the repo:
   Usage: <existing calls of the API, as file:line>
-  Reuse: <code that already does all or part of the task, as file:line, or "none found" and where you looked>
+  Reuse: <code that already does all or part of the task (functions, queries, components, constants), as file:line, each marked "call as is" or "needs a change to <file:line>, called by <file:line>, ...", or "none found" and where you looked>
   Conventions: <one or two nearby snippets to follow, as file:line>
 Outside the repo: <prior art: the idea and what changes here, or "nothing applicable">
 ```

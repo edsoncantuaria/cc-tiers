@@ -58,6 +58,39 @@ test('prompts ask for reuse, scope and conventions', () => {
   }
 })
 
+test('prompts keep code other code calls unchanged and search the repo for queries and components', () => {
+  const researcher = read('agents/researcher.md')
+  for (const needle of ['queries and data-access methods', 'generic finders of the framework', 'UI components', 'constants or enums', '`call as is`', 'needs a change to <file:line>, called by <file:line>', 'only from the repo', 'step 4 never supplies it']) {
+    assert.ok(researcher.includes(needle), `researcher mentions ${needle}`)
+  }
+  for (const file of ['agents/implementer.md', 'agents/architect.md']) {
+    const text = read(file)
+    for (const needle of ['call it as it is', 'other code already calls', 'its body, signature or visibility, an extraction, a removal', 'extend it only when no other code calls it, or when the spec or the task names the change', 'stop and report failure with that reason: never fork a copy, unless the spec names the copy', 'Code this work created, in this diff or in an earlier commit of the same work on the branch, is not other code', 'has none that does it', 'say on the reason line what you searched and why it did not fit']) {
+      assert.ok(text.includes(needle), `${file} mentions ${needle}`)
+    }
+    assert.equal(text.includes('what you found'), false, `${file} has one reason-line instruction for new code`)
+  }
+  for (const needle of ['Never change or remove code other code calls beyond the lines the task names', 'Code this work created, in this diff or in an earlier commit of the same work on the branch, is not other code']) assert.ok(read('agents/worker.md').includes(needle), `worker mentions ${needle}`)
+  for (const file of ['agents/reviewer.md', 'agents/checker.md']) {
+    const text = read(file)
+    for (const needle of ['Blocking (`regression`, evidence `trace`, `where` = the changed line', 'the callers at `file:line` keep their behaviour', 'existing code that other code calls', 'neither the spec nor the task names that change', 'is not existing code', 'in an earlier commit of the same work on the branch', 'unless the spec names that copy', 'for each new query, data-access method, component or constant', 'by table and column, by concept and by literal value', 'recreates code']) {
+      assert.ok(text.includes(needle), `${file} mentions ${needle}`)
+    }
+  }
+  for (const file of ['agents/orchestrator.md', 'agents/dispatcher.md', 'skills/tiers/SKILL.md']) {
+    const text = read(file)
+    for (const needle of ["brief's Reuse says a reuse needs a change to code that other code calls", 'if the task can be done by calling that code as it is, add a `Preserve:` line that keeps it unchanged', 'ask the user with `AskUserQuestion` before you delegate', 'with the recommended option first: keep it unchanged and copy only the part the task needs (the spec then names the copy), or change it (the spec then names the change and a check of its callers)', 'do not take the change: keep it unchanged, copy only the part the task needs, name that copy in the spec, and list it under `Assumed:`', 'gets the same question before the retry; this is the one question that may come after a writer stopped for it, an exception to asking once']) {
+      assert.ok(text.includes(needle), `${file} mentions ${needle}`)
+    }
+    const specify = text.search(/^#{2,3} Specify$/m)
+    assert.ok(specify >= 0, `${file} has a Specify heading`)
+    assert.ok(text.indexOf("brief's Reuse says") > specify, `${file} settles the reuse in the Specify section`)
+    assert.equal(text.includes('(the default)'), false, `${file} has no default that skips the question`)
+  }
+  for (const file of ['agents/orchestrator.md', 'agents/dispatcher.md', 'skills/tiers/SKILL.md']) for (const needle of ['never fork a copy unless the spec names it', 'change code other code calls only when the spec or the task names it']) assert.ok(read(file).includes(needle), `${file} states ${needle} in its same-rules line`)
+  for (const needle of ['blocks recreated code the spec does not name', 'a change to code other code calls that neither the spec nor the task names']) assert.ok(read('skills/tiers/SKILL.md').includes(needle), `skill says the reviewer ${needle}`)
+})
+
 test('prompts send a hard task to Opus from the start', () => {
   for (const file of ['agents/orchestrator.md', 'agents/dispatcher.md', 'agents/planner.md', 'skills/tiers/SKILL.md', 'commands/route.md']) {
     const text = read(file)
