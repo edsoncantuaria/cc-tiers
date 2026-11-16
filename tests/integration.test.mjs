@@ -1221,6 +1221,54 @@ test('failure research: no suggestion for a failure the web cannot explain, and 
   assert.equal(partial.message.includes('Failure research:'), false, 'unverifiable')
 })
 
+test('a coverage rejection is diagnosed coverage: confirmed by the review, no failure research, memory keeps the review as its evidence', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-int-'))
+  try {
+    const project = path.join(dir, 'project')
+    mkdirSync(project)
+    const ctx = { routing: routingWith(), ccCost: false, projectDir: project, dataDir: path.join(dir, 'data') }
+    const judge = (evidence) => ({ blocking: [{ valid: true, category: 'correctness', severity: 'blocking', evidence, where: 'src/users.js:1', criterion: 'Page size defaults to 20', expected: 'default 20', observed: 'default 10' }], discarded: [], notes: [], invalid: [] })
+    const reject = (id, task, evidence) => {
+      const state = tiers.emptyState('s')
+      state.tasks[task] = { tier: 'sonnet', failures: [], carried: [] }
+      const text = report(task, 'reviewer', 'sonnet', 'fail')
+      return { state, message: tiers.processReport(ctx, state, event(id, 'reviewer', text, `${header(task, 'sonnet', 'reviewer')}${SPEC}\ndiff`, { judged: judge(evidence) })) }
+    }
+    const covered = reject('cv1', 'paging', 'coverage')
+    assert.match(covered.message, /Diagnosis: coverage \(confirmed by the review\)\./)
+    assert.match(covered.message, /Next: .*write the missing test for that criterion/)
+    assert.equal(covered.message.includes('Failure research:'), false)
+    assert.equal(covered.message.includes('CC_TIERS_FAILURE'), false)
+    assert.equal(covered.state.tasks.paging.searches, undefined)
+    const traced = reject('cv2', 'login', 'trace')
+    assert.match(traced.message, /Diagnosis: test \(confirmed by the review\)\./)
+    assert.ok(traced.message.includes('Failure research: run cc-tiers:researcher for login'))
+    const records = memory.loadMemory(memory.memoryPath(project)).records.filter((record) => record.category === 'failure')
+    const byTask = (task) => records.find((record) => record.task === task)
+    assert.match(byTask('paging').content, /^coverage failure in paging: /)
+    assert.match(byTask('paging').evidence, /^review finding \d{4}-\d{2}-\d{2}$/)
+    assert.match(byTask('login').evidence, /^review finding /)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a database lock collision in the gate output is an environment failure that is not counted, though PHPUnit says Assertions:', () => {
+  const summary = '\n\nTests: 12, Assertions: 30, Errors: 1.'
+  for (const error of [
+    'QueryException: SQLSTATE[40001]: Serialization failure: 1213 Deadlock found when trying to get lock; try restarting transaction',
+    'QueryException: SQLSTATE[HY000]: General error: 1205 Lock wait timeout exceeded; try restarting transaction',
+    'QueryException: SQLSTATE[HY000] [2002] Connection refused (SQL: select 1)',
+  ]) {
+    const state = tiers.emptyState('s')
+    const text = report('paging', 'implementer', 'sonnet', 'pass', ['CC_TIERS_VERIFY: npm test'])
+    const out = tiers.applyEvent(state, event('db1', 'implementer', text, writer('paging'), { gate: failedGate(`1) FooTest::test_bar\n${error}${summary}`) }), routingWith())
+    assert.match(out.message, /failed on the environment, not the code/, error)
+    assert.equal(out.meta.diagnosis.category, 'infra', error)
+    assert.equal(state.tasks.paging.failures.length, 0, error)
+  }
+})
+
 test('failure research: the option off and a cap of 0 change nothing, and the older docs-version advice stays', () => {
   for (const user of [{ failure_research: 'off' }, { failure_research_max: 0 }, { failure_research: 'off', failure_research_max: 3 }]) {
     const state = tiers.emptyState('s')

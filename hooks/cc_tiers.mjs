@@ -1678,6 +1678,7 @@ export function applyEvent(state, event, routing) {
         applied = applyFailure(tasks, task, current, tier, role, `${lines[0]}${more}`.slice(0, MAX_REASON), routing, lines.length > 1 ? lines.join('\n') : '', {
           source: 'review',
           reviewCategory: judged.blocking[0]?.category || '',
+          reviewEvidence: judged.blocking[0]?.evidence || '',
         })
         meta.reason = `${lines[0]}${more}`.slice(0, MAX_REASON)
       } else {
@@ -1699,6 +1700,7 @@ export function applyEvent(state, event, routing) {
     meta.haikuFailure = applied.haikuFailure
     meta.sonnetEscalated = applied.sonnetEscalated === true
     meta.stillRejected = applied.stillRejected === true
+    meta.diagnosis = applied.diagnosis
   } else if (status === 'pass' && review === 'skip' && !reviewFloor(state, task, routing, flagged)) {
     meta.outcome = 'pass'
     delete tasks[task]
@@ -1994,11 +1996,11 @@ function applyReview(tasks, task, current, tier, status, reason, routing, role, 
 }
 
 /** detail is the gate's output tail: it rides in the failure note so the next attempt sees it. */
-function applyFailure(tasks, task, current, tier, role, reason, routing, detail = '', { source = 'report', reviewCategory = '' } = {}) {
+function applyFailure(tasks, task, current, tier, role, reason, routing, detail = '', { source = 'report', reviewCategory = '', reviewEvidence = '' } = {}) {
   if (current.tier !== tier) {
     current = { tier, failures: [], carried: [...(current.carried || []), ...(current.failures || [])].slice(-MAX_CARRIED), diagnoses: current.diagnoses, ...infraKept(current) }
   }
-  const diagnosis = diagnoseFailure({ reason, detail, source, reviewCategory, previous: current.diagnoses || [] })
+  const diagnosis = diagnoseFailure({ reason, detail, source, reviewCategory, reviewEvidence, previous: current.diagnoses || [] })
   const diagnoses = [...(current.diagnoses || []), { category: diagnosis.category, signature: diagnosis.signature, confirmed: diagnosis.confirmed }].slice(-MAX_CARRIED)
   current = { ...current, diagnoses }
   // Only the failure just counted can be the spec's: an earlier one's criteria no longer qualify.
@@ -2102,7 +2104,7 @@ function failureSearch(diagnosis, task, current, routing) {
  */
 function diagnosisLines(diagnosis, tier, attemptsLeft, search = '') {
   const action = nextAction(diagnosis, { tier, attemptsLeft })
-  const how = diagnosis.confirmed ? 'confirmed by the output' : 'suspected from the reason'
+  const how = !diagnosis.confirmed ? 'suspected from the reason' : diagnosis.source === 'review' ? 'confirmed by the review' : 'confirmed by the output'
   const lines = [`Diagnosis: ${diagnosis.category} (${how}). ${diagnosis.hypothesis}`]
   let next = `Next: ${action.note}`
   if (action.action === 'escalate' && attemptsLeft > 0 && NEXT_TIER[tier]) {
@@ -3874,7 +3876,7 @@ function rememberOutcome(ctx, state, meta, task) {
     records.push({
       category: 'failure',
       content: `${diagnosis.category} failure in ${task}: ${diagnosis.symptom}`,
-      evidence: diagnosis.confirmed ? `command output ${day}` : `reported reason ${day}`,
+      evidence: diagnosis.confirmed ? `${diagnosis.source === 'review' ? 'review finding' : 'command output'} ${day}` : `reported reason ${day}`,
       confidence: diagnosis.confirmed ? 'medium' : 'low',
       status: diagnosis.confirmed ? 'confirmed' : 'hypothesis',
       task,
