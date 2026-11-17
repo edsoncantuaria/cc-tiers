@@ -7,7 +7,9 @@
  * for Stop unless this hook counts the report first (and drops the row), and a report
  * the row already counted only has its spend charged here. Foreground runs are
  * counted by PostToolUse instead. The message waits in the session state until
- * the next hook that can reach the orchestrator.
+ * the next hook that can reach the orchestrator. A reviewer, checker or writer
+ * that stops with no CC_TIERS_STATUS, background or foreground, is kept running
+ * once to write its trailer, and that stop is not counted.
  */
 
 import { runHook } from './integrity.mjs'
@@ -26,19 +28,24 @@ async function main(payload) {
     dropAwaitingAgent,
     matchRole,
     openContext,
+    owesStatus,
     parseHeaders,
     peekFor,
     prepareReport,
     processAgentReport,
     queueMessage,
+    REVIEW_ROLES,
+    trailerRequest,
     withSession,
   } = await import('./cc_tiers.mjs')
   const agentId = String(payload.agent_id || '')
   if (!agentId) return
   const ctx = openContext(payload)
-  // Only an agent cc-tiers launched in the background has a report to wait for.
-  if (!withSession(ctx, payload, (state) => Boolean(agentEntry(state, agentId)))) return
-  // A background agent delivers its report through the SubagentHandback tool, the text its hand-back row also carries,
+  const stopActive = payload.stop_hook_active === true
+  // Only an agent cc-tiers launched in the background has a report to wait for; a foreground reviewer, checker or writer is only asked for its trailer.
+  const background = withSession(ctx, payload, (state) => Boolean(agentEntry(state, agentId)))
+  if (!background && !owesStatus(matchRole(payload.agent_type))) return
+  // An agent delivers its report through the SubagentHandback tool, the text its hand-back row also carries,
   // so that one is read even when the last message has a reworded trailer. The hand-back can reach the file just after this stop.
   const last = String(payload.last_assistant_message || '')
   let text = agentHandbackReport(payload.agent_transcript_path)
@@ -47,6 +54,11 @@ async function main(payload) {
     text = agentHandbackReport(payload.agent_transcript_path)
   }
   text = text || last
+  if (!background) {
+    const reason = withSession(ctx, payload, (state) => trailerRequest(state, { agentId, role: matchRole(payload.agent_type), text, stopActive }))
+    if (reason) askTrailer(reason)
+    return
+  }
 
   // Read the launch first, run the gate with no lock held, then count under the lock.
   const { launched, peek, twin } = withSession(ctx, payload, (state) => {
@@ -58,24 +70,34 @@ async function main(payload) {
   // The main-transcript row already brought this report: it is not judged or counted again.
   const event = role && !twin ? prepareReport(ctx, agentReport(agentId, { ...launched, role }, text), payload, { peek }) : null
 
-  withSession(ctx, payload, (state) => {
+  // A blocking finding that holds up already counts a review that has no verdict line.
+  const counted = REVIEW_ROLES.has(role) && ctx.routing.reviewEvidence && Boolean(event?.judged?.blocking.length)
+  const reason = withSession(ctx, payload, (state) => {
     if (!event && !twin) {
       delete state.background[agentId]
-      return
+      return ''
     }
     const { totals, cost } = agentTranscriptUsage(payload.agent_transcript_path, ctx.routing)
     const usage = { key: agentId, totals, cost }
     const current = agentEntry(state, agentId)
     // Another SubagentStop, or the row, may have counted it while the gate ran.
     if (event && current && (current.stops || 0) === (launched.stops || 0)) {
+      const request = trailerRequest(state, { agentId, role, text, stopActive, counted })
+      if (request) return request
       const message = processAgentReport(ctx, state, event, usage)
       dropAwaitingAgent(state, agentId)
       if (message) queueMessage(state, message)
     } else if (twin || claimTwin(state, agentId, 'stop', text)) {
       chargeAgentSpend(ctx, state, launched, text, usage)
     }
+    return ''
   })
+  if (reason) askTrailer(reason)
 }
 
-// Blocking a SubagentStop would keep the subagent running; the next hook that works tells the orchestrator.
+function askTrailer(reason) {
+  process.stdout.write(`${JSON.stringify({ decision: 'block', reason })}\n`)
+}
+
+// A failed hook only warns: blocking would keep the subagent running; the next hook that works tells the orchestrator.
 runHook('subagent_stop', main, (note) => ({ systemMessage: note }), { effect: 'The background report was not counted and its gate did not run' })

@@ -232,7 +232,7 @@ function recordWriter(dir) {
 const run = (script, payload, env) => spawnSync(process.execPath, [path.join(ROOT, 'hooks', script)], { input: JSON.stringify(payload), encoding: 'utf8', env })
 
 /** A background reviewer launched with `prompt`, whose verdict arrives only through SubagentHandback. */
-function backgroundReview(dir, { prompt, handback, last = '' }) {
+function backgroundReview(dir, { prompt, handback, last = '', stopActive = false }) {
   const env = hookEnv(dir)
   recordWriter(dir)
   run(
@@ -251,7 +251,7 @@ function backgroundReview(dir, { prompt, handback, last = '' }) {
   writeFileSync(file, [assistantRow([HANDBACK(handback)], 'm-r'), HANDBACK_RESULT].join('\n'))
   const stop = run(
     'subagent_stop.mjs',
-    { session_id: 'sess-1', hook_event_name: 'SubagentStop', agent_id: 'agent-r', agent_type: 'cc-tiers:reviewer', agent_transcript_path: file, last_assistant_message: last },
+    { session_id: 'sess-1', hook_event_name: 'SubagentStop', agent_id: 'agent-r', agent_type: 'cc-tiers:reviewer', agent_transcript_path: file, last_assistant_message: last, stop_hook_active: stopActive },
     env,
   )
   assert.equal(stop.status, 0, stop.stderr)
@@ -296,7 +296,7 @@ test('a background reviewer with no status counts a blocking finding, and asks f
   }
   const other = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-status-'))
   try {
-    const { env } = backgroundReview(other, { prompt: REVIEW_PROMPT, handback: trailer('reviewer', '') })
+    const { env } = backgroundReview(other, { prompt: REVIEW_PROMPT, handback: trailer('reviewer', ''), stopActive: true })
     const end = run('stop.mjs', { session_id: 'sess-1', hook_event_name: 'Stop', stop_hook_active: false }, env)
     assert.match(end.stdout, /SendMessage to the same agent/)
   } finally {
@@ -304,20 +304,21 @@ test('a background reviewer with no status counts a blocking finding, and asks f
   }
 })
 
-const stopPayload = (agentId, file, last = '') => ({
+const stopPayload = (agentId, file, last = '', stopActive = false) => ({
   session_id: 'sess-1',
   hook_event_name: 'SubagentStop',
   agent_id: agentId,
   agent_type: 'cc-tiers:reviewer',
   agent_transcript_path: file,
   last_assistant_message: last,
+  stop_hook_active: stopActive,
 })
 
 /** One SubagentStop whose verdict arrives through SubagentHandback, like a resumed background reviewer. */
-function stopWithHandback(dir, env, agentId, name, handback) {
+function stopWithHandback(dir, env, agentId, name, handback, stopActive = false) {
   const file = path.join(dir, `${name}.jsonl`)
   writeFileSync(file, [assistantRow([HANDBACK(handback)], `m-${name}`), HANDBACK_RESULT].join('\n'))
-  const stop = run('subagent_stop.mjs', stopPayload(agentId, file), env)
+  const stop = run('subagent_stop.mjs', stopPayload(agentId, file, '', stopActive), env)
   assert.equal(stop.status, 0, stop.stderr)
   return tiers.loadState(tiers.sessionPath(path.join(dir, 'data'), 'sess-1'), 'sess-1')
 }
@@ -357,10 +358,10 @@ test('a foreground reviewer that ended with no status is counted when its follow
 test('a background reviewer asked again for its verdict is counted once it answers, and a silent answer asks again', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-status-'))
   try {
-    const { env, state: first } = backgroundReview(dir, { prompt: REVIEW_PROMPT, handback: trailer('reviewer', '') })
+    const { env, state: first } = backgroundReview(dir, { prompt: REVIEW_PROMPT, handback: trailer('reviewer', ''), stopActive: true })
     assert.equal(first.tasks['users-pagination'], undefined)
     assert.equal(first.background['agent-r'].stops, 1, 'the silent stop keeps the agent registered')
-    const again = stopWithHandback(dir, env, 'agent-r', 'second', trailer('reviewer', ''))
+    const again = stopWithHandback(dir, env, 'agent-r', 'second', trailer('reviewer', ''), true)
     assert.equal(again.tasks['users-pagination'], undefined, 'a second silent stop counts nothing')
     assert.equal(again.background['agent-r'].stops, 2)
     assert.equal(again.pending.filter((note) => /SendMessage to the same agent/.test(note)).length, 2, 'and it asks again')
@@ -522,10 +523,10 @@ function launchAgent(env, agentId, role, prompt) {
 }
 
 /** One SubagentStop of a background agent: `handback` is what its transcript delivers through SubagentHandback, `last` its last message. */
-function stopAgent(dir, env, agentId, role, name, { handback, last = '', cwd } = {}) {
+function stopAgent(dir, env, agentId, role, name, { handback, last = '', cwd, stopActive = false } = {}) {
   const file = path.join(dir, `${name}.jsonl`)
   writeFileSync(file, handback === undefined ? '' : [assistantRow([HANDBACK(handback)], `m-${name}`), HANDBACK_RESULT].join('\n'))
-  const stop = run('subagent_stop.mjs', { ...stopPayload(agentId, file, last), agent_type: `cc-tiers:${role}`, cwd }, env)
+  const stop = run('subagent_stop.mjs', { ...stopPayload(agentId, file, last, stopActive), agent_type: `cc-tiers:${role}`, cwd }, env)
   assert.equal(stop.status, 0, stop.stderr)
   return sessionState(dir)
 }
@@ -556,7 +557,7 @@ test('an agent of any role that stops with no status stays registered, so its ne
     const env = { ...hookEnv(dir), CLAUDE_PLUGIN_OPTION_VERIFY: 'off' }
     launchAgent(env, 'agent-w', 'implementer', WRITER_PROMPT)
     // The agent hit its turn limit: its last message is prose and its transcript has no hand-back.
-    const silent = stopAgent(dir, env, 'agent-w', 'implementer', 'w1', { last: 'I ran out of turns before I could report.' })
+    const silent = stopAgent(dir, env, 'agent-w', 'implementer', 'w1', { last: 'I ran out of turns before I could report.', stopActive: true })
     assert.equal(silent.background['agent-w'].stops, 1)
     assert.equal(silent.background['agent-w'].role, 'implementer')
     assert.equal(silent.background['agent-w'].prompt, WRITER_PROMPT)
@@ -645,7 +646,7 @@ test('a peer hand-back row in the main transcript counts as its agent\'s report'
     launchAgent(env, 'agent-w', 'implementer', WRITER_PROMPT.replace('users-pagination', 'csv-export'))
     // SubagentStop of each saw no status; the report reaches the main transcript afterwards.
     for (const [id, role] of [['agent-r', 'researcher'], ['agent-v', 'reviewer'], ['agent-w', 'implementer']]) {
-      assert.equal(stopAgent(dir, env, id, role, `${id}-1`, { last: 'handed back' }).background[id].stops, 1)
+      assert.equal(stopAgent(dir, env, id, role, `${id}-1`, { last: 'handed back', stopActive: true }).background[id].stops, 1)
     }
     appendRows(
       transcript,
@@ -883,14 +884,14 @@ test('SubagentStop waits briefly for a hand-back the agent transcript has not wr
   }
 })
 
-test('SubagentStop of an agent cc-tiers did not launch in the background does not wait for a hand-back', async () => {
+test('SubagentStop of an agent that owes no status and cc-tiers did not launch in the background does not wait for a hand-back', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-status-'))
   try {
     const env = { ...hookEnv(dir), CLAUDE_PLUGIN_OPTION_VERIFY: 'off' }
     const file = path.join(dir, 'x1.jsonl')
     writeFileSync(file, '')
     const started = Date.now()
-    const stop = run('subagent_stop.mjs', { ...stopPayload('agent-x', file, 'done, no trailer'), agent_type: 'cc-tiers:reviewer' }, env)
+    const stop = run('subagent_stop.mjs', { ...stopPayload('agent-x', file, 'done, no trailer'), agent_type: 'cc-tiers:researcher' }, env)
     assert.equal(stop.status, 0, stop.stderr)
     // The wait is 10 x 200 ms; a hook that skips it ends well before that.
     assert.ok(Date.now() - started < 1500, `took ${Date.now() - started} ms`)
@@ -1270,4 +1271,203 @@ test('a review counted from its parked row does not judge an attempt parked ahea
   const [, , rejection] = tiers.prepareParked(ctx, tiers.peekAwaiting(state), {})
   assert.match(tiers.countParked(ctx, state, rejection), /counted a failure for users-pagination/)
   assert.deepEqual(state.tasks['users-pagination'].judged, ['row:a1'])
+})
+
+/** The SubagentStop output of one agent that stopped with `last` and no hand-back. */
+const silentStop = (dir, env, agentId, role, name, stopActive) => {
+  const file = path.join(dir, `${name}.jsonl`)
+  writeFileSync(file, '')
+  const stop = run('subagent_stop.mjs', { ...stopPayload(agentId, file, 'I ran out of turns.', stopActive), agent_type: `cc-tiers:${role}` }, env)
+  assert.equal(stop.status, 0, stop.stderr)
+  return stop.stdout ? JSON.parse(stop.stdout) : null
+}
+
+test('a background reviewer or writer that stops with no status is asked for its trailer once, and that stop is not counted', async () => {
+  for (const [role, prompt, wording] of [['reviewer', REVIEW_PROMPT, /unconfirmed:/], ['implementer', WRITER_PROMPT, /CC_TIERS_VERIFY/]]) {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-status-'))
+    try {
+      const env = { ...hookEnv(dir), CLAUDE_PLUGIN_OPTION_VERIFY: 'off' }
+      launchAgent(env, 'agent-a', role, prompt)
+      const asked = silentStop(dir, env, 'agent-a', role, 'a1', false)
+      assert.equal(asked.decision, 'block', role)
+      assert.match(asked.reason, /CC_TIERS_STATUS/)
+      assert.match(asked.reason, wording)
+      const waiting = sessionState(dir)
+      assert.equal(waiting.background['agent-a'].stops, undefined, 'the blocked stop is not an uncounted report')
+      assert.deepEqual(waiting.pending, [])
+      // The agent stops again with no trailer: it is not asked twice, and now the usual path registers it.
+      assert.equal(silentStop(dir, env, 'agent-a', role, 'a2', false), null)
+      assert.equal(sessionState(dir).background['agent-a'].stops, 1)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  }
+})
+
+test('SubagentStop does not block while a stop hook already continues the agent', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-status-'))
+  try {
+    const env = { ...hookEnv(dir), CLAUDE_PLUGIN_OPTION_VERIFY: 'off' }
+    launchAgent(env, 'agent-a', 'reviewer', REVIEW_PROMPT)
+    assert.equal(silentStop(dir, env, 'agent-a', 'reviewer', 'a1', true), null)
+    assert.equal(sessionState(dir).background['agent-a'].stops, 1)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a foreground cc-tiers agent with no status is asked for its trailer once; a researcher, an untagged agent and a report with a status are not', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-status-'))
+  try {
+    const env = { ...hookEnv(dir), CLAUDE_PLUGIN_OPTION_VERIFY: 'off' }
+    assert.equal(silentStop(dir, env, 'agent-f', 'reviewer', 'f1', false).decision, 'block')
+    assert.equal(silentStop(dir, env, 'agent-f', 'reviewer', 'f2', false), null, 'once per agent')
+    assert.equal(silentStop(dir, env, 'agent-g', 'implementer', 'g1', true), null, 'not while continuing')
+    assert.equal(silentStop(dir, env, 'agent-h', 'researcher', 'h1', false), null, 'a brief is not a verdict')
+    const file = path.join(dir, 'k1.jsonl')
+    writeFileSync(file, '')
+    const withStatus = run('subagent_stop.mjs', { ...stopPayload('agent-k', file, trailer('reviewer', 'pass')), agent_type: 'cc-tiers:reviewer' }, env)
+    assert.equal(withStatus.stdout, '')
+    const other = run('subagent_stop.mjs', { ...stopPayload('agent-m', file, 'done'), agent_type: 'general-purpose' }, env)
+    assert.equal(other.stdout, '')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a background reviewer with no status but a blocking finding is counted, not asked for a trailer', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-status-'))
+  try {
+    const env = { ...hookEnv(dir), CLAUDE_PLUGIN_OPTION_VERIFY: 'off' }
+    recordWriter(dir)
+    launchAgent(env, 'agent-v', 'reviewer', REVIEW_PROMPT)
+    const state = stopAgent(dir, env, 'agent-v', 'reviewer', 'v1', { handback: `${finding()}\n${trailer('reviewer', '')}` })
+    assert.equal(state.tasks['users-pagination'].failures.length, 1)
+    assert.deepEqual(state.asked, [])
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('Stop keeps asking for the verdict of a waiting review, naming its agent, for 3 blocks and then only tells the user', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-status-'))
+  try {
+    const env = { ...hookEnv(dir), CLAUDE_PLUGIN_OPTION_VERIFY: 'off' }
+    recordWriter(dir)
+    launchAgent(env, 'agent-v', 'reviewer', REVIEW_PROMPT)
+    stopAgent(dir, env, 'agent-v', 'reviewer', 'v1', { last: 'out of turns', stopActive: true })
+    const stopOnce = (active) => {
+      const proc = run('stop.mjs', { session_id: 'sess-1', hook_event_name: 'Stop', stop_hook_active: active }, env)
+      assert.equal(proc.status, 0, proc.stderr)
+      return proc.stdout ? JSON.parse(proc.stdout) : null
+    }
+    const first = stopOnce(false)
+    assert.equal(first.decision, 'block')
+    assert.match(first.reason, /SendMessage to agent-v/)
+    for (const active of [true, true]) {
+      const next = stopOnce(active)
+      assert.equal(next.decision, 'block', 'still blocks while a stop hook continues Claude')
+      assert.match(next.reason, /users-pagination by agent agent-v/)
+    }
+    const last = stopOnce(true)
+    assert.equal(last.decision, undefined)
+    assert.match(last.systemMessage, /agent-v/)
+    assert.equal(stopOnce(false), null, 'nothing more after the user is told')
+
+    // Its verdict arrives: the registration closes.
+    const counted = stopAgent(dir, env, 'agent-v', 'reviewer', 'v2', { handback: `${finding()}\n${trailer('reviewer', 'fail')}` })
+    assert.equal(counted.background['agent-v'], undefined)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('Stop does not ask for a verdict of a writer or a researcher with no status', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-status-'))
+  try {
+    const env = { ...hookEnv(dir), CLAUDE_PLUGIN_OPTION_VERIFY: 'off' }
+    launchAgent(env, 'agent-w', 'implementer', WRITER_PROMPT)
+    launchAgent(env, 'agent-r', 'researcher', RESEARCH_PROMPT)
+    stopAgent(dir, env, 'agent-w', 'implementer', 'w1', { last: 'out of turns', stopActive: true })
+    stopAgent(dir, env, 'agent-r', 'researcher', 'r1', { last: 'out of turns' })
+    const proc = run('stop.mjs', { session_id: 'sess-1', hook_event_name: 'Stop', stop_hook_active: true }, env)
+    assert.doesNotMatch(proc.stdout, /still has no verdict/)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+/** One SubagentStop of an agent cc-tiers did not launch in the background, whose transcript holds `handback` (a report delivered through SubagentHandback) and whose last message is empty. */
+function stopForeground(dir, env, agentId, role, handback) {
+  const file = path.join(dir, `${agentId}.jsonl`)
+  writeFileSync(file, [assistantRow([HANDBACK(handback)], `m-${agentId}`), HANDBACK_RESULT].join('\n'))
+  const stop = run('subagent_stop.mjs', { ...stopPayload(agentId, file), agent_type: `cc-tiers:${role}` }, env)
+  assert.equal(stop.status, 0, stop.stderr)
+  return stop.stdout ? JSON.parse(stop.stdout) : null
+}
+
+test('a foreground reviewer or writer whose hand-back carries its status is not asked for a trailer, and one whose hand-back has none is', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-status-'))
+  try {
+    const env = { ...hookEnv(dir), CLAUDE_PLUGIN_OPTION_VERIFY: 'off' }
+    for (const [role, agentId] of [['reviewer', 'agent-f'], ['checker', 'agent-c'], ['implementer', 'agent-g']]) {
+      assert.equal(stopForeground(dir, env, agentId, role, trailer(role, 'pass')), null, `${role} with a status in its hand-back`)
+    }
+    assert.deepEqual(sessionState(dir).asked, [])
+    const asked = stopForeground(dir, env, 'agent-h', 'reviewer', trailer('reviewer', ''))
+    assert.equal(asked.decision, 'block')
+    assert.match(asked.reason, /CC_TIERS_STATUS/)
+    assert.deepEqual(sessionState(dir).asked, ['agent-h'])
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('Stop stops asking for a silent review once its task has a counted review or is done, and keeps asking while it awaits one', async () => {
+  for (const settle of ['a later review passes', 'a later review rejects', 'the task is done']) {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-status-'))
+    try {
+      const env = { ...hookEnv(dir), CLAUDE_PLUGIN_OPTION_VERIFY: 'off' }
+      recordWriter(dir)
+      launchAgent(env, 'agent-v', 'reviewer', REVIEW_PROMPT)
+      stopAgent(dir, env, 'agent-v', 'reviewer', 'v1', { last: 'out of turns', stopActive: true })
+      const stopOnce = () => run('stop.mjs', { session_id: 'sess-1', hook_event_name: 'Stop', stop_hook_active: false }, env).stdout
+      assert.match(stopOnce(), /still has no verdict/, `${settle}: awaiting before it settles`)
+      if (settle === 'the task is done') {
+        const file = tiers.sessionPath(path.join(dir, 'data'), 'sess-1')
+        const state = tiers.loadState(file, 'sess-1')
+        state.log['users-pagination'].status = 'done'
+        tiers.saveState(file, state)
+      } else {
+        // The orchestrator ran the review again, as the silent one's message advises.
+        launchAgent(env, 'agent-w', 'reviewer', REVIEW_PROMPT)
+        const verdict = settle === 'a later review passes' ? 'pass' : 'fail'
+        stopAgent(dir, env, 'agent-w', 'reviewer', 'w1', { handback: trailer('reviewer', verdict) })
+        assert.equal(sessionState(dir).log['users-pagination'].reviews.length, 1, settle)
+      }
+      assert.doesNotMatch(stopOnce(), /agent-v/, settle)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  }
+})
+
+test('SubagentStop of a foreground reviewer waits for a hand-back the transcript has not written yet, and does not ask for a trailer once it holds a status', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-status-'))
+  try {
+    const env = { ...hookEnv(dir), CLAUDE_PLUGIN_OPTION_VERIFY: 'off' }
+    const file = path.join(dir, 'f1.jsonl')
+    writeFileSync(file, '')
+    const child = spawn(process.execPath, [path.join(ROOT, 'hooks', 'subagent_stop.mjs')], { env, stdio: ['pipe', 'pipe', 'pipe'] })
+    let out = ''
+    child.stdout.on('data', (chunk) => (out += chunk))
+    child.stdin.end(JSON.stringify({ ...stopPayload('agent-f', file, ''), agent_type: 'cc-tiers:reviewer' }))
+    setTimeout(() => writeFileSync(file, [assistantRow([HANDBACK(trailer('reviewer', 'pass'))], 'm-f1'), HANDBACK_RESULT].join('\n')), 300)
+    const code = await new Promise((resolve) => child.on('close', resolve))
+    assert.equal(code, 0)
+    assert.equal(out, '')
+    assert.deepEqual(sessionState(dir).asked, [])
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 })

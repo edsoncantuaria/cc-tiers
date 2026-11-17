@@ -1162,6 +1162,7 @@ export function emptyState(sessionId) {
     cost: {},
     log: {},
     spent: [],
+    asked: [],
     background: {},
     finished: {},
     researched: {},
@@ -1190,7 +1191,7 @@ export function loadState(file, sessionId) {
     const data = JSON.parse(readFileSync(file, 'utf8'))
     if (!data || typeof data !== 'object' || !data.tasks || typeof data.tasks !== 'object') return emptyState(sessionId)
     const base = emptyState(sessionId)
-    for (const key of ['seen', 'spent', 'pending', 'awaiting', 'events', 'audit']) if (!Array.isArray(data[key])) data[key] = base[key]
+    for (const key of ['seen', 'spent', 'asked', 'pending', 'awaiting', 'events', 'audit']) if (!Array.isArray(data[key])) data[key] = base[key]
     for (const key of ['spend', 'cost', 'log', 'background', 'finished', 'researched', 'contracts', 'evidence', 'completions', 'snapshots', 'verifyCache', 'active']) {
       if (!data[key] || typeof data[key] !== 'object' || Array.isArray(data[key])) data[key] = base[key]
     }
@@ -1400,10 +1401,14 @@ function registerAgent(state, agentId, entry, key = 'background') {
 }
 
 /** A background agent that stopped with no verdict is asked for it with SendMessage: its next stop is counted like its report. */
-function awaitReport(state, event) {
+function awaitReport(state, event, task) {
   if (!event.agent_id) return
-  registerAgent(state, event.agent_id, { role: event.role, prompt: event.prompt || '', tool_use_id: event.tool_use_id || '', at: launchTime(event), stops: (Number(event.stops) || 0) + 1 })
+  // A silent review remembers its task and how many reviews of it were counted, so Stop can tell when another one delivered the verdict.
+  const review = REVIEW_ROLES.has(event.role) ? { task, reviews: reviewsCounted(state, task) } : {}
+  registerAgent(state, event.agent_id, { role: event.role, prompt: event.prompt || '', tool_use_id: event.tool_use_id || '', at: launchTime(event), stops: (Number(event.stops) || 0) + 1, ...review })
 }
+
+const reviewsCounted = (state, task) => own(state.log, task)?.reviews.length || 0
 
 export function applyEvent(state, event, routing) {
   const meta = emptyMeta(event)
@@ -1494,7 +1499,7 @@ export function applyEvent(state, event, routing) {
   }
   if (status !== 'pass' && status !== 'fail') {
     meta.tier = tier
-    awaitReport(state, event)
+    awaitReport(state, event, task)
     return {
       state,
       meta,
@@ -1949,7 +1954,7 @@ function applyResearch(state, meta, task, headers, event) {
   meta.outcome = 'research'
   const status = event.kind === 'error' ? 'fail' : (headers.STATUS || '').toLowerCase()
   if (Object.hasOwn(parseHeaders(event.prompt || ''), 'FAILURE')) return applyFailureResearch(state, meta, task, status, event)
-  if (status !== 'pass' && status !== 'fail') awaitReport(state, event)
+  if (status !== 'pass' && status !== 'fail') awaitReport(state, event, task)
   if (status !== 'pass') {
     return {
       state,
@@ -3721,6 +3726,48 @@ function parkReport(state, report) {
 }
 
 const reportToken = (via, text) => `${via}:${lineId(String(text).replace(/\s+/g, ' ').trim())}`
+
+/** The consecutive Stop blocks that ask the orchestrator for one awaiting review's verdict, before only the user is told. */
+const MAX_VERDICT_ASKS = 3
+
+/** A reviewer, checker or writer owes a CC_TIERS_STATUS line when it stops; a researcher's brief is not a verdict. */
+export const owesStatus = (role) => REVIEW_ROLES.has(role) || DELEGATED_WRITERS.has(role)
+
+/**
+ * The reason that keeps an agent that owes a status running when it stops without one: once per agent, never
+ * while a hook already continues it, and not when a blocking finding already counts the review.
+ */
+export function trailerRequest(state, { agentId, role, text, stopActive = false, counted = false }) {
+  if (!agentId || !owesStatus(role) || stopActive || counted || parseHeaders(text).STATUS) return ''
+  if (state.asked.includes(agentId)) return ''
+  state.asked = [...state.asked, agentId].slice(-MAX_SEEN)
+  const reviewing = REVIEW_ROLES.has(role)
+  return reviewing
+    ? 'You stopped without a CC_TIERS_STATUS line. Write your trailer now with what you have: CC_TIERS_STATUS pass or fail as your verdict, and each point you did not settle as an `unconfirmed:` note. Start no new check.'
+    : 'You stopped without a CC_TIERS_STATUS line. Write your CC_TIERS_ trailer now with what you have: CC_TIERS_STATUS pass or fail, the CC_TIERS_VERIFY commands you ran and CC_TIERS_REASON. Start no new work.'
+}
+
+/** A silent review awaits its verdict while its task is not done and no review of it was counted since it stopped. */
+const awaitsVerdict = (state, { task, reviews }) => own(state.log, task)?.status !== 'done' && reviewsCounted(state, task) === reviews
+
+/** Asks the orchestrator, while a review waits for its verdict, to send for it with SendMessage; the third ask is the last that blocks. */
+export function reviewVerdictAsks(state) {
+  const asks = []
+  const given = []
+  for (const [agentId, entry] of Object.entries(state.background || {})) {
+    // A verdict that waits in the parked rows is already delivered, and so is one a later review of the task counted.
+    if (!REVIEW_ROLES.has(entry?.role) || !entry.stops || (state.awaiting || []).some((item) => item.agent_id === agentId) || !awaitsVerdict(state, entry)) continue
+    const line = `The review of ${entry.task} by agent ${agentId} still has no verdict. Ask it for the CC_TIERS_STATUS trailer with SendMessage to ${agentId} (run the review again if it cannot answer).`
+    if ((entry.asks || 0) < MAX_VERDICT_ASKS) {
+      entry.asks = (entry.asks || 0) + 1
+      asks.push(line)
+    } else if (entry.asks === MAX_VERDICT_ASKS) {
+      entry.asks += 1
+      given.push(`${line} cc-tiers asked ${MAX_VERDICT_ASKS} times and stops blocking.`)
+    }
+  }
+  return { asks, given }
+}
 
 export const agentEntry = (state, agentId) => own(state.background, agentId) || own(state.finished, agentId)
 

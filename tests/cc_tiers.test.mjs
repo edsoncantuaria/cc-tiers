@@ -1340,7 +1340,7 @@ test('a background agent is counted at SubagentStop and reported at Stop', async
     )
     assert.equal(stop.status, 0, stop.stderr)
     assert.equal(stop.stdout, '')
-    const again = runHook('subagent_stop.mjs', { session_id: 'sess-1', hook_event_name: 'SubagentStop', agent_id: 'agent-7', last_assistant_message: 'x' }, env)
+    const again = runHook('subagent_stop.mjs', { session_id: 'sess-1', hook_event_name: 'SubagentStop', agent_id: 'agent-7', last_assistant_message: 'x', stop_hook_active: true }, env)
     assert.equal(again.stdout, '')
 
     const end = runHook('stop.mjs', { session_id: 'sess-1', hook_event_name: 'Stop', stop_hook_active: false }, env)
