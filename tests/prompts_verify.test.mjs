@@ -248,6 +248,46 @@ test('prompts carry the fix-the-cause and no-speculative-code rules', () => {
 test('session prompts put the spec block in the opening attempt heredoc', () => {
   for (const file of ['agents/orchestrator.md', 'agents/dispatcher.md', 'skills/tiers/SKILL.md']) {
     const text = read(file)
-    assert.ok(text.includes('`CC_TIERS_SPEC_BEGIN` to `CC_TIERS_SPEC_END`') && text.includes('a spec written only in your message is never stored'), `${file} says the opening heredoc carries the spec`)
+    assert.ok(text.includes('`CC_TIERS_SPEC_BEGIN` to `CC_TIERS_SPEC_END`') && text.includes('where cc-tiers always reads it'), `${file} says the opening heredoc carries the spec`)
+    assert.equal(text.includes('is never stored'), false, `${file} does not claim a spec in the message is never stored`)
+  }
+})
+
+test('writers and reviewers pace their turns and keep the trailer for the end', () => {
+  for (const file of ['agents/implementer.md', 'agents/architect.md']) {
+    const text = read(file)
+    for (const needle of ['Pace your turns', 'Read only what the brief, the spec and the named files point to', 'Write the first change and its test early, within about the first third of your turns', 'deliver the part that closes and report failure with the reason `too large: split into <parts>`']) {
+      assert.ok(text.includes(needle), `${file} mentions ${needle}`)
+    }
+  }
+  assert.ok(read('agents/worker.md').includes('The same goes for an edit that is not done within a few turns. Report failure with reason `not a trivial task` and stop.'), 'worker gives up a task that drags on')
+  assert.equal(read('agents/worker.md').split('not a trivial task').length, 2, 'worker says the failure reason once')
+  for (const file of ['agents/reviewer.md', 'agents/checker.md']) {
+    const text = read(file)
+    for (const needle of ['Keep your last turns for the verdict', 'write the findings and the trailer with what you have', '`unconfirmed:`', 'ends without the trailer gives no verdict']) {
+      assert.ok(text.includes(needle), `${file} mentions ${needle}`)
+    }
+  }
+  const researcher = read('agents/researcher.md')
+  for (const needle of ['Keep your last turns for the brief and the trailer', 'write the brief with what you have', 'stays "not found", with where you looked', '`CC_TIERS_MATCH: none`', '`Not found` or `Open questions`']) assert.ok(researcher.includes(needle), `researcher mentions ${needle}`)
+  assert.equal(researcher.includes('each open point as "not found"'), false, 'researcher keeps the where-you-looked part')
+})
+
+test('session prompts split a large task before delegating and tell the writer its pacing', () => {
+  for (const file of ['agents/orchestrator.md', 'agents/dispatcher.md', 'skills/tiers/SKILL.md']) {
+    const text = read(file)
+    for (const needle of ['Split before you delegate', 'crosses several layers (data, back end, front end), or holds more work than one writer can finish in its turns', 'becomes several slugs, each with its own `CC_TIERS_FILES` and spec', 'Many files alone is no reason', 'give its pacing in the prompt', 'write the first change and its test early', 'report `too large: split into <parts>`', 'That report is an ordinary failure of the slug: the retry follows the attempt rules', 'Slugs are split only before the first delegation']) {
+      assert.ok(text.includes(needle), `${file} mentions ${needle}`)
+    }
+    for (const gone of ['delegate the parts as new slugs', 'more than about five files']) assert.equal(text.includes(gone), false, `${file} no longer says ${gone}`)
+  }
+})
+
+test('every prompt that explains CC_TIERS_VERIFY says what the cd dir is relative to', () => {
+  for (const file of ['agents/implementer.md', 'agents/architect.md', 'agents/worker.md', 'agents/orchestrator.md', 'agents/dispatcher.md', 'skills/tiers/SKILL.md']) {
+    const text = read(file)
+    for (const needle of ['The `cd` dir is relative to the project dir, where the gate runs', 'In a folder of repositories (a project dir that is no repository itself), a line needs the repo\'s `cd <repo dir> && ` unless the task\'s `CC_TIERS_FILES` all sit in one child repo or the line is a one-file syntax check (`php -l`, `bash -n`, `sh -n`, `node --check`)']) {
+      assert.ok(text.includes(needle), `${file} mentions ${needle}`)
+    }
   }
 })

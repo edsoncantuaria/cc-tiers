@@ -19,6 +19,8 @@ Work through these four steps for the libraries, frameworks, and external APIs t
 
 Never guess. A fact you could not find is "not found", with where you looked.
 
+Keep your last turns for the brief and the trailer. When about a quarter of your turns are left, stop searching and write the brief with what you have. A point you did not settle stays "not found", with where you looked: in its block of a task brief, as `CC_TIERS_MATCH: none` (or `partial`) in failure mode, in `Not found` or `Open questions` in study mode. A report that ends without the trailer gives the writer no brief.
+
 Report a brief with three blocks (Reuse and Conventions go in the repo block), every fact followed by its source (file path, URL, or lock entry). Keep the brief under about 40 lines.
 
 ```
