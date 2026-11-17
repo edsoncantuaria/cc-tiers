@@ -939,6 +939,170 @@ test('the history file goes in .git/info/exclude, not the tracked .gitignore', a
   }
 })
 
+test('a project file present when the session begins is kept out of git through .git/info/exclude, never .gitignore; one created during the session stays visible and is flagged', async () => {
+  const ws = await import(pathToFileURL(path.join(ROOT, 'hooks', 'workspace.mjs')).href)
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const routing = tiers.mergeRouting(tiers.loadJson(path.join(ROOT, 'config/routing.default.json')), null, {})
+    const settings = (project) => path.join(project, '.claude', 'cc-tiers.json')
+    const exclude = (project) => (existsSync(path.join(project, '.git', 'info', 'exclude')) ? readFileSync(path.join(project, '.git', 'info', 'exclude'), 'utf8') : '')
+    const repo = (name, withFile) => {
+      const project = path.join(dir, name)
+      mkdirSync(path.join(project, '.claude'), { recursive: true })
+      writeFileSync(path.join(project, 'a.txt'), 'one\n')
+      spawnSync('git', ['init', '-q'], { cwd: project })
+      spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'init'], { cwd: project })
+      if (withFile) writeFileSync(settings(project), JSON.stringify({ verifyAllow: ['make check'] }))
+      return project
+    }
+    const open = (project, session) => {
+      const data = path.join(dir, `data-${session}`)
+      mkdirSync(data, { recursive: true })
+      const ctx = { routing, projectDir: project, dataDir: data, file: path.join(data, `session-${session}.json`), sessionId: session, env: {} }
+      return tiers.withSession(ctx, {}, (state) => state.projectFile)
+    }
+
+    const before = repo('before', true)
+    open(before, 's1')
+    assert.ok(exclude(before).split('\n').includes('/.claude/cc-tiers.json'), 'present at session start: excluded')
+    assert.equal(existsSync(path.join(before, '.gitignore')), false)
+    assert.equal(spawnSync('git', ['status', '--porcelain', '-u', '--', '.claude'], { cwd: before, encoding: 'utf8' }).stdout, '')
+
+    const during = repo('during', false)
+    open(during, 's2')
+    const snapshot = ws.workspaceSnapshot(during)
+    writeFileSync(path.join(during, 'a.txt'), 'two\n')
+    writeFileSync(settings(during), JSON.stringify({ verifyAllow: ['bash'] }))
+    open(during, 's2')
+    assert.equal(exclude(during).includes('cc-tiers.json'), false, 'created during the session: not excluded')
+    assert.match(spawnSync('git', ['status', '--porcelain', '-u'], { cwd: during, encoding: 'utf8' }).stdout, /\.claude\/cc-tiers\.json/)
+    const changed = ws.attemptChanges(snapshot, ws.workspaceSnapshot(during))
+    assert.ok(changed.includes('.claude/cc-tiers.json'), JSON.stringify(changed))
+    assert.deepEqual(ws.sensitiveFiles(changed).map((item) => item.file), ['.claude/cc-tiers.json'])
+
+    const edited = repo('edited', true)
+    open(edited, 's3')
+    const quiet = ws.workspaceSnapshot(edited)
+    writeFileSync(settings(edited), JSON.stringify({ verifyAllow: ['make check', 'bash'] }))
+    assert.ok(ws.attemptChanges(quiet, ws.workspaceSnapshot(edited)).includes('.claude/cc-tiers.json'), 'an edit to an excluded file still shows in the attempt')
+
+    const tracked = repo('tracked', true)
+    spawnSync('git', ['add', '.claude/cc-tiers.json'], { cwd: tracked })
+    open(tracked, 's4')
+    assert.equal(exclude(tracked).includes('cc-tiers.json'), false, "a tracked project file is the team's")
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the session context lists the project verifyAllow entries in effect', () => {
+  const routing = tiers.mergeRouting(tiers.loadJson(path.join(ROOT, 'config/routing.default.json')), null, {})
+  const text = tiers.formatSessionContext(routing, 'present', { projectAllow: [['make', 'relatorio-qa'], ['wc', '-l']] })
+  assert.match(text, /Project verifyAllow in effect \(\.claude\/cc-tiers\.json, unchanged since this session began\): make relatorio-qa, wc -l\./)
+  assert.doesNotMatch(tiers.formatSessionContext(routing, 'present', {}), /Project verifyAllow in effect/)
+})
+
+test('the project file is excluded without asking git once the entry is there', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const project = path.join(dir, 'project')
+    mkdirSync(path.join(project, '.git'), { recursive: true })
+    const asked = []
+    const run = (cwd, args) => (asked.push(args), '')
+    assert.equal(tiers.ensureProjectFileIgnored(project, run), true)
+    assert.deepEqual(asked, [['ls-files', '--', '.claude/cc-tiers.json']])
+    asked.length = 0
+    assert.equal(tiers.ensureProjectFileIgnored(project, run), false)
+    assert.deepEqual(asked, [], 'no git call once the entry is in .git/info/exclude')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the project verifyAllow counts only as stamped when the session state was first opened, with a data dir and a peek that carries the stamp', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const routing = tiers.mergeRouting(tiers.loadJson(path.join(ROOT, 'config/routing.default.json')), null, {})
+    const settings = path.join(dir, '.claude', 'cc-tiers.json')
+    mkdirSync(path.dirname(settings), { recursive: true })
+    const write = (value) => writeFileSync(settings, JSON.stringify({ verifyAllow: value }))
+    const has = (result) => result.allow.some((entry) => entry.join(' ') === 'echo')
+    const ctx = { routing, projectDir: dir, dataDir: path.join(dir, 'data') }
+
+    assert.equal(tiers.projectFileStamp(dir), 'none')
+    write(['echo'])
+    const stamp = tiers.projectFileStamp(dir)
+    assert.equal(has(tiers.trustedAllow(ctx, { projectFile: stamp }, dir)), true, 'unchanged since the stamp')
+    assert.equal(tiers.trustedAllow(ctx, { projectFile: stamp }, dir).note, '')
+
+    const created = tiers.trustedAllow(ctx, { projectFile: 'none' }, dir)
+    assert.equal(has(created), false, 'created after the stamp')
+    assert.match(created.note, /changed since cc-tiers first read it in this session/)
+    assert.equal(has(tiers.trustedAllow(ctx, null, dir)), false, 'no peek, no stamp to compare')
+    assert.equal(has(tiers.trustedAllow({ ...ctx, dataDir: '' }, { projectFile: stamp }, dir)), false, 'no data dir keeps no stamp')
+
+    write(['echo', 'curl'])
+    assert.equal(has(tiers.trustedAllow(ctx, { projectFile: stamp }, dir)), false, 'changed after the stamp')
+
+    write('echo')
+    const bad = tiers.trustedAllow(ctx, { projectFile: tiers.projectFileStamp(dir) }, dir)
+    assert.equal(has(bad), false)
+    assert.match(bad.note, /must be a list of strings/)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the session stamps the project file once, only with a data dir, and the peeks carry it to the gate and the review', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const routing = tiers.mergeRouting(tiers.loadJson(path.join(ROOT, 'config/routing.default.json')), null, {})
+    const settings = path.join(dir, '.claude', 'cc-tiers.json')
+    mkdirSync(path.dirname(settings), { recursive: true })
+    writeFileSync(settings, JSON.stringify({ verifyAllow: ['echo'] }))
+    const ctx = { routing, projectDir: dir, dataDir: path.join(dir, 'data'), file: path.join(dir, 'data', 'session-s.json'), sessionId: 's', env: {} }
+    mkdirSync(ctx.dataDir, { recursive: true })
+    const first = tiers.withSession(ctx, {}, (state) => state.projectFile)
+    assert.match(String(first), /^[0-9a-f]{16}$/, 'the first open stamps the file content')
+    writeFileSync(settings, JSON.stringify({ verifyAllow: ['echo', 'curl'] }))
+    const again = tiers.withSession(ctx, {}, (state) => ({ stamp: state.projectFile, peek: tiers.peekFor(state, {}), parked: tiers.peekParked(state, [{ id: 'r1', text: '' }]).get('r1') }))
+    assert.equal(again.stamp, first, 'a later open keeps the first stamp')
+    assert.equal(again.peek.projectFile, first)
+    assert.equal(again.parked.projectFile, first)
+    const none = tiers.withSession({ ...ctx, file: null, dataDir: '' }, {}, (state) => state.projectFile)
+    assert.equal(none, undefined, 'no data dir, no stamp')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the gate and the review use the project list only when trusted', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const routing = tiers.mergeRouting(tiers.loadJson(path.join(ROOT, 'config/routing.default.json')), null, {})
+    mkdirSync(path.join(dir, '.claude'), { recursive: true })
+    const stampBefore = tiers.projectFileStamp(dir)
+    writeFileSync(path.join(dir, '.claude', 'cc-tiers.json'), JSON.stringify({ verifyAllow: ['node ok.mjs'] }))
+    writeFileSync(path.join(dir, 'ok.mjs'), 'process.exit(0)\n')
+    const ctx = { routing, projectDir: dir, dataDir: path.join(dir, 'data') }
+    const writer = { kind: 'report', id: 'w1', role: 'implementer', prompt: 'CC_TIERS_TASK: t', text: 'CC_TIERS_TASK: t\nCC_TIERS_ROLE: implementer\nCC_TIERS_VERIFY: node ok.mjs\nCC_TIERS_STATUS: pass' }
+    const created = tiers.prepareReport(ctx, writer, {}, { peek: { projectFile: stampBefore, writing: [], cache: {} } })
+    assert.deepEqual(created.gate.verified, [])
+    assert.match(created.gate.projectAllow, /changed since cc-tiers first read it/)
+    const trusted = tiers.prepareReport(ctx, writer, {}, { peek: { projectFile: tiers.projectFileStamp(dir), writing: [], cache: {} } })
+    assert.deepEqual(trusted.gate.verified, ['node ok.mjs'])
+
+    const finding = ['CC_TIERS_FINDING_BEGIN', 'category: correctness', 'severity: blocking', 'evidence: command', 'command: node ok.mjs', 'expected: x', 'observed: y', 'where: a.js:1', 'CC_TIERS_FINDING_END'].join('\n')
+    const review = { kind: 'report', id: 'r1', role: 'reviewer', prompt: 'CC_TIERS_TASK: t', text: `${finding}\nCC_TIERS_TASK: t\nCC_TIERS_ROLE: reviewer\nCC_TIERS_STATUS: fail` }
+    const untrusted = tiers.prepareReport(ctx, review, {}, { peek: { projectFile: stampBefore, writing: [], cache: {} } })
+    assert.equal(untrusted.judged.blocking.length, 1, 'a writer-created entry cannot discard a reviewer finding')
+    const judged = tiers.prepareReport(ctx, review, {}, { peek: { projectFile: tiers.projectFileStamp(dir), writing: [], cache: {} } })
+    assert.equal(judged.judged.discarded.length, 1)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 function runHook(script, payload, env) {
   return spawnSync(process.execPath, [path.join(ROOT, 'hooks', script)], {
     input: JSON.stringify(payload),

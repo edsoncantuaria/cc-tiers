@@ -17,6 +17,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs'
+import { createHash } from 'node:crypto'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { TIERS, dollars, extractFiles, slug, writeAtomic } from './base.mjs'
@@ -30,7 +31,7 @@ import { readHookErrors } from './integrity.mjs'
 import { clip } from './redact.mjs'
 import { KEYWORD_FACTOR, TEXT_KEYWORD_FACTOR, assessRisk, isSensitivePath, riskRank, testsAvailableIn } from './risk.mjs'
 import { parseTelemetry, recordEvent, telemetryPath } from './telemetry.mjs'
-import { attemptChanges, outOfScope, sensitiveFiles, treeFingerprint, validateState, workspaceSnapshot } from './workspace.mjs'
+import { attemptChanges, git, outOfScope, sensitiveFiles, treeFingerprint, validateState, workspaceSnapshot } from './workspace.mjs'
 import { findingsNote, fold, gateFailure, gateMessage, isBlocking, judgeFindings, parseFindings, parseVerify, reviewMessage, runGate } from './verify.mjs'
 
 export { TIERS, dollars, extractFiles, fold, writeAtomic }
@@ -1015,6 +1016,7 @@ export function formatSessionContext(routing, projectNote, snapshot = {}) {
   lines.push(`Opus review when: ${tiers.opus.reviewWhen.join('; ')}.`)
   if (tiers.opus.reviewKeywords?.length) lines.push(`Opus review keywords: ${tiers.opus.reviewKeywords.join(', ')}.`)
   lines.push(`Project routing file: ${projectNote}.`)
+  if (snapshot.projectAllow?.length) lines.push(`Project verifyAllow in effect (.claude/cc-tiers.json, unchanged since this session began): ${snapshot.projectAllow.map((entry) => entry.join(' ')).join(', ')}.`)
   if (routing.notes?.length) lines.push(`Config notes: ${routing.notes.join(' ')}`)
   lines.push(
     'A failure at a tier is a failed test, a rejected review, or a subagent error. ' +
@@ -2647,6 +2649,56 @@ export function preToolOutput(deny, context, updatedInput = null) {
   return { hookSpecificOutput: output }
 }
 
+const PROJECT_FILE = '.claude/cc-tiers.json'
+
+/**
+ * The project's own verifyAllow, read once: the hash of those same bytes is its stamp ('none' when absent, '' with no project dir),
+ * so the list that is used is the list that was compared.
+ */
+export function projectAllowFrom(projectDir) {
+  if (!projectDir) return { stamp: '', allow: [], note: '' }
+  let bytes
+  try {
+    bytes = readFileSync(path.join(projectDir, PROJECT_FILE))
+  } catch {
+    return { stamp: 'none', allow: [], note: '' }
+  }
+  const stamp = createHash('sha256').update(bytes).digest('hex').slice(0, 16)
+  let list
+  try {
+    list = JSON.parse(bytes.toString('utf8'))?.verifyAllow
+  } catch {
+    return { stamp, allow: [], note: '' }
+  }
+  if (list === undefined) return { stamp, allow: [], note: '' }
+  if (!Array.isArray(list) || !list.every((entry) => typeof entry === 'string')) return { stamp, allow: [], note: 'ignored: verifyAllow must be a list of strings' }
+  return { stamp, allow: parseVerifyAllow(list.join(',')), note: '' }
+}
+
+export function projectFileStamp(projectDir) {
+  return projectAllowFrom(projectDir).stamp
+}
+
+/**
+ * The allow list a gate or a review may use: the /config list, plus the project's entries only while its file is the one this session
+ * stamped when its state was first opened. A file created or changed since, no data dir to keep the stamp, or no stamp in the peek
+ * leaves them out, so no attempt can widen what its own report or its review may run.
+ */
+export function trustedAllow(ctx, peek, projectDir) {
+  const base = ctx.routing.verifyAllow
+  const { stamp, allow, note } = projectAllowFrom(projectDir)
+  if (!allow.length) return { allow: base, note }
+  if (!ctx.dataDir) return { allow: base, note: 'not applied: no plugin data dir keeps the stamp of .claude/cc-tiers.json' }
+  if (!peek || peek.projectFile !== stamp) return { allow: base, note: 'not applied: .claude/cc-tiers.json changed since cc-tiers first read it in this session; a new session picks it up' }
+  return { allow: [...base, ...allow], note: '' }
+}
+
+/** The project entries a gate of this session may use, for the session context: none unless the file is the one the session stamped. */
+export function projectAllowInEffect(ctx, state) {
+  const { allow } = trustedAllow(ctx, { projectFile: state?.projectFile }, ctx.projectDir)
+  return allow.slice(ctx.routing.verifyAllow.length)
+}
+
 export function readProjectFile(projectDir) {
   if (!projectDir) return { project: null, note: 'not checked' }
   const file = path.join(projectDir, '.claude', 'cc-tiers.json')
@@ -2700,7 +2752,7 @@ export function gitCommonDir(projectDir) {
  * Keep the history file out of git without touching the tracked .gitignore:
  * the entry goes in .git/info/exclude, which stays local to this checkout.
  */
-export function ensureHistoryIgnored(projectDir, entry = HISTORY_IGNORE, comment = '# cc-tiers learns Haiku failures locally') {
+export function ensureHistoryIgnored(projectDir, entry = HISTORY_IGNORE, comment = '# cc-tiers learns Haiku failures locally', mayWrite = () => true) {
   const gitignore = path.join(projectDir, '.gitignore')
   if (existsSync(gitignore) && readFileSync(gitignore, 'utf8').includes(entry)) return false
   const gitDir = gitCommonDir(projectDir)
@@ -2708,10 +2760,17 @@ export function ensureHistoryIgnored(projectDir, entry = HISTORY_IGNORE, comment
   const exclude = path.join(gitDir, 'info', 'exclude')
   const text = existsSync(exclude) ? readFileSync(exclude, 'utf8') : ''
   if (text.split(/\n/).some((line) => line.trim() === entry || line.trim() === `/${entry}`)) return false
+  if (!mayWrite()) return false
   const suffix = text.endsWith('\n') || text.length === 0 ? '' : '\n'
   mkdirSync(path.dirname(exclude), { recursive: true })
   writeFileSync(exclude, `${text}${suffix}${comment}\n/${entry}\n`)
   return true
+}
+
+/** An untracked project file stays out of git status the same way; a tracked one is the team's. git only runs while the entry is missing, once per session. */
+export function ensureProjectFileIgnored(projectDir, run = git) {
+  const untracked = () => !run(projectDir, ['ls-files', '--', PROJECT_FILE])?.trim()
+  return ensureHistoryIgnored(projectDir, PROJECT_FILE, '# cc-tiers project settings, local to this checkout', untracked)
 }
 
 /** cc-cost fresh tokens: cache reads stay out, because they resend the same context. */
@@ -3486,6 +3545,18 @@ export function withSession(ctx, payload, fn) {
   return withLock(ctx.file, () => {
     const state = ctx.file ? loadState(ctx.file, ctx.sessionId) : emptyState(ctx.sessionId)
     absorbHookErrors(state, ctx.dataDir)
+    // The project file as this session first saw it; trustedAllow compares every later read with it. Only a saved state can keep it.
+    // Only that file is kept out of git: one created during the session stays in git status and in the attempt's diff for review.
+    if (ctx.file && ctx.projectDir && state.projectFile === undefined) {
+      state.projectFile = projectFileStamp(ctx.projectDir)
+      if (state.projectFile && state.projectFile !== 'none') {
+        try {
+          ensureProjectFileIgnored(ctx.projectDir)
+        } catch {
+          // Keeping the file out of git status is a convenience; a write that fails must not break the hook.
+        }
+      }
+    }
     const scan = scanTranscript(state, payload.transcript_path, ctx.routing)
     const budget = budgetDecision(collectLimits({ payload, cursor: state.cursor, env: ctx.env }), ctx.routing)
     ctx.routing.conserve = budget.conserve
@@ -3570,7 +3641,7 @@ export function prepareReport(ctx, event, payload = {}, { budgetS = ctx.routing.
   const status = ((REVIEW_ROLES.has(event.role) ? reported.STATUS : headers.STATUS) || '').toLowerCase()
   const projectDir = ctx.projectDir || String(payload.cwd || '')
   if (REVIEW_ROLES.has(event.role)) {
-    const reviewed = routing.reviewEvidence ? prepareReview(routing, event, status, projectDir, budgetS, gateLock(ctx.dataDir, projectDir)) : event
+    const reviewed = routing.reviewEvidence ? prepareReview(routing, event, status, projectDir, budgetS, gateLock(ctx.dataDir, projectDir), trustedAllow(ctx, peek, projectDir).allow) : event
     // final-gate has no writer report: the CC_TIERS_VERIFY lines of its own prompt are what the gate runs, never those of a prompt written for another task.
     const reportedTask = slug(reported.TASK || '')
     if (slug(parseHeaders(event.prompt || '').TASK || '') !== FINAL_GATE || (reportedTask && reportedTask !== FINAL_GATE) || status !== 'pass') return reviewed
@@ -3594,10 +3665,11 @@ function gateReport(ctx, event, text, headers, projectDir, budgetS, peek) {
   const snapshot = projectDir && !writing.length ? () => workspaceSnapshot(projectDir) : null
   const preexisting = declaredPreexisting(text, projectDir)?.raw || ''
   const files = headers.FILES ? declaredFiles(headers, '').files : []
-  const options = { projectDir, allow: routing.verifyAllow, detected: detectedChecks(projectDir), detectedIn: detectedChecks, files, timeoutS: routing.verifyTimeout, budgetS, cached, snapshot, preexisting, lock: gateLock(ctx.dataDir, projectDir) }
+  const trusted = trustedAllow(ctx, peek, projectDir)
+  const options = { projectDir, allow: trusted.allow, detected: detectedChecks(projectDir), detectedIn: detectedChecks, files, timeoutS: routing.verifyTimeout, budgetS, cached, snapshot, preexisting, lock: gateLock(ctx.dataDir, projectDir) }
   if (projectDir) {
     const treeCheck = writing.length ? { treeCheck: `skipped: ${writing.join(', ')} still writing` } : {}
-    const gate = { ...runGate(text, options), tree, ...treeCheck }
+    const gate = { ...runGate(text, options), tree, ...treeCheck, ...(trusted.note ? { projectAllow: trusted.note } : {}) }
     const missing = missingFromGate(gate, projectDir)
     // applyEvent reads the declared pre-existing line again and needs the same dir to parse a cd to an absolute path.
     return { ...event, projectDir, gate: missing ? { ...gate, missing } : gate }
@@ -3701,7 +3773,7 @@ export function peekFor(state, event) {
   const task = slug(parseHeaders(event?.prompt || '').TASK || parseHeaders(event?.text || '').TASK || '')
   pruneActive(state)
   const writing = Object.entries(state.active).filter(([name, entry]) => name !== task && !entry.isolated).map(([name]) => name)
-  return { snapshot: task ? own(state.snapshots, task) || null : null, cache: { ...(state.verifyCache || {}) }, writing }
+  return { snapshot: task ? own(state.snapshots, task) || null : null, cache: { ...(state.verifyCache || {}) }, writing, projectFile: state.projectFile }
 }
 
 /** At Stop no foreground agent can still run: only background writers stay registered (an agent that stopped with no report, such as a reviewer waiting for its verdict, is not a writer). */
@@ -3712,11 +3784,11 @@ export function releaseIdleWriters(state) {
 }
 
 /** A reviewer fail, or a report with no verdict, is judged finding by finding (commands run here, outside the lock); a pass only keeps its notes. */
-function prepareReview(routing, event, status, projectDir, budgetS, lock = null) {
+function prepareReview(routing, event, status, projectDir, budgetS, lock = null, allow = routing.verifyAllow) {
   let findings = parseFindings(event.text)
   if (status === 'pass') findings = findings.filter((f) => f.valid && !isBlocking(f.severity))
   if (!findings.length && status === 'pass') return event
-  const options = { allow: routing.verifyAllow, detected: detectedChecks(projectDir), projectDir, timeoutS: routing.verifyTimeout, budgetS, lock }
+  const options = { allow, detected: detectedChecks(projectDir), projectDir, timeoutS: routing.verifyTimeout, budgetS, lock }
   // Nothing may run without a project dir: a command finding then stays blocking, unchecked.
   const judged = judgeFindings(findings, { ...options, specText: specText(event.prompt), run: projectDir ? undefined : () => ({ code: 1 }) })
   return { ...event, judged }
@@ -3866,8 +3938,8 @@ export function prepareParked(ctx, parked, payload = {}, { now = Date.now, peeks
 /** The other writers on the shared tree and the verify cache for each parked report (read under the lock), so its gate behaves like a foreground one; only an agent's has a snapshot, a session role has no delegation. */
 export function peekParked(state, parked) {
   return new Map(parked.map((report) => {
-    const { snapshot, writing, cache } = peekFor(state, report)
-    return [report.id, report.agent_id ? { snapshot, writing, cache } : { writing, cache }]
+    const { snapshot, writing, cache, projectFile } = peekFor(state, report)
+    return [report.id, report.agent_id ? { snapshot, writing, cache, projectFile } : { writing, cache, projectFile }]
   }))
 }
 

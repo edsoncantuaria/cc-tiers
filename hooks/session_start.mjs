@@ -8,6 +8,7 @@ import {
   loadHistory,
   openContext,
   openWork,
+  projectAllowInEffect,
   parsePayload,
   readStdin,
   readTodayTotal,
@@ -39,6 +40,7 @@ function main() {
       today: installed ? readTodayTotal(ctx.env) : null,
       cost: state.cost || {},
       openWork: openWork(state),
+      projectAllow: projectAllowInEffect(ctx, state),
     }),
   }))
   const body = pending ? `${text}\n\n${pending}` : text

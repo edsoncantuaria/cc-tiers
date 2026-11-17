@@ -524,6 +524,7 @@ export function gateMessage(task, gate) {
     lines.push(`${prefix} not validated: ${item.reason}${notRerun(item) ? " - not re-run: the writer's own run stands only as declared evidence" : ''}`)
   }
   if (gate.treeCheck) lines.push(`${prefix} tree check ${gate.treeCheck} in this tree`)
+  if (gate.projectAllow) lines.push(`${prefix} project verifyAllow ${gate.projectAllow}`)
   const failure = gateFailure(gate)
   if (failure?.timedOut) lines.push(`${prefix} timed out: ${failure.raw} after ${failure.seconds} s`)
   else if (failure) lines.push(`${prefix} failed: ${failure.raw} (exit ${failure.code ?? 'none'})`)
