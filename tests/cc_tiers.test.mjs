@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -1682,14 +1682,22 @@ test('a fork carries its parent task records, never folds the rows it copied, an
     assert.equal(readFileSync(parentFile, 'utf8'), parentBytes, 'the parent state is only read')
     assert.deepEqual(Object.keys(open('fork', { hook_event_name: 'Stop' }).tasks), ['ci-faixa'], 'later hooks keep the copy and still skip the copied rows')
 
-    // After a /clear the rows still carry the id from before it: the parent is the sibling transcript that starts with the same row.
+    // A fork copies its parent from the last compaction, and after a /clear the rows still carry the id from before it:
+    // the parent is the sibling transcript that holds the fork's first row anywhere, not the session the hint names.
+    const early = (id) => JSON.stringify({ type: 'user', uuid: `early-${id}`, session_id: 'parent' })
     const cleared = tiers.emptyState('cleared')
     cleared.tasks['after-clear'] = { tier: 'sonnet', failures: [] }
     tiers.saveState(tiers.sessionPath(dataDir, 'cleared'), cleared)
-    writeFileSync(path.join(dir, 'cleared.jsonl'), `${copied(1)}\n`)
+    writeFileSync(path.join(dir, 'parent.jsonl'), `${early(1)}\n${early(2)}\n`)
+    writeFileSync(path.join(dir, 'cleared.jsonl'), `${early(3)}\n${early(4)}\n${copied(1)}\n${copied(2)}\n`)
     writeFileSync(path.join(dir, 'other.jsonl'), `${JSON.stringify({ type: 'user', uuid: 'u-other' })}\n`)
     assert.deepEqual(Object.keys(open('fork-3', { hook_event_name: 'SessionStart', source: 'fork' }).tasks), ['after-clear'])
+    writeFileSync(path.join(dir, 'parent.jsonl'), `${early(1)}\n${copied(1)}\n`)
+    const older = new Date(Date.now() - 3600000)
+    utimesSync(path.join(dir, 'parent.jsonl'), older, older)
+    assert.deepEqual(Object.keys(open('fork-4', { hook_event_name: 'SessionStart', source: 'fork' }).tasks), ['ci-faixa'], 'the hint wins when its transcript holds the row too, even when it is older')
     rmSync(path.join(dir, 'cleared.jsonl'))
+    rmSync(path.join(dir, 'parent.jsonl'))
 
     rmSync(parentFile)
     const orphan = open('fork-2', { hook_event_name: 'SessionStart', source: 'fork' })

@@ -1157,9 +1157,8 @@ export function formatTaskSpend(task, tiers) {
 
 /** How far into a fork's transcript its parent's session id is looked for. */
 const FORK_HEAD_BYTES = 1024 * 1024
-/** How much of a sibling transcript is read to find its first row, and how many of the newest siblings are tried. */
-const SIBLING_HEAD_BYTES = 64 * 1024
-const MAX_FORK_SIBLINGS = 200
+/** How much of the sibling transcripts a fork reads, newest first, to find its parent: well inside the SessionStart timeout. */
+const FORK_SEARCH_BYTES = 256 * 1024 * 1024
 const SCAN_CHUNK_BYTES = 4 * 1024 * 1024
 
 function freshCursor() {
@@ -3679,8 +3678,9 @@ function headRows(file, bytes) {
 }
 
 /**
- * The session a fork copied its transcript from. The copy keeps each row's uuid, so the parent is the sibling transcript that starts
- * with the same row. A row's session_id is only a hint: after a /clear it still names the session from before the clear.
+ * The session a fork copied its transcript from. The copy starts at the parent's last compaction and keeps each row's uuid, so the
+ * parent is the sibling transcript that holds the fork's first row. A row's session_id is only a hint, tried first: after a /clear it
+ * still names the session from before the clear. Newest siblings are read first, up to FORK_SEARCH_BYTES in all.
  */
 function forkParent(file, sessionId) {
   const rows = headRows(file, FORK_HEAD_BYTES)
@@ -3690,21 +3690,30 @@ function forkParent(file, sessionId) {
   const dir = path.dirname(file)
   let names = []
   try {
-    names = readdirSync(dir).filter((name) => name.endsWith('.jsonl') && path.join(dir, name) !== file)
+    names = readdirSync(dir)
   } catch {
     return hint
   }
-  const starts = (name) => headRows(path.join(dir, name), SIBLING_HEAD_BYTES).find((row) => typeof row.uuid === 'string')?.uuid === first
-  const mtime = (name) => {
+  const siblings = []
+  for (const name of names) {
+    const full = path.join(dir, name)
+    if (!name.endsWith('.jsonl') || full === file) continue
     try {
-      return statSync(path.join(dir, name)).mtimeMs
+      const stat = statSync(full)
+      siblings.push({ id: name.slice(0, -'.jsonl'.length), full, size: stat.size, mtime: stat.mtimeMs })
     } catch {
-      return 0
+      // Removed since the listing.
     }
   }
-  const matches = names.sort((a, b) => mtime(b) - mtime(a)).slice(0, MAX_FORK_SIBLINGS).filter(starts).map((name) => name.slice(0, -'.jsonl'.length))
-  if (matches.includes(hint)) return hint
-  return matches[0] || hint
+  siblings.sort((a, b) => (a.id === hint ? -1 : b.id === hint ? 1 : b.mtime - a.mtime))
+  const needle = new RegExp(`"uuid":"${first.replace(/[^\w-]/g, '')}"`)
+  let budget = FORK_SEARCH_BYTES
+  for (const sibling of siblings) {
+    if (sibling.size > budget) continue
+    budget -= sibling.size
+    if (fileHas(sibling.full, needle)) return sibling.id
+  }
+  return hint
 }
 
 /**
@@ -3731,6 +3740,11 @@ function carryFork(ctx, state, payload) {
 const SESSION_START_RE = /cc-tiers routing is active|cc-tiers is enabled\. The routing summary/
 
 function ranBefore(file) {
+  return fileHas(file, SESSION_START_RE)
+}
+
+/** Whether a file holds text matching re, read in chunks that overlap by more than any needle searched, so a cut one is still found. */
+function fileHas(file, re) {
   if (!file) return false
   let size
   try {
@@ -3738,10 +3752,9 @@ function ranBefore(file) {
   } catch {
     return false
   }
-  // Read in chunks that overlap by more than the marker, so one cut in two is still found.
   for (let start = 0; start < size; start += SCAN_CHUNK_BYTES - 256) {
     try {
-      if (SESSION_START_RE.test(readRange(file, start, Math.min(size, start + SCAN_CHUNK_BYTES)).toString('utf8'))) return true
+      if (re.test(readRange(file, start, Math.min(size, start + SCAN_CHUNK_BYTES)).toString('utf8'))) return true
     } catch {
       return false
     }
