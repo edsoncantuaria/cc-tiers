@@ -716,6 +716,63 @@ test('a Bash attempt heredoc opens and closes a session task like a trailer text
   }
 })
 
+test('a SendMessage result row marks the agent it resumed as running again, and an unknown agent changes nothing', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const at = '2026-11-17T10:00:00.000Z'
+    const result = (resumedAgentId, extra = {}) => JSON.stringify({ type: 'user', uuid: `u-${resumedAgentId}`, timestamp: at, message: { role: 'user', content: [] }, toolUseResult: { success: true, message: 'Resuming agent', resumedAgentId }, ...extra })
+    const transcript = path.join(dir, 'main.jsonl')
+    writeFileSync(transcript, [result('agent-r'), result('agent-ghost'), result('agent-side', { isSidechain: true })].join('\n') + '\n')
+    const ctx = { routing: defaultRouting({ verify: 'off' }), file: path.join(dir, 's.json'), sessionId: 's', env: {}, projectDir: '', ccCost: false }
+    const before = { at: 1, stops: 1, stoppedAt: 2 }
+    writeFileSync(ctx.file, JSON.stringify({ ...tiers.emptyState('s'), background: { 'agent-side': { role: 'reviewer', ...before } }, finished: { 'agent-r': { role: 'reviewer', ...before } } }))
+    const state = tiers.withSession(ctx, { transcript_path: transcript }, (s) => s)
+    assert.equal(state.finished['agent-r'].resumedAt, Date.parse(at), 'the resume time is the row timestamp')
+    assert.equal(state.finished['agent-r'].at, 1, 'the first launch time does not move')
+    assert.deepEqual(state.background['agent-side'], { role: 'reviewer', ...before }, 'a sidechain row resumes nothing')
+    assert.equal(Object.hasOwn(state.background, 'agent-ghost') || Object.hasOwn(state.finished, 'agent-ghost'), false)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a resume row read in the same scan as the hand-back row leaves the agent running once the report is counted, unless it came first', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const base = Date.now() - 60 * 1000
+    const stamp = (second) => new Date(base + second * 1000).toISOString()
+    const report = (role) => `CC_TIERS_TASK: users-pagination\nCC_TIERS_TIER: sonnet\nCC_TIERS_ROLE: ${role}\nCC_TIERS_STATUS: pass`
+    const handback = (agent, role, second) => JSON.stringify({ type: 'user', isMeta: true, isSidechain: false, uuid: `h-${agent}`, timestamp: stamp(second), origin: { kind: 'peer', from: agent, handback: true, handbackReportText: report(role) }, message: { role: 'user', content: [] } })
+    const resume = (agent, second) => JSON.stringify({ type: 'user', uuid: `r-${agent}`, timestamp: stamp(second), message: { role: 'user', content: [] }, toolUseResult: { success: true, resumedAgentId: agent } })
+    const parkedPass = { id: 'row:p1', role: 'orchestrator', parkedAt: Date.now(), text: 'CC_TIERS_TASK: csv-export\nCC_TIERS_STATUS: pass' }
+    for (const [role, rows, running] of [
+      ['researcher', (agent) => [handback(agent, 'researcher', 10), resume(agent, 20)], true],
+      ['reviewer', (agent) => [handback(agent, 'reviewer', 10), resume(agent, 20)], true],
+      ['reviewer', (agent) => [resume(agent, 10), handback(agent, 'reviewer', 20)], false],
+    ]) {
+      const agent = `agent-${role}-${running}`
+      const transcript = path.join(dir, `${agent}.jsonl`)
+      writeFileSync(transcript, `${rows(agent).join('\n')}\n`)
+      const ctx = { routing: defaultRouting({ verify: 'off' }), file: path.join(dir, `${agent}.json`), sessionId: 's', env: {}, projectDir: '', ccCost: false }
+      writeFileSync(ctx.file, JSON.stringify({ ...tiers.emptyState('s'), background: { [agent]: { role, prompt: report(role), at: base } } }))
+      const parked = tiers.withSession(ctx, { transcript_path: transcript }, (state) => tiers.peekAwaiting(state))
+      const entry = tiers.withSession(ctx, { transcript_path: transcript }, (state) => {
+        for (const event of parked) {
+          tiers.countParked(ctx, state, event)
+          tiers.dropAwaiting(state, [event.id])
+        }
+        return { ...tiers.agentEntry(state, agent), held: tiers.holdParked(state, [parkedPass]).gate.length === 0 }
+      })
+      const label = `${role}, ${running ? 'hand-back then resume' : 'resume then hand-back'}`
+      assert.equal(entry.resumedAt, base + (running ? 20 : 10) * 1000, label)
+      assert.equal(entry.stoppedAt, base + (running ? 10 : 20) * 1000, `${label}: the stop is the hand-back row's time, not the time it was counted`)
+      if (role === 'reviewer') assert.equal(entry.held, running, label)
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('a Bash command or an Agent prompt without the attempt marker is not a trailer', () => {
   const closing = `${ATTEMPT_CLOSE}\nCC_TIERS_FILES: a.js`
   const bash = (command) => ({ type: 'tool_use', name: 'Bash', input: { command } })

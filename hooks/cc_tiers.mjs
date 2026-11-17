@@ -1459,7 +1459,9 @@ function awaitReport(state, event, task) {
   if (!event.agent_id) return
   // A silent review remembers its task and how many reviews of it were counted, so Stop can tell when another one delivered the verdict.
   const review = REVIEW_ROLES.has(event.role) ? { task, reviews: reviewsCounted(state, task) } : {}
-  registerAgent(state, event.agent_id, { role: event.role, prompt: event.prompt || '', tool_use_id: event.tool_use_id || '', at: launchTime(event), stops: (Number(event.stops) || 0) + 1, ...review })
+  // The ask count rides the event: the stop deleted the old entry, and the limit is per agent, not per stop.
+  const asked = event.asks ? { asks: event.asks } : {}
+  registerAgent(state, event.agent_id, { role: event.role, prompt: event.prompt || '', tool_use_id: event.tool_use_id || '', at: launchTime(event), stops: (Number(event.stops) || 0) + 1, stoppedAt: Date.now(), ...asked, ...review })
 }
 
 const reviewsCounted = (state, task) => own(state.log, task)?.reviews.length || 0
@@ -3187,6 +3189,8 @@ function foldTrailer(text, owner, reportId, cursor, sink) {
 
 const HANDBACK_FRAME = 'The report follows:\n'
 
+const rowTime = (row) => Date.parse(row.timestamp) || Date.now()
+
 /**
  * The agent and report of a peer hand-back row, or null: a user row (handbackReportText, else its framed body),
  * or the queued_command attachment written when the hand-back arrives mid-turn. The frame indents each report line by two spaces.
@@ -3212,6 +3216,7 @@ function handbackOf(row) {
  * - An Agent call whose prompt carries CC_TIERS_TASK charges that one message to the task.
  * - Every other main-chain message is orchestration overhead.
  * - A peer hand-back row (a user row or a queued_command attachment) is the report of the background agent it names, pushed as a report with its agent_id.
+ * - The result row of a SendMessage that resumed an agent names it (resumedAgentId); withSession marks that agent as running again.
  * Sidechain rows are skipped: subagent usage comes from the Agent result or its own transcript.
  * Rows that repeat a message id (one row per content block) are counted once.
  */
@@ -3222,9 +3227,11 @@ function foldRow(row, line, cursor, sink, routing = null) {
   if (row.isSidechain === true) return
   const handback = handbackOf(row)
   if (handback) {
-    sink.reports.push({ id: `handback:${row.uuid || lineId(line)}`, agent_id: handback.agent, text: handback.text })
+    sink.reports.push({ id: `handback:${row.uuid || lineId(line)}`, agent_id: handback.agent, text: handback.text, at: rowTime(row) })
     return
   }
+  const resumed = row.toolUseResult?.resumedAgentId
+  if (row.type === 'user' && typeof resumed === 'string' && resumed) sink.resumed.push({ agent: resumed, at: rowTime(row) })
   if (row.type !== 'assistant') return
   const message = row.message && typeof row.message === 'object' ? row.message : {}
   const reportId = `row:${row.uuid || lineId(line)}`
@@ -3281,7 +3288,7 @@ function readRange(file, start, end) {
 export function scanTranscript(state, file, routing = null) {
   if (!state.cursor || typeof state.cursor !== 'object') state.cursor = freshCursor()
   const cursor = state.cursor
-  const sink = { spend: {}, cost: {}, reports: [] }
+  const sink = { spend: {}, cost: {}, reports: [], resumed: [] }
   if (!file || !existsSync(file)) return sink
   let size
   try {
@@ -3328,7 +3335,7 @@ export function scanTranscript(state, file, routing = null) {
 /** Spend and ceiling reports for a whole transcript text, the same way scanTranscript folds it. */
 export function attributeTranscript(text) {
   const cursor = freshCursor()
-  const sink = { spend: {}, cost: {}, reports: [] }
+  const sink = { spend: {}, cost: {}, reports: [], resumed: [] }
   for (const line of String(text || '').split(/\n/)) {
     if (!line.trim()) continue
     try {
@@ -3642,6 +3649,10 @@ export function withSession(ctx, payload, fn) {
       }
     }
     const scan = scanTranscript(state, payload.transcript_path, ctx.routing)
+    for (const { agent, at } of scan.resumed) {
+      const entry = agentEntry(state, agent)
+      if (entry) entry.resumedAt = Math.max(Number(entry.resumedAt) || 0, at)
+    }
     const budget = budgetDecision(collectLimits({ payload, cursor: state.cursor, env: ctx.env }), ctx.routing)
     ctx.routing.conserve = budget.conserve
     for (const report of scan.reports) {
@@ -4008,7 +4019,7 @@ export function peekFor(state, event) {
 
 /** At Stop no foreground agent can still run: only background writers stay registered (an agent that stopped with no report, such as a reviewer waiting for its verdict, is not a writer). */
 export function releaseIdleWriters(state) {
-  const writers = Object.values(state.background || {}).filter((launch) => !REVIEW_ROLES.has(launch?.role) && !launch?.stops)
+  const writers = Object.values(state.background || {}).filter((launch) => !REVIEW_ROLES.has(launch?.role) && agentRuns(launch))
   const running = new Set(writers.map((launch) => slug(parseHeaders(launch?.prompt || '').TASK || '')))
   for (const task of Object.keys(state.active || {})) if (!running.has(task)) releaseActive(state, task)
 }
@@ -4061,7 +4072,7 @@ export function reviewVerdictAsks(state) {
   const given = []
   for (const [agentId, entry] of Object.entries(state.background || {})) {
     // A verdict that waits in the parked rows is already delivered, and so is one a later review of the task counted.
-    if (!REVIEW_ROLES.has(entry?.role) || !entry.stops || (state.awaiting || []).some((item) => item.agent_id === agentId) || !awaitsVerdict(state, entry)) continue
+    if (!REVIEW_ROLES.has(entry?.role) || agentRuns(entry) || (state.awaiting || []).some((item) => item.agent_id === agentId) || !awaitsVerdict(state, entry)) continue
     const line = `The review of ${entry.task} by agent ${agentId} still has no verdict. Ask it for the CC_TIERS_STATUS trailer with SendMessage to ${agentId} (run the review again if it cannot answer).`
     if ((entry.asks || 0) < MAX_VERDICT_ASKS) {
       entry.asks = (entry.asks || 0) + 1
@@ -4076,6 +4087,9 @@ export function reviewVerdictAsks(state) {
 
 export const agentEntry = (state, agentId) => own(state.background, agentId) || own(state.finished, agentId)
 
+/** An agent runs until its first stop, and again from a SendMessage resume (resumedAt) until it stops once more (stoppedAt). */
+const agentRuns = (launch) => !launch?.stops || Number(launch.resumedAt) > (Number(launch.stoppedAt) || 0)
+
 /** The report of a background agent's stop; its id changes with each stop, so an agent asked again counts again. */
 export function agentReport(agentId, entry, text) {
   return {
@@ -4086,14 +4100,15 @@ export function agentReport(agentId, entry, text) {
     role: entry.role,
     prompt: entry.prompt || '',
     launchedAt: entry.at,
+    asks: entry.asks,
     text,
     error: '',
   }
 }
 
-/** The agent's counted report is remembered, so its next stop after SendMessage is a new attempt; the token pairs the same report arriving by its other path. */
+/** The agent's counted report is remembered, so its next stop after SendMessage is a new attempt; the token pairs the same report arriving by its other path. A hand-back row stopped the agent when it was written, not when it is counted. */
 function rememberFinished(state, event, via) {
-  registerAgent(state, event.agent_id, { role: event.role, prompt: event.prompt || '', at: launchTime(event), stops: (Number(event.stops) || 0) + 1, reported: reportToken(via, event.text) }, 'finished')
+  registerAgent(state, event.agent_id, { role: event.role, prompt: event.prompt || '', at: launchTime(event), stops: (Number(event.stops) || 0) + 1, stoppedAt: Number(event.reportedAt) || Date.now(), reported: reportToken(via, event.text) }, 'finished')
 }
 
 /**
@@ -4112,10 +4127,14 @@ export function claimTwin(state, agentId, via, text) {
 
 /** Counts a background agent's report, whichever path brought it, and remembers the agent unless it still owes a report. */
 export function processAgentReport(ctx, state, event, usage = null, via = 'stop') {
+  // The entry is rebuilt, so a SendMessage resume read in the meantime is carried over: whether it is later than the stop decides if the agent runs.
+  const resumedAt = agentEntry(state, event.agent_id)?.resumedAt
   delete state.background[event.agent_id]
   delete state.finished[event.agent_id]
   const message = processReport(ctx, state, event, usage)
   if (!own(state.background, event.agent_id)) rememberFinished(state, event, via)
+  const entry = agentEntry(state, event.agent_id)
+  if (resumedAt && entry) entry.resumedAt = resumedAt
   return message
 }
 
@@ -4127,7 +4146,7 @@ function countHandback(ctx, state, row) {
   const entry = agentEntry(state, row.agent_id)
   const status = (parseHeaders(row.text).STATUS || '').toLowerCase()
   if (!entry?.role || (status !== 'pass' && status !== 'fail') || claimTwin(state, row.agent_id, 'row', row.text)) return
-  const event = agentReport(row.agent_id, entry, row.text)
+  const event = { ...agentReport(row.agent_id, entry, row.text), reportedAt: row.at }
   if (entry.role !== 'researcher') {
     parkReport(state, event)
     return
@@ -4184,8 +4203,9 @@ const HOLD_FOR_REVIEW_MS = 3 * 60 * 60 * 1000
 export function holdParked(state, parked) {
   // A review whose hand-back row is already parked has finished; only one with no report yet still runs, and one launched hours ago is taken as lost.
   const handedBack = new Set(parked.map((report) => report.agent_id).filter(Boolean))
-  const running = ([id, launch]) => REVIEW_ROLES.has(launch?.role) && !launch?.stops && !handedBack.has(id) && Date.now() - (Number(launch?.at) || 0) < HOLD_FOR_REVIEW_MS
-  const reviews = Object.entries(state.background || {}).filter(running).map(([id]) => id)
+  // The hold counts from the latest resume: a reviewer asked for its verdict hours after its launch still runs.
+  const running = ([id, launch]) => REVIEW_ROLES.has(launch?.role) && agentRuns(launch) && !handedBack.has(id) && Date.now() - Math.max(Number(launch?.at) || 0, Number(launch?.resumedAt) || 0) < HOLD_FOR_REVIEW_MS
+  const reviews = [...Object.entries(state.background || {}), ...Object.entries(state.finished || {})].filter(running).map(([id]) => id)
   const taskOf = (report) => slug(parseHeaders(report?.text || '').TASK || '')
   if (reviews.length && parked.length) {
     const tasks = [...new Set(parked.map(taskOf).filter(Boolean))]

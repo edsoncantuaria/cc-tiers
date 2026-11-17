@@ -1115,6 +1115,60 @@ test('a writer that stopped with no status is idle: Stop releases its task slot'
   assert.equal(state.active['users-pagination'], undefined)
 })
 
+test('a writer resumed by SendMessage is running again until it stops once more', () => {
+  const state = tiers.emptyState('s')
+  const now = Date.now()
+  state.active = { 'users-pagination': { role: 'implementer', files: ['src/a.js'], at: now } }
+  state.background = { a1: { role: 'implementer', prompt: 'CC_TIERS_TASK: users-pagination\nWork.', at: now - 5000, stops: 1, stoppedAt: now - 4000, resumedAt: now - 1000 } }
+  tiers.releaseIdleWriters(state)
+  assert.ok(state.active['users-pagination'], 'the resumed writer keeps its slot')
+  state.background.a1.stoppedAt = now
+  tiers.releaseIdleWriters(state)
+  assert.equal(state.active['users-pagination'], undefined, 'it stopped after the resume')
+})
+
+test('a reviewer resumed by SendMessage holds the parked checks like a running one, from its resume', () => {
+  const now = Date.now()
+  const hours = (count) => count * 60 * 60 * 1000
+  const parked = [{ id: 'row:p1', role: 'orchestrator', parkedAt: now, text: 'CC_TIERS_TASK: users-pagination\nCC_TIERS_STATUS: pass' }]
+  const held = (launch, key = 'background') => tiers.holdParked({ ...tiers.emptyState('s'), [key]: { 'agent-r': { role: 'reviewer', prompt: REVIEW_PROMPT, ...launch } } }, parked)
+  const stopped = { at: now - hours(5), stops: 1, stoppedAt: now - hours(4) }
+  assert.deepEqual(held(stopped).gate.map((item) => item.id), ['row:p1'], 'a stopped reviewer holds nothing')
+  assert.deepEqual(held(stopped, 'finished').gate.map((item) => item.id), ['row:p1'])
+  for (const key of ['background', 'finished']) {
+    const resumed = held({ ...stopped, resumedAt: now - 1000 }, key)
+    assert.deepEqual(resumed.gate, [], `${key}: a resumed reviewer holds the parked pass`)
+    assert.match(resumed.notes[0], /a review \(agent-r\) is still running/)
+  }
+  assert.deepEqual(held({ ...stopped, resumedAt: now - hours(4) + 1000, stoppedAt: now - hours(3) }).gate.map((item) => item.id), ['row:p1'], 'it stopped again after the resume')
+  assert.deepEqual(held({ at: now - hours(5), stops: 1, stoppedAt: now - hours(4), resumedAt: now - hours(4) + 1 }).gate.map((item) => item.id), ['row:p1'], 'the 3 h hold counts from the resume: past it, the review is taken as lost')
+})
+
+test('a silent stop after resume keeps the ask count: at most three asks per agent', () => {
+  const routing = routingWith()
+  const state = tiers.emptyState('s')
+  state.background = { 'agent-r': { role: 'reviewer', prompt: REVIEW_PROMPT, tool_use_id: 'r1', at: Date.now(), stops: 1, task: 'users-pagination', reviews: 0 } }
+  let asked = 0
+  for (let stop = 0; stop < 6; stop += 1) {
+    asked += tiers.reviewVerdictAsks(state).asks.length
+    const event = tiers.agentReport('agent-r', state.background['agent-r'], trailer('reviewer', ''))
+    tiers.applyEvent(state, { ...tiers.prepareReport({ routing, projectDir: '' }, event), agent_id: 'agent-r' }, routing)
+  }
+  assert.equal(asked, 3)
+  assert.equal(state.background['agent-r'].asks, 4, 'the limit notice was given once')
+})
+
+test('a reviewer resumed by SendMessage is not asked for its verdict again until it stops', () => {
+  const now = Date.now()
+  const state = tiers.emptyState('s')
+  state.background = { 'agent-r': { role: 'reviewer', prompt: REVIEW_PROMPT, at: now - 5000, stops: 1, stoppedAt: now - 4000, resumedAt: now - 1000, task: 'users-pagination', reviews: 0, asks: 1 } }
+  assert.deepEqual(tiers.reviewVerdictAsks(state), { asks: [], given: [] })
+  assert.equal(state.background['agent-r'].asks, 1, 'a Stop while it runs spends no ask')
+  state.background['agent-r'].stoppedAt = now
+  assert.equal(tiers.reviewVerdictAsks(state).asks.length, 1, 'it stopped again with no verdict')
+  assert.equal(state.background['agent-r'].asks, 2)
+})
+
 test('a reviewer rejection that arrives by the hand-back row is charged to the writer tier whichever path brings it', async () => {
   const outcome = async (order) => {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-tier-'))
