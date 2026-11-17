@@ -1305,6 +1305,31 @@ test('a review pass counted while the fix attempt is still parked waits for that
   assert.equal(state.log['users-pagination'].attempts, 2, 'both attempts are logged')
 })
 
+test('a rejected attempt a later review covered that fails its gate at Stop is not a second failure, and the fix it covered still finishes the task', () => {
+  const routing = routingWith({ review_policy: 'always' })
+  const state = tiers.emptyState('s')
+  state.awaiting = [parkedAttempt('row:a1', 'first', 100), parkedAttempt('row:a2', 'fixed the off by one', 300)]
+  const rejected = countReview(state, routing, 'R1', 'reject', 200)
+  assert.equal(rejected.meta.outcome, 'retry')
+  tiers.logReport(state, rejected.meta)
+  assert.equal(countReview(state, routing, 'R2', 'pass', 400).meta.outcome, 'review')
+  assert.equal(state.tasks['users-pagination'].rejected, undefined)
+  assert.deepEqual(state.tasks['users-pagination'].reviewPassed, ['row:a1', 'row:a2'])
+
+  const failed = countAttempt(state, routing, { ...state.awaiting[0], text: state.awaiting[0].text.replace('CC_TIERS_STATUS: pass', 'CC_TIERS_STATUS: fail') })
+  assert.equal(failed.meta.stillRejected, true)
+  assert.match(failed.message, /already rejected this opus attempt, so its failing gate is not a second failure/)
+  assert.equal(state.tasks['users-pagination'].failures.length, 1)
+  assert.deepEqual(state.tasks['users-pagination'].reviewPassed, ['row:a2'], 'the fix stays covered')
+  tiers.logReport(state, failed.meta)
+  assert.equal(state.log['users-pagination'].failures, 1, 'the log counts the rejection once')
+
+  const fix = countAttempt(state, routing, state.awaiting[1])
+  assert.equal(fix.meta.outcome, 'pass')
+  assert.doesNotMatch(fix.message, /Send the result to cc-tiers:reviewer/)
+  assert.equal(state.tasks['users-pagination'], undefined)
+})
+
 test('a review pass counted before the session attempt it covers is gated at Stop does not reopen the task', () => {
   const routing = routingWith({ review_policy: 'always' })
   const state = tiers.emptyState('s')

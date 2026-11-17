@@ -1651,8 +1651,8 @@ export function applyEvent(state, event, routing) {
 
   let current = own(tasks, task)
   if (!current || typeof current !== 'object') current = { tier, failures: [], carried: [] }
-  // final-gate has no writer attempt to supersede its rejection, so its next passing review is a fresh look at the diff.
-  if (current.rejected && (!REVIEW_ROLES.has(role) || (task === FINAL_GATE && status === 'pass'))) {
+  // final-gate has no writer attempt to supersede its rejection, so a passing review launched after it is a fresh look at the diff; one launched before it saw the rejected diff.
+  if (current.rejected && (!REVIEW_ROLES.has(role) || (task === FINAL_GATE && status === 'pass' && launchTime(event) > (current.rejectedAt || 0)))) {
     // The session's own pass, parked until Stop, of the attempt a review already rejected: it is that attempt, not a new one.
     if (id && (current.judged || []).includes(id)) {
       meta.tier = tier
@@ -1667,6 +1667,7 @@ export function applyEvent(state, event, routing) {
     // Any other writer report is a new attempt: a rejection of the attempt before it no longer sticks.
     current = { ...current }
     delete current.rejected
+    delete current.rejectedAt
     delete current.judged
   }
   // A writer report that a passed review covered finishes the task with it; any other writer report ends that coverage.
@@ -1745,9 +1746,9 @@ export function applyEvent(state, event, routing) {
     const launched = Number(event.launchedAt) > 0 || Number(event.durationMs) > 0 ? launchTime(event) : 0
     const attempts = parkedFor(state, task, id, launched)
     // An attempt the rejection did not judge is a new one: this review is of it, so the rejection of the attempt before no longer sticks.
+    // Its judged attempts stay: a review that covers them must not let the gate of one count a second failure.
     if (current.rejected && attempts.some((item) => !(current.judged || []).includes(item.id))) {
       delete current.rejected
-      delete current.judged
     }
     // Evidence review: a rejection with no blocking finding approves; with findings, only they reach the writer.
     // A failed gate is no reviewer finding: judging the review's own findings would turn that failure back into a pass.
@@ -1792,7 +1793,7 @@ export function applyEvent(state, event, routing) {
     // A rejection sticks to the writer attempt it judged: a pass from another review of that attempt must not clear it.
     if (['retry', 'escalate', 'stop'].includes(applied.outcome)) {
       const judged = [...new Set([...(tasks[task]?.judged || []), ...attempts.map((item) => item.id)])].slice(-MAX_JUDGED)
-      tasks[task] = { ...tasks[task], rejected: true, ...(judged.length ? { judged } : {}) }
+      tasks[task] = { ...tasks[task], rejected: true, ...(task === FINAL_GATE && !applied.stillRejected ? { rejectedAt: Date.now() } : {}), ...(judged.length ? { judged } : {}) }
     }
     if (applied.outcome === 'review' && !applied.covering) meta.floor = reviewFloor(state, task, routing, flagged)
     if (verdictless && !applied.stillRejected) applied.message = `Task ${task}: the review had no CC_TIERS_STATUS line but had blocking findings, so it counts as a failure. ${applied.message}`
@@ -1801,6 +1802,18 @@ export function applyEvent(state, event, routing) {
     meta.sonnetEscalated = applied.sonnetEscalated === true
     meta.stillRejected = applied.stillRejected === true
     meta.diagnosis = applied.diagnosis
+  } else if (status === 'fail' && reviewed && (current.judged || []).includes(id)) {
+    // The review that rejected this attempt counted its failure already: its gate failing at Stop is not a second one, and the other covered attempts stay covered.
+    const rest = covers.filter((item) => item !== id)
+    tasks[task] = { ...current, ...(rest.length ? { reviewPassed: rest } : {}) }
+    meta.outcome = stoppedAt(current, routing) ? 'stop' : 'retry'
+    meta.stillRejected = true
+    const next = rest.length
+      ? `The task finishes when the ${plural(rest.length, 'other attempt')} the passed review covered ${rest.length === 1 ? 'is' : 'are'} counted.`
+      : meta.outcome === 'stop'
+        ? 'The task stays stopped: report it to the user.'
+        : `Retry with that review's notes (${implementerFor(current.tier)}).`
+    message = `Task ${task}: its review already rejected this ${tier} attempt, so its failing gate is not a second failure. ${next}`
   } else if (status === 'pass' && reviewed) {
     const rest = covers.filter((item) => item !== id)
     if (rest.length) {
