@@ -815,6 +815,20 @@ test('command evidence that passes is discarded', () => {
   assert.equal(out.blocking.length, 0)
 })
 
+test('a command finding runs under the gate lock, and a busy lock leaves it blocking and unrun', () => {
+  const finding = { ...FIELDS, evidence: 'command', command: 'node --test t/a.test.mjs' }
+  const held = scripted({ code: 0 })
+  const taken = []
+  const out = judge(finding, held.run, { lock: (waitS) => (taken.push(waitS), () => taken.push('released')) })
+  assert.equal(held.calls.length, 1)
+  assert.equal(out.discarded.length, 1)
+  assert.deepEqual(taken.slice(1), ['released'], 'the lock is taken once and released')
+  const busy = scripted({ code: 0 })
+  const blocked = judge(finding, busy.run, { lock: () => null })
+  assert.equal(busy.calls.length, 0, 'nothing runs without the lock')
+  assert.equal(blocked.blocking.length, 1)
+})
+
 test('command evidence that fails blocks, once', () => {
   const { run, calls } = scripted({ code: 1 })
   const out = judge({ ...FIELDS, evidence: 'command', command: 'node --test t/a.test.mjs' }, run)

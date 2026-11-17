@@ -509,7 +509,7 @@ export function gateFailure(gate) {
 
 /** A command line the gate did not run: not a `none` declaration, not a missing project dir, not a command that ran and changed the tree. */
 function notRerun(item) {
-  return Boolean(item.raw) && !/^none\b/.test(item.raw) && !String(item.reason).startsWith(TREE_CHANGED)
+  return Boolean(item.raw) && !item.ran && !/^none\b/.test(item.raw) && !String(item.reason).startsWith(TREE_CHANGED)
 }
 
 /** The gate lines, one per fact; commands join with '; ' since a command never holds one. */
@@ -637,10 +637,28 @@ function commandFails(finding, { allow, detected, projectDir, timeoutS }, budget
 }
 
 /** Splits findings by what the hook can check; only blocking ones with evidence that holds stay blocking. */
-export function judgeFindings(findings, { specText, allow, detected = [], projectDir, timeoutS, budgetS, run = runCommand }) {
+export function judgeFindings(findings, { specText, allow, detected = [], projectDir, timeoutS, budgetS, run = runCommand, lock = null }) {
   const judged = { blocking: [], discarded: [], notes: [], invalid: [] }
   const budget = { remaining: budgetS }
   const spec = new Set(String(specText || '').split(/\r?\n/).map(criterionKey).filter(Boolean))
+  // The same gate lock as a writer's checks, taken before the first command: two runs on the same tree or test data must not overlap.
+  let release
+  const locked = () => {
+    if (release === undefined) {
+      const started = Date.now()
+      release = lock ? lock(budget.remaining) : () => {}
+      budget.remaining -= (Date.now() - started) / 1000
+    }
+    return release
+  }
+  try {
+    judgeEach()
+  } finally {
+    release?.()
+  }
+  return judged
+
+  function judgeEach() {
   for (const finding of findings) {
     if (!finding.valid) judged.invalid.push(finding)
     else if (!isBlocking(finding.severity)) judged.notes.push(finding)
@@ -650,12 +668,13 @@ export function judgeFindings(findings, { specText, allow, detected = [], projec
       if (spec.has(criterionKey(finding.criterion))) judged.blocking.push(finding)
       else judged.invalid.push({ ...finding, valid: false, problem: spec.size ? 'criterion not in the spec block' : 'no spec block to cover' })
     } else if (finding.evidence === 'command') {
-      const fails = commandFails(finding, { allow, detected, projectDir, timeoutS }, budget, run)
+      // A busy lock leaves the command unchecked, so the finding keeps blocking.
+      const fails = locked() ? commandFails(finding, { allow, detected, projectDir, timeoutS }, budget, run) : null
       if (fails === false) judged.discarded.push(finding)
       else judged.blocking.push(finding)
     } else judged.blocking.push(finding)
   }
-  return judged
+  }
 }
 
 /** The two review lines, plus the notes list. */

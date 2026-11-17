@@ -25,6 +25,8 @@ async function main(payload) {
     dropAwaiting,
     peekAwaiting,
     peekParked,
+    holdParked,
+    excuseSharedTree,
     prepareParked,
     redoFromPrompt,
     releaseIdleWriters,
@@ -48,12 +50,13 @@ async function main(payload) {
     if (message || title) process.stdout.write(`${JSON.stringify(hookOutput('UserPromptSubmit', message, title))}\n`)
     return
   }
-  const { asks, awaiting, given, peeks, pending } = withSession(ctx, payload, (state) => {
+  const { asks, awaiting, given, held, peeks, pending } = withSession(ctx, payload, (state) => {
     releaseIdleWriters(state)
-    const parked = peekAwaiting(state)
-    return { ...reviewVerdictAsks(state), awaiting: parked, peeks: peekParked(state, parked), pending: takePending(state) }
+    const held = holdParked(state, peekAwaiting(state))
+    return { ...reviewVerdictAsks(state), awaiting: held.gate, held, peeks: peekParked(state, held.gate), pending: takePending(state) }
   })
-  const prepared = prepareParked(ctx, awaiting, payload, { peeks })
+  // A check that failed after another task wrote in the tree, or while one still writes, is not this attempt's alone.
+  const prepared = prepareParked(ctx, awaiting, payload, { peeks }).map((event) => excuseSharedTree(event, [...(held.changed.get(event.id) || []), ...(peeks.get(event.id)?.writing || [])]))
   // The second scan may count a new trailer; its message goes out with the gated ones. Only the counted ids leave the parked list.
   const gated = prepared.length
     ? withSession(ctx, payload, (state) => {
@@ -62,7 +65,7 @@ async function main(payload) {
         return [takePending(state), ...messages]
       })
     : []
-  const message = [pending, ...gated, ...asks, ...given].filter(Boolean).join('\n\n')
+  const message = [pending, ...gated, ...held.notes, ...asks, ...given].filter(Boolean).join('\n\n')
   if (!message) return
   // A review waiting for its verdict blocks even while a stop hook already continues Claude: the ask count, not stop_hook_active, bounds it.
   // An ask that ran out, with nothing else to say, only tells the user.

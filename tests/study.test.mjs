@@ -366,6 +366,16 @@ test('final-gate: a CC_TIERS_VERIFY line of the prompt that fails is a failed re
     assert.match(none, /Checks run 0/)
   }))
 
+test('final-gate: a check of its prompt that fails on the environment is not counted, as for a writer', () =>
+  inTemp(async (dir) => {
+    writeFileSync(path.join(dir, 'ok.mjs'), "console.error('Error: connect ECONNREFUSED 127.0.0.1:5432')\nprocess.exit(1)\n")
+    const routing = finalRouting()
+    const state = tiers.emptyState('s')
+    const message = report(dir, routing, state, 'g1', 'reviewer', trailer('final-gate', 'pass'), finalPrompt())
+    assert.match(message, /failed on the environment, not the code/)
+    assert.equal(state.tasks['final-gate']?.failures?.length || 0, 0)
+  }))
+
 test('final-gate: a gate that fails stays a failure when the review carries only non-blocking findings', () =>
   inTemp(async (dir) => {
     writeFileSync(path.join(dir, 'ok.mjs'), 'process.exit(1)\n')

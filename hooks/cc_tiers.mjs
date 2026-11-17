@@ -1639,7 +1639,7 @@ export function applyEvent(state, event, routing) {
   meta.tier = tier
 
   // A check that failed on the environment (a confirmed machine error, no failed assertion) is not the code's fault.
-  if (status === 'fail' && meta.gate?.status === 'fail' && !REVIEW_ROLES.has(role)) {
+  if (status === 'fail' && meta.gate?.status === 'fail' && (!REVIEW_ROLES.has(role) || finalGated)) {
     const diagnosis = diagnoseFailure({ reason: gateReason, detail: gateDetail, source: 'gate', previous: current.diagnoses || [] })
     const skipped = Number(current.infra) || 0
     // A package the manifest declares but the tree lacks is the environment's; one it does not declare is the writer's own import.
@@ -1934,7 +1934,7 @@ function finishTask(state, task, routing, { reviewed, tier }) {
   const line =
     `cc-tiers completion: ${task} ${result.status} on ${tier}${after}, ${risk} risk; confidence ${result.confidence.level} (${result.confidence.reasons.join('; ')}). ` +
     `Checks run ${checks.run}${reused}, passed ${checks.passed}, failed ${checks.failed}, not run ${checks.notRun}.${criteriaPart}${remaining}`
-  const finished = { result: { status: result.status, confidence: result.confidence.level, risk }, line: criteria.length ? `${line}\n${criteriaTable(task, criteria)}` : line }
+  const finished = { at: Date.now(), result: { status: result.status, confidence: result.confidence.level, risk }, line: criteria.length ? `${line}\n${criteriaTable(task, criteria)}` : line }
   const completions = state.completions && typeof state.completions === 'object' ? state.completions : (state.completions = {})
   completions[task] = finished
   const names = Object.keys(completions)
@@ -3567,7 +3567,7 @@ export function prepareReport(ctx, event, payload = {}, { budgetS = ctx.routing.
   const status = ((REVIEW_ROLES.has(event.role) ? reported.STATUS : headers.STATUS) || '').toLowerCase()
   const projectDir = ctx.projectDir || String(payload.cwd || '')
   if (REVIEW_ROLES.has(event.role)) {
-    const reviewed = routing.reviewEvidence ? prepareReview(routing, event, status, projectDir, budgetS) : event
+    const reviewed = routing.reviewEvidence ? prepareReview(routing, event, status, projectDir, budgetS, gateLock(ctx.dataDir, projectDir)) : event
     // final-gate has no writer report: the CC_TIERS_VERIFY lines of its own prompt are what the gate runs, never those of a prompt written for another task.
     const reportedTask = slug(reported.TASK || '')
     if (slug(parseHeaders(event.prompt || '').TASK || '') !== FINAL_GATE || (reportedTask && reportedTask !== FINAL_GATE) || status !== 'pass') return reviewed
@@ -3709,11 +3709,11 @@ export function releaseIdleWriters(state) {
 }
 
 /** A reviewer fail, or a report with no verdict, is judged finding by finding (commands run here, outside the lock); a pass only keeps its notes. */
-function prepareReview(routing, event, status, projectDir, budgetS) {
+function prepareReview(routing, event, status, projectDir, budgetS, lock = null) {
   let findings = parseFindings(event.text)
   if (status === 'pass') findings = findings.filter((f) => f.valid && !isBlocking(f.severity))
   if (!findings.length && status === 'pass') return event
-  const options = { allow: routing.verifyAllow, detected: detectedChecks(projectDir), projectDir, timeoutS: routing.verifyTimeout, budgetS }
+  const options = { allow: routing.verifyAllow, detected: detectedChecks(projectDir), projectDir, timeoutS: routing.verifyTimeout, budgetS, lock }
   // Nothing may run without a project dir: a command finding then stays blocking, unchecked.
   const judged = judgeFindings(findings, { ...options, specText: specText(event.prompt), run: projectDir ? undefined : () => ({ code: 1 }) })
   return { ...event, judged }
@@ -3866,6 +3866,59 @@ export function peekParked(state, parked) {
     const { snapshot, writing, cache } = peekFor(state, report)
     return [report.id, report.agent_id ? { snapshot, writing, cache } : { writing, cache }]
   }))
+}
+
+/**
+ * Sorts the parked reports before a Stop gates them. While a review this session launched still runs in the background, none is gated:
+ * it may use the same test data, so a check run now could fail on its run. A report whose task finished after it was parked is dropped,
+ * its check not run again. For the rest, changed names the other tasks that wrote in the tree after it was parked.
+ */
+/** How long a background review with no report yet holds the parked checks: past it, the review is taken as lost. */
+const HOLD_FOR_REVIEW_MS = 3 * 60 * 60 * 1000
+
+export function holdParked(state, parked) {
+  // A review whose hand-back row is already parked has finished; only one with no report yet still runs, and one launched hours ago is taken as lost.
+  const handedBack = new Set(parked.map((report) => report.agent_id).filter(Boolean))
+  const running = ([id, launch]) => REVIEW_ROLES.has(launch?.role) && !launch?.stops && !handedBack.has(id) && Date.now() - (Number(launch?.at) || 0) < HOLD_FOR_REVIEW_MS
+  const reviews = Object.entries(state.background || {}).filter(running).map(([id]) => id)
+  const taskOf = (report) => slug(parseHeaders(report?.text || '').TASK || '')
+  if (reviews.length && parked.length) {
+    const tasks = [...new Set(parked.map(taskOf).filter(Boolean))]
+    return { gate: [], changed: new Map(), notes: [`cc-tiers gate: ${tasks.join(', ')} waits: a review (${reviews.join(', ')}) is still running in this tree and may use the same test data; the check runs at a later Stop.`] }
+  }
+  const gate = []
+  const notes = []
+  const changed = new Map()
+  for (const report of parked) {
+    const task = taskOf(report)
+    const at = Number(report.parkedAt) || 0
+    if (at && task && !own(state.tasks, task) && Number(own(state.completions, task)?.at) > at) {
+      notes.push(`cc-tiers gate: ${task} finished after this report was parked; its check was not run again.`)
+      dropAwaiting(state, [report.id])
+      state.seen = [...(state.seen || []), report.id].slice(-MAX_SEEN)
+      continue
+    }
+    gate.push(report)
+    if (!at) continue
+    // Only a writer's or the session's own attempt writes in the tree; a review handed back later wrote nothing.
+    const writes = (other) => WRITER_ROLES.has(other.role) || SESSION_ROLES.has(other.role || 'orchestrator')
+    const later = parked.filter((other) => taskOf(other) !== task && Number(other.parkedAt) > at && writes(other)).map(taskOf)
+    const wrote = Object.entries(state.writtenAt || {}).filter(([name, time]) => name !== task && Number(time) > at).map(([name]) => name)
+    changed.set(report.id, [...later, ...wrote].filter(Boolean))
+  }
+  return { gate, changed, notes }
+}
+
+/** A failed check after other tasks wrote in the same tree is theirs as much as this attempt's: not validated, not counted. */
+export function excuseSharedTree(event, names) {
+  const gate = event?.gate
+  const others = [...new Set(names || [])]
+  if (!others.length || gate?.status !== 'fail' || !gate.failure) return event
+  const { raw, code } = gate.failure
+  const reason = `the tree changed under ${others.join(', ')} after this attempt: ${raw} failed (exit ${code ?? 'none'})`
+  const excused = { ...gate, failure: null, unverified: [...gate.unverified, { raw, reason, ran: true }] }
+  excused.status = gateFailure(excused) ? 'fail' : excused.verified.length ? 'pass' : 'unverified'
+  return { ...event, gate: excused }
 }
 
 export function queueMessage(state, message) {
@@ -4068,6 +4121,9 @@ export function logReport(state, meta, mode = '') {
     return
   }
   const writer = WRITER_ROLES.has(meta.role) || SESSION_ROLES.has(meta.role)
+  // When each task last wrote in the tree, so a check parked before another task's write can tell that write from its own.
+  // A writer in its own worktree wrote in another tree.
+  if (writer && !own(state.active, meta.task)?.isolated) state.writtenAt = Object.fromEntries([...Object.entries(state.writtenAt || {}).filter(([name]) => name !== meta.task), [meta.task, Date.now()]].slice(-MAX_LOG))
   if (writer) {
     entry.attempts += 1
     if (mode && !entry.writer) entry.writer = mode

@@ -2770,6 +2770,79 @@ test('Stop skips the tree check while a background writer still runs', async () 
   }
 })
 
+/** A Stop on a preset session state: the ceiling pass of users-pagination is parked from the transcript, then gated (or not). */
+async function stopOnState(preset, verify = 'node fail.mjs') {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-'))
+  const project = ceilingProject(dir)
+  const env = hookEnv(dir, { CC_TIERS_CC_COST: '0', CLAUDE_PLUGIN_OPTION_VERIFY_ALLOW: verify })
+  const transcript = path.join(dir, 'main.jsonl')
+  writeFileSync(transcript, `${assistantRow('claude-opus-4-5', { input_tokens: 5 }, [{ type: 'text', text: CEILING('pass', `\nCC_TIERS_VERIFY: ${verify}`) }], { id: 'm1', uuid: 'u1' })}\n`)
+  const state = { ...tiers.emptyState('sess-1'), ...preset }
+  mkdirSync(path.join(dir, 'data'), { recursive: true })
+  writeFileSync(path.join(dir, 'data', 'session-sess-1.json'), JSON.stringify(state))
+  const proc = runHook('stop.mjs', { session_id: 'sess-1', hook_event_name: 'Stop', transcript_path: transcript, cwd: project, stop_hook_active: false }, env)
+  const after = JSON.parse(readFileSync(path.join(dir, 'data', 'session-sess-1.json'), 'utf8'))
+  await rm(dir, { recursive: true, force: true })
+  assert.equal(proc.status, 0, proc.stderr)
+  return { out: proc.stdout ? JSON.parse(proc.stdout) : {}, state: after }
+}
+
+test('Stop holds the parked checks while a background review runs in the same tree, without blocking', async () => {
+  const review = { 'agent-r': { role: 'reviewer', prompt: 'CC_TIERS_TASK: other-task\nReview the diff.', tool_use_id: 'r1', at: Date.now() } }
+  const { out, state } = await stopOnState({ background: review })
+  assert.equal(out.decision, undefined, 'holding the checks is not a reason to block')
+  assert.match(out.systemMessage, /cc-tiers gate: users-pagination waits: a review \(agent-r\) is still running in this tree/)
+  assert.equal(state.awaiting.length, 1, 'the report stays parked for the next Stop')
+  assert.equal(state.tasks['users-pagination'], undefined, 'nothing was counted')
+})
+
+test('Stop does not count a failing parked check when another task wrote in the tree after it was parked', async () => {
+  const { out, state } = await stopOnState({ writtenAt: { 'other-task': Date.now() + 60000 } })
+  const message = out.reason || out.systemMessage
+  assert.match(message, /cc-tiers gate: users-pagination not validated: the tree changed under other-task after this attempt: node fail\.mjs failed \(exit 1\)/)
+  assert.doesNotMatch(message, /not re-run/)
+  assert.equal(state.tasks['users-pagination']?.failures?.length || 0, 0)
+  const alone = await stopOnState({ writtenAt: { 'other-task': Date.now() - 60000 } })
+  assert.equal(alone.state.tasks['users-pagination'].failures.length, 1, 'a write before the attempt does not excuse it')
+})
+
+test('only another task that writes in the tree excuses a failing parked check: a review handed back later does not, a writer parked later does', async () => {
+  const later = (role, agent) => ({ id: `agent:${agent}`, agent_id: agent, role, prompt: 'CC_TIERS_TASK: other-task', text: `CC_TIERS_TASK: other-task\nCC_TIERS_ROLE: ${role}\nCC_TIERS_STATUS: pass\nCC_TIERS_REASON: ok`, parkedAt: Date.now() + 60000 })
+  const reviewed = await stopOnState({ awaiting: [later('reviewer', 'agent-o')] })
+  assert.equal(reviewed.state.tasks['users-pagination'].failures.length, 1, 'a reviewer writes nothing in the tree')
+  const written = await stopOnState({ awaiting: [later('implementer', 'agent-w')] })
+  assert.equal(written.state.tasks['users-pagination']?.failures?.length || 0, 0)
+  assert.match(written.out.reason || written.out.systemMessage, /the tree changed under other-task after this attempt/)
+})
+
+test('a writer in its own worktree does not count as a write in the shared tree', () => {
+  const state = tiers.emptyState('s')
+  state.active = { apart: { role: 'implementer', files: ['src/x.js'], isolated: true, since: Date.now() } }
+  tiers.logReport(state, { task: 'apart', role: 'implementer', tier: 'sonnet', outcome: 'review' })
+  assert.equal(state.writtenAt?.apart, undefined)
+  tiers.logReport(state, { task: 'shared', role: 'implementer', tier: 'sonnet', outcome: 'review' })
+  assert.ok(state.writtenAt.shared > 0)
+})
+
+test('Stop gates a rework parked after its task finished, and stops holding for a review launched hours ago', async () => {
+  const done = { 'users-pagination': { at: Date.now() - 60000, result: { status: 'verified' }, line: 'cc-tiers completion: users-pagination verified' } }
+  const rework = await stopOnState({ completions: done })
+  assert.equal(rework.state.tasks['users-pagination'].failures.length, 1, 'a report parked after the completion is a new attempt')
+  const lost = { 'agent-r': { role: 'reviewer', prompt: 'CC_TIERS_TASK: other-task', tool_use_id: 'r1', at: Date.now() - 4 * 60 * 60 * 1000 } }
+  const stale = await stopOnState({ background: lost })
+  assert.equal(stale.state.tasks['users-pagination'].failures.length, 1, 'a review launched hours ago no longer holds the check')
+})
+
+test('Stop drops the parked report of a task that finished after it was parked, without running its check again', async () => {
+  const completions = { 'users-pagination': { at: Date.now() + 60000, result: { status: 'verified' }, line: 'cc-tiers completion: users-pagination verified' } }
+  const { out, state } = await stopOnState({ completions })
+  const message = out.reason || out.systemMessage || ''
+  assert.match(message, /cc-tiers gate: users-pagination finished after this report was parked; its check was not run again/)
+  assert.doesNotMatch(message, /failed: node fail\.mjs/)
+  assert.deepEqual(state.awaiting, [])
+  assert.equal(state.tasks['users-pagination'], undefined)
+})
+
 test('a passing ceiling gate clears the counter', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-'))
   try {
