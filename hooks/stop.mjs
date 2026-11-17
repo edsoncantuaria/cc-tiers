@@ -8,7 +8,8 @@
  * parked by the scan, and the judgment of a background agent's hand-back row
  * (outside the session lock, the commands can take minutes)
  * and asks the orchestrator to continue once, so a retry or an escalation is
- * not dropped at the end of the turn.
+ * not dropped at the end of the turn. A review that still waits for its verdict
+ * keeps blocking, naming its agent, for up to 3 consecutive Stops.
  */
 
 import { runHook } from './integrity.mjs'
@@ -24,9 +25,12 @@ async function main(payload) {
     dropAwaiting,
     peekAwaiting,
     peekParked,
+    holdParked,
+    excuseSharedTree,
     prepareParked,
     redoFromPrompt,
     releaseIdleWriters,
+    reviewVerdictAsks,
     studyTitle,
     takePending,
     withSession,
@@ -46,12 +50,13 @@ async function main(payload) {
     if (message || title) process.stdout.write(`${JSON.stringify(hookOutput('UserPromptSubmit', message, title))}\n`)
     return
   }
-  const { awaiting, peeks, pending } = withSession(ctx, payload, (state) => {
+  const { asks, awaiting, given, held, peeks, pending } = withSession(ctx, payload, (state) => {
     releaseIdleWriters(state)
-    const parked = peekAwaiting(state)
-    return { awaiting: parked, peeks: peekParked(state, parked), pending: takePending(state) }
+    const held = holdParked(state, peekAwaiting(state))
+    return { ...reviewVerdictAsks(state), awaiting: held.gate, held, peeks: peekParked(state, held.gate), pending: takePending(state) }
   })
-  const prepared = prepareParked(ctx, awaiting, payload, { peeks })
+  // A check that failed after another task wrote in the tree, or while one still writes, is not this attempt's alone.
+  const prepared = prepareParked(ctx, awaiting, payload, { peeks }).map((event) => excuseSharedTree(event, [...(held.changed.get(event.id) || []), ...(peeks.get(event.id)?.writing || [])]))
   // The second scan may count a new trailer; its message goes out with the gated ones. Only the counted ids leave the parked list.
   const gated = prepared.length
     ? withSession(ctx, payload, (state) => {
@@ -60,13 +65,13 @@ async function main(payload) {
         return [takePending(state), ...messages]
       })
     : []
-  const message = [pending, ...gated].filter(Boolean).join('\n\n')
+  const message = [pending, ...gated, ...held.notes, ...asks, ...given].filter(Boolean).join('\n\n')
   if (!message) return
-  if (payload.stop_hook_active === true) {
-    process.stdout.write(`${JSON.stringify({ systemMessage: message })}\n`)
-    return
-  }
-  process.stdout.write(`${JSON.stringify({ decision: 'block', reason: message })}\n`)
+  // A review waiting for its verdict blocks even while a stop hook already continues Claude: the ask count, not stop_hook_active, bounds it.
+  // An ask that ran out, with nothing else to say, only tells the user.
+  const quiet = payload.stop_hook_active === true || ![pending, ...gated].some(Boolean)
+  const output = !asks.length && quiet ? { systemMessage: message } : { decision: 'block', reason: message }
+  process.stdout.write(`${JSON.stringify(output)}\n`)
 }
 
 runHook('stop', main, (note, payload) => {

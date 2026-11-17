@@ -14,7 +14,7 @@
   "failureResearchMax": 1,
   "specify": true,
   "verify": true,
-  "verifyAllow": "npm test, npm run test, node --test, npx tsc, npx eslint, npx vitest, npx jest, npx playwright test, vendor/bin/phpunit, ./vendor/bin/phpunit, vendor/bin/phpstan, ./vendor/bin/phpstan, vendor/bin/phpcs, ./vendor/bin/phpcs, pytest, python -m pytest, go test, cargo test",
+  "verifyAllow": "npm test, npm run test, node --test, npx tsc, npx eslint, npx vitest, npx jest, npx playwright test, vendor/bin/phpunit, ./vendor/bin/phpunit, vendor/bin/phpstan, ./vendor/bin/phpstan, vendor/bin/phpcs, ./vendor/bin/phpcs, pytest, python -m pytest, go test, cargo test, wc -l, grep -c, git diff --name-only, git diff --stat, git status --short",
   "verifyTimeout": 300,
   "verifyBudget": 600,
   "reviewEvidence": true,

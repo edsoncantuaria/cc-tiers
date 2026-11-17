@@ -653,3 +653,29 @@ test('evaluateCriteria: a repro matches its passes-now command and its REPRO lin
   const crossed = contract.evaluateCriteria(contract.parseContract('Repro:\n- `cd a && node --test`'), { verified: ['cd a && node --test'], repro: contract.parseReproLines('CC_TIERS_REPRO: `cd b && node --test` - failed'), reviewPassed: true })[0]
   assert.equal(crossed.state, 'pending', 'a REPRO line for another dir is not the failure before')
 })
+
+test('parseCriterionReports reads the separators, a bullet and backticks, and unreadCriterionLines names the rest', () => {
+  const text = [
+    'CC_TIERS_CRITERION: C1 pass — long dash',
+    'CC_TIERS_CRITERION: C2 pass – en dash',
+    'CC_TIERS_CRITERION: C3 fail: with colon',
+    'CC_TIERS_CRITERION: C4 pass (ran `npm test`)',
+    '- CC_TIERS_CRITERION: C5 pass - bullet',
+    '`CC_TIERS_CRITERION: C6 na - backticked`',
+    '- `CC_TIERS_CRITERION: C7 pass - both`',
+    'CC_TIERS_CRITERION: C8 pass - ran `npm test`',
+  ].join('\n')
+  assert.deepEqual(contract.parseCriterionReports(text).map((r) => [r.id, r.state, r.evidence]), [
+    ['C1', 'pass', 'long dash'],
+    ['C2', 'pass', 'en dash'],
+    ['C3', 'fail', 'with colon'],
+    ['C4', 'pass', 'ran `npm test`'],
+    ['C5', 'pass', 'bullet'],
+    ['C6', 'na', 'backticked'],
+    ['C7', 'pass', 'both'],
+    ['C8', 'pass', 'ran `npm test`'],
+  ])
+  assert.deepEqual(contract.unreadCriterionLines(text), [])
+  const bad = 'CC_TIERS_CRITERION: C1 passed it\n- CC_TIERS_CRITERION: C2 na\nCC_TIERS_CRITERION lines are listed above\nCC_TIERS_CRITERION: C3 pass - fine'
+  assert.deepEqual(contract.unreadCriterionLines(bad), ['CC_TIERS_CRITERION: C1 passed it', '- CC_TIERS_CRITERION: C2 na'])
+})

@@ -7,7 +7,7 @@
 
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { readFileSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { TIERS } from './base.mjs'
 
@@ -15,6 +15,9 @@ const GIT_TIMEOUT_MS = 5000
 export const MAX_FILES = 400
 /** Files larger than this are fingerprinted by size and mtime instead of content. */
 const HASH_LIMIT = 5 * 1024 * 1024
+
+/** The project's own settings: its verifyAllow widens what the gate may run, and git stops listing it once it is in .git/info/exclude. */
+export const PROJECT_FILE = '.claude/cc-tiers.json'
 
 /** Patterns of files a task should not touch without saying so: secrets, CI, lockfiles, agent config. */
 const SENSITIVE = [
@@ -27,11 +30,12 @@ const SENSITIVE = [
   [/(^|\/)\.gitlab-ci\.yml$|(^|\/)Jenkinsfile$/i, 'CI pipeline'],
   [/(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|composer\.lock|poetry\.lock|Cargo\.lock|go\.sum)$/i, 'lockfile'],
   [/(^|\/)\.claude\/(settings[^/]*\.json|hooks\/)/i, 'Claude Code settings'],
+  [/(^|\/)\.claude\/cc-tiers\.json$/i, 'cc-tiers project settings'],
   [/(^|\/)\.git\//, 'git internals'],
   [/(^|\/)(Dockerfile|docker-compose[^/]*\.ya?ml)$/i, 'container config'],
 ]
 
-function git(dir, args) {
+export function git(dir, args) {
   if (!dir) return null
   try {
     const result = spawnSync('git', args, { cwd: dir, encoding: 'utf8', timeout: GIT_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })
@@ -80,7 +84,7 @@ function contentHash(dir, file) {
 /**
  * { files, hashes, truncated, root } for every file that differs from HEAD or is untracked,
  * hashing the working-tree content, so a second edit to an already dirty file
- * (tracked or not) shows up. null outside a git repo.
+ * (tracked or not) shows up, plus the project's settings file whenever it exists, excluded or not. null outside a git repo.
  */
 export function workspaceSnapshot(dir, run = git) {
   const status = run(dir, ['status', '--porcelain=v1', '-z', '--untracked-files=all'])
@@ -88,6 +92,8 @@ export function workspaceSnapshot(dir, run = git) {
   // Porcelain paths are relative to the repo root, whatever the cwd inside the repo.
   const root = String(run(dir, ['rev-parse', '--show-toplevel']) ?? '').trim() || dir
   const { files, truncated } = parsePorcelainZ(status)
+  const settings = path.relative(root, path.join(dir, PROJECT_FILE)).split(path.sep).join('/')
+  if (!files.includes(settings) && existsSync(path.join(dir, PROJECT_FILE))) files.push(settings)
   const hashes = {}
   for (const file of files) hashes[file] = contentHash(root, file)
   return { files, hashes, truncated, root }

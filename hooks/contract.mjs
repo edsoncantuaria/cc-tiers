@@ -27,7 +27,7 @@ const BARE_BULLET_RE = /^(?:[-*•]|\d+\.)\s*/
 const ORIGIN_RE = /\s*\((?:request|user|repo|docs|decided)(?::.*)?\)\s*$/i
 const ORIGIN_TAG_RE = /\((?:request|user|repo|docs|decided)(?::[^)]*)?\)/gi
 const CHECK_RE = /`([^`]+)`/
-const REPORT_RE = /^CC_TIERS_CRITERION:\s*(C\d+)\s+(pass|fail|unverifiable|na)(?:\s+-\s+(.*?))?\s*$/i
+const REPORT_RE = /^CC_TIERS_CRITERION:\s*(C\d+)\s+(pass|fail|unverifiable|na)(?:\s+[-–—]\s+(.*?)|\s*:\s+(.*?)|\s*\((.+)\))?\s*$/i
 const REPRO_RE = /^CC_TIERS_REPRO:\s*(?:`([^`]*\S[^`]*)`|none)\s+-\s+(\S.*?)\s*$/i
 const RISK_RANK = { low: 0, medium: 1, high: 2, critical: 3 }
 
@@ -73,18 +73,38 @@ export function weakenedCriteria(previous, next) {
   return (previous?.criteria || []).filter((criterion) => criterion.mandatory && !kept.has(criterionKey(criterion.text)))
 }
 
-/** Every valid CC_TIERS_CRITERION line; na and unverifiable need a reason, and the last line per id wins. */
+/** A line without its bullet and the backticks that wrap all of it. */
+function unwrapLine(line) {
+  const bare = line.trim().replace(BULLET_RE, '')
+  return bare.length > 1 && bare.startsWith('`') && bare.endsWith('`') ? bare.slice(1, -1).trim() : bare
+}
+
+/** The state and evidence of one CC_TIERS_CRITERION line, behind a bullet or inside backticks; na and unverifiable need a reason. Null when it does not read. */
+function readCriterionLine(line) {
+  const match = REPORT_RE.exec(unwrapLine(line))
+  if (!match) return null
+  const state = match[2].toLowerCase()
+  const evidence = match[3] ?? match[4] ?? match[5] ?? ''
+  if ((state === 'na' || state === 'unverifiable') && !evidence) return null
+  return { id: match[1].toUpperCase(), state, evidence }
+}
+
+/** Every valid CC_TIERS_CRITERION line, the last line per id winning. */
 export function parseCriterionReports(text) {
   const reports = new Map()
   for (const line of String(text || '').split(/\r?\n/)) {
-    const match = REPORT_RE.exec(line.trim())
-    if (!match) continue
-    const state = match[2].toLowerCase()
-    const evidence = match[3] || ''
-    if ((state === 'na' || state === 'unverifiable') && !evidence) continue
-    reports.set(match[1].toUpperCase(), { id: match[1].toUpperCase(), state, evidence })
+    const report = readCriterionLine(line)
+    if (report) reports.set(report.id, report)
   }
   return [...reports.values()]
+}
+
+/** The CC_TIERS_CRITERION lines parseCriterionReports drops, so the writer can be told which one to fix. */
+export function unreadCriterionLines(text) {
+  return String(text || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /^CC_TIERS_CRITERION:/i.test(unwrapLine(line)) && !readCriterionLine(line))
 }
 
 /** Every CC_TIERS_REPRO line with evidence: how a command failed before the fix, or command '' for `none - <reason>`; the last line per command wins. */

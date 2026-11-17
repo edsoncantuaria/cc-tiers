@@ -9,9 +9,10 @@ const { FAILURE_CATEGORIES, declaresPackage, diagnoseFailure, failureResearchLin
 const fromDetail = (detail) => diagnoseFailure({ detail })
 const fromReason = (reason) => diagnoseFailure({ reason })
 
-test('exports the sixteen categories (changed: data was added)', () => {
-  assert.equal(FAILURE_CATEGORIES.length, 16)
+test('exports the seventeen categories (changed: coverage was added)', () => {
+  assert.equal(FAILURE_CATEGORIES.length, 17)
   assert.ok(FAILURE_CATEGORIES.includes('data'))
+  assert.ok(FAILURE_CATEGORIES.includes('coverage'))
   assert.equal(FAILURE_CATEGORIES.at(-1), 'unknown')
 })
 
@@ -51,6 +52,9 @@ const DETAIL_CASES = [
   ['infra', 'flock: Resource temporarily unavailable'],
   ['infra', 'rsync: device or resource busy'],
   ['infra', 'another run holds the lock on the fixtures'],
+  ['infra', 'SQLSTATE[40001]: Serialization failure: 1213 Deadlock found when trying to get lock; try restarting transaction'],
+  ['infra', 'SQLSTATE[HY000]: General error: 1205 Lock wait timeout exceeded; try restarting transaction'],
+  ['infra', 'SQLSTATE[HY000] [2002] Connection refused'],
   ['flaky', 'test is flaky, passed on retry'],
   ['regression', 'regression: login test now fails'],
   ['regression', 'previously passing test'],
@@ -186,6 +190,32 @@ test('an unknown review category falls back to the text', () => {
   assert.equal(diagnosis.confirmed, false)
 })
 
+test('a review rejection for a missing test is coverage, confirmed by the review, and the web cannot explain it', () => {
+  const diagnosis = diagnoseFailure({ source: 'review', reviewCategory: 'correctness', reviewEvidence: 'coverage', reason: 'correctness @ src/a.js:1: the slot is freed' })
+  assert.equal(diagnosis.category, 'coverage')
+  assert.equal(diagnosis.confirmed, true)
+  assert.equal(diagnosis.source, 'review')
+  assert.deepEqual(failureResearchLines(diagnosis), [])
+  assert.equal(nextAction(diagnosis, { tier: 'sonnet', attemptsLeft: 1 }).action, 'retry')
+  assert.match(nextAction(diagnosis, { tier: 'sonnet', attemptsLeft: 1 }).note, /write the missing test for that criterion/i)
+})
+
+test('coverage outranks the review category and the text, but only for a review', () => {
+  const reason = 'security @ src/a.js:1: assertion failing'
+  assert.equal(diagnoseFailure({ source: 'review', reviewCategory: 'security', reviewEvidence: 'coverage', reason }).category, 'coverage')
+  assert.equal(diagnoseFailure({ source: 'gate', reviewCategory: 'security', reviewEvidence: 'coverage', detail: 'FAIL a.test.mjs' }).category, 'test')
+})
+
+test('a review rejection backed by a trace or a command keeps the category mapping', () => {
+  for (const reviewEvidence of ['trace', 'command', '']) {
+    for (const [reviewCategory, category] of REVIEW_CASES) {
+      const diagnosis = diagnoseFailure({ source: 'review', reviewCategory, reviewEvidence, reason: 'the reviewer disagrees' })
+      assert.equal(diagnosis.category, category, `${reviewCategory} ${reviewEvidence}`)
+      assert.equal(diagnosis.source, 'review')
+    }
+  }
+})
+
 test('review category is ignored outside a review', () => {
   const diagnosis = diagnoseFailure({ source: 'gate', reviewCategory: 'security', detail: 'FAIL a.test.mjs' })
   assert.equal(diagnosis.category, 'test')
@@ -270,6 +300,7 @@ test('nextAction maps each category', () => {
     integration: 'retry',
     scope: 'retry',
     data: 'retry',
+    coverage: 'retry',
     unverifiable: 'report-partial',
     unknown: 'retry',
   }
@@ -400,6 +431,24 @@ test('an application error that says in use or already running stays a test fail
     assert.equal(diagnosis.category, 'test', detail)
     assert.equal(diagnosis.confirmed, true, detail)
   }
+})
+
+// PHPUnit's summary line says Assertions: even when a database collision, not an assertion, broke the test.
+test('a database collision in PHPUnit output is infra, confirmed, and a duplicate key alone stays as it was', () => {
+  const summary = '\n\nTests: 12, Assertions: 30, Errors: 1.'
+  for (const error of [
+    'Illuminate\\Database\\QueryException: SQLSTATE[40001]: Serialization failure: 1213 Deadlock found when trying to get lock; try restarting transaction',
+    'Illuminate\\Database\\QueryException: SQLSTATE[HY000]: General error: 1205 Lock wait timeout exceeded; try restarting transaction',
+    'Illuminate\\Database\\QueryException: SQLSTATE[HY000] [2002] Connection refused (SQL: select 1)',
+  ]) {
+    const diagnosis = fromDetail(`1) FooTest::test_bar\n${error}${summary}`)
+    assert.equal(diagnosis.category, 'infra', error)
+    assert.equal(diagnosis.confirmed, true, error)
+    assert.equal(nextAction(diagnosis, { tier: 'sonnet' }).action, 'rerun-env')
+  }
+  const duplicate = "Illuminate\\Database\\QueryException: SQLSTATE[23000]: Integrity constraint violation: 1062 Duplicate entry 'a@b.c' for key 'users.email'"
+  assert.equal(fromDetail(duplicate).category, 'unknown')
+  assert.equal(fromDetail(duplicate + summary).category, 'test')
 })
 
 test('a connection refusal with no assertion line is infra, confirmed', () => {

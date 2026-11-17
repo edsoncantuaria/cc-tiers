@@ -112,7 +112,7 @@ test('required files are present and Python hooks are gone', () => {
 test('manifest declares the 0.5.0 knobs', () => {
   const manifest = JSON.parse(readFileSync(path.join(ROOT, '.claude-plugin/plugin.json'), 'utf8'))
   assert.equal(manifest.name, 'cc-tiers')
-  assert.equal(manifest.version, '0.13.4')
+  assert.equal(manifest.version, '0.13.6')
   assert.equal(JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version, manifest.version)
   assert.equal(/\s|@|:|\/|\\/.test(manifest.name), false)
   assert.equal(RESERVED_PREFIXES.some((prefix) => manifest.name.startsWith(prefix)), false)
@@ -939,6 +939,170 @@ test('the history file goes in .git/info/exclude, not the tracked .gitignore', a
   }
 })
 
+test('a project file present when the session begins is kept out of git through .git/info/exclude, never .gitignore; one created during the session stays visible and is flagged', async () => {
+  const ws = await import(pathToFileURL(path.join(ROOT, 'hooks', 'workspace.mjs')).href)
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const routing = tiers.mergeRouting(tiers.loadJson(path.join(ROOT, 'config/routing.default.json')), null, {})
+    const settings = (project) => path.join(project, '.claude', 'cc-tiers.json')
+    const exclude = (project) => (existsSync(path.join(project, '.git', 'info', 'exclude')) ? readFileSync(path.join(project, '.git', 'info', 'exclude'), 'utf8') : '')
+    const repo = (name, withFile) => {
+      const project = path.join(dir, name)
+      mkdirSync(path.join(project, '.claude'), { recursive: true })
+      writeFileSync(path.join(project, 'a.txt'), 'one\n')
+      spawnSync('git', ['init', '-q'], { cwd: project })
+      spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'init'], { cwd: project })
+      if (withFile) writeFileSync(settings(project), JSON.stringify({ verifyAllow: ['make check'] }))
+      return project
+    }
+    const open = (project, session) => {
+      const data = path.join(dir, `data-${session}`)
+      mkdirSync(data, { recursive: true })
+      const ctx = { routing, projectDir: project, dataDir: data, file: path.join(data, `session-${session}.json`), sessionId: session, env: {} }
+      return tiers.withSession(ctx, {}, (state) => state.projectFile)
+    }
+
+    const before = repo('before', true)
+    open(before, 's1')
+    assert.ok(exclude(before).split('\n').includes('/.claude/cc-tiers.json'), 'present at session start: excluded')
+    assert.equal(existsSync(path.join(before, '.gitignore')), false)
+    assert.equal(spawnSync('git', ['status', '--porcelain', '-u', '--', '.claude'], { cwd: before, encoding: 'utf8' }).stdout, '')
+
+    const during = repo('during', false)
+    open(during, 's2')
+    const snapshot = ws.workspaceSnapshot(during)
+    writeFileSync(path.join(during, 'a.txt'), 'two\n')
+    writeFileSync(settings(during), JSON.stringify({ verifyAllow: ['bash'] }))
+    open(during, 's2')
+    assert.equal(exclude(during).includes('cc-tiers.json'), false, 'created during the session: not excluded')
+    assert.match(spawnSync('git', ['status', '--porcelain', '-u'], { cwd: during, encoding: 'utf8' }).stdout, /\.claude\/cc-tiers\.json/)
+    const changed = ws.attemptChanges(snapshot, ws.workspaceSnapshot(during))
+    assert.ok(changed.includes('.claude/cc-tiers.json'), JSON.stringify(changed))
+    assert.deepEqual(ws.sensitiveFiles(changed).map((item) => item.file), ['.claude/cc-tiers.json'])
+
+    const edited = repo('edited', true)
+    open(edited, 's3')
+    const quiet = ws.workspaceSnapshot(edited)
+    writeFileSync(settings(edited), JSON.stringify({ verifyAllow: ['make check', 'bash'] }))
+    assert.ok(ws.attemptChanges(quiet, ws.workspaceSnapshot(edited)).includes('.claude/cc-tiers.json'), 'an edit to an excluded file still shows in the attempt')
+
+    const tracked = repo('tracked', true)
+    spawnSync('git', ['add', '.claude/cc-tiers.json'], { cwd: tracked })
+    open(tracked, 's4')
+    assert.equal(exclude(tracked).includes('cc-tiers.json'), false, "a tracked project file is the team's")
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the session context lists the project verifyAllow entries in effect', () => {
+  const routing = tiers.mergeRouting(tiers.loadJson(path.join(ROOT, 'config/routing.default.json')), null, {})
+  const text = tiers.formatSessionContext(routing, 'present', { projectAllow: [['make', 'relatorio-qa'], ['wc', '-l']] })
+  assert.match(text, /Project verifyAllow in effect \(\.claude\/cc-tiers\.json, unchanged since this session began\): make relatorio-qa, wc -l\./)
+  assert.doesNotMatch(tiers.formatSessionContext(routing, 'present', {}), /Project verifyAllow in effect/)
+})
+
+test('the project file is excluded without asking git once the entry is there', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const project = path.join(dir, 'project')
+    mkdirSync(path.join(project, '.git'), { recursive: true })
+    const asked = []
+    const run = (cwd, args) => (asked.push(args), '')
+    assert.equal(tiers.ensureProjectFileIgnored(project, run), true)
+    assert.deepEqual(asked, [['ls-files', '--', '.claude/cc-tiers.json']])
+    asked.length = 0
+    assert.equal(tiers.ensureProjectFileIgnored(project, run), false)
+    assert.deepEqual(asked, [], 'no git call once the entry is in .git/info/exclude')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the project verifyAllow counts only as stamped when the session state was first opened, with a data dir and a peek that carries the stamp', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const routing = tiers.mergeRouting(tiers.loadJson(path.join(ROOT, 'config/routing.default.json')), null, {})
+    const settings = path.join(dir, '.claude', 'cc-tiers.json')
+    mkdirSync(path.dirname(settings), { recursive: true })
+    const write = (value) => writeFileSync(settings, JSON.stringify({ verifyAllow: value }))
+    const has = (result) => result.allow.some((entry) => entry.join(' ') === 'echo')
+    const ctx = { routing, projectDir: dir, dataDir: path.join(dir, 'data') }
+
+    assert.equal(tiers.projectFileStamp(dir), 'none')
+    write(['echo'])
+    const stamp = tiers.projectFileStamp(dir)
+    assert.equal(has(tiers.trustedAllow(ctx, { projectFile: stamp }, dir)), true, 'unchanged since the stamp')
+    assert.equal(tiers.trustedAllow(ctx, { projectFile: stamp }, dir).note, '')
+
+    const created = tiers.trustedAllow(ctx, { projectFile: 'none' }, dir)
+    assert.equal(has(created), false, 'created after the stamp')
+    assert.match(created.note, /changed since cc-tiers first read it in this session/)
+    assert.equal(has(tiers.trustedAllow(ctx, null, dir)), false, 'no peek, no stamp to compare')
+    assert.equal(has(tiers.trustedAllow({ ...ctx, dataDir: '' }, { projectFile: stamp }, dir)), false, 'no data dir keeps no stamp')
+
+    write(['echo', 'curl'])
+    assert.equal(has(tiers.trustedAllow(ctx, { projectFile: stamp }, dir)), false, 'changed after the stamp')
+
+    write('echo')
+    const bad = tiers.trustedAllow(ctx, { projectFile: tiers.projectFileStamp(dir) }, dir)
+    assert.equal(has(bad), false)
+    assert.match(bad.note, /must be a list of strings/)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the session stamps the project file once, only with a data dir, and the peeks carry it to the gate and the review', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const routing = tiers.mergeRouting(tiers.loadJson(path.join(ROOT, 'config/routing.default.json')), null, {})
+    const settings = path.join(dir, '.claude', 'cc-tiers.json')
+    mkdirSync(path.dirname(settings), { recursive: true })
+    writeFileSync(settings, JSON.stringify({ verifyAllow: ['echo'] }))
+    const ctx = { routing, projectDir: dir, dataDir: path.join(dir, 'data'), file: path.join(dir, 'data', 'session-s.json'), sessionId: 's', env: {} }
+    mkdirSync(ctx.dataDir, { recursive: true })
+    const first = tiers.withSession(ctx, {}, (state) => state.projectFile)
+    assert.match(String(first), /^[0-9a-f]{16}$/, 'the first open stamps the file content')
+    writeFileSync(settings, JSON.stringify({ verifyAllow: ['echo', 'curl'] }))
+    const again = tiers.withSession(ctx, {}, (state) => ({ stamp: state.projectFile, peek: tiers.peekFor(state, {}), parked: tiers.peekParked(state, [{ id: 'r1', text: '' }]).get('r1') }))
+    assert.equal(again.stamp, first, 'a later open keeps the first stamp')
+    assert.equal(again.peek.projectFile, first)
+    assert.equal(again.parked.projectFile, first)
+    const none = tiers.withSession({ ...ctx, file: null, dataDir: '' }, {}, (state) => state.projectFile)
+    assert.equal(none, undefined, 'no data dir, no stamp')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the gate and the review use the project list only when trusted', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const routing = tiers.mergeRouting(tiers.loadJson(path.join(ROOT, 'config/routing.default.json')), null, {})
+    mkdirSync(path.join(dir, '.claude'), { recursive: true })
+    const stampBefore = tiers.projectFileStamp(dir)
+    writeFileSync(path.join(dir, '.claude', 'cc-tiers.json'), JSON.stringify({ verifyAllow: ['node ok.mjs'] }))
+    writeFileSync(path.join(dir, 'ok.mjs'), 'process.exit(0)\n')
+    const ctx = { routing, projectDir: dir, dataDir: path.join(dir, 'data') }
+    const writer = { kind: 'report', id: 'w1', role: 'implementer', prompt: 'CC_TIERS_TASK: t', text: 'CC_TIERS_TASK: t\nCC_TIERS_ROLE: implementer\nCC_TIERS_VERIFY: node ok.mjs\nCC_TIERS_STATUS: pass' }
+    const created = tiers.prepareReport(ctx, writer, {}, { peek: { projectFile: stampBefore, writing: [], cache: {} } })
+    assert.deepEqual(created.gate.verified, [])
+    assert.match(created.gate.projectAllow, /changed since cc-tiers first read it/)
+    const trusted = tiers.prepareReport(ctx, writer, {}, { peek: { projectFile: tiers.projectFileStamp(dir), writing: [], cache: {} } })
+    assert.deepEqual(trusted.gate.verified, ['node ok.mjs'])
+
+    const finding = ['CC_TIERS_FINDING_BEGIN', 'category: correctness', 'severity: blocking', 'evidence: command', 'command: node ok.mjs', 'expected: x', 'observed: y', 'where: a.js:1', 'CC_TIERS_FINDING_END'].join('\n')
+    const review = { kind: 'report', id: 'r1', role: 'reviewer', prompt: 'CC_TIERS_TASK: t', text: `${finding}\nCC_TIERS_TASK: t\nCC_TIERS_ROLE: reviewer\nCC_TIERS_STATUS: fail` }
+    const untrusted = tiers.prepareReport(ctx, review, {}, { peek: { projectFile: stampBefore, writing: [], cache: {} } })
+    assert.equal(untrusted.judged.blocking.length, 1, 'a writer-created entry cannot discard a reviewer finding')
+    const judged = tiers.prepareReport(ctx, review, {}, { peek: { projectFile: tiers.projectFileStamp(dir), writing: [], cache: {} } })
+    assert.equal(judged.judged.discarded.length, 1)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 function runHook(script, payload, env) {
   return spawnSync(process.execPath, [path.join(ROOT, 'hooks', script)], {
     input: JSON.stringify(payload),
@@ -1340,7 +1504,7 @@ test('a background agent is counted at SubagentStop and reported at Stop', async
     )
     assert.equal(stop.status, 0, stop.stderr)
     assert.equal(stop.stdout, '')
-    const again = runHook('subagent_stop.mjs', { session_id: 'sess-1', hook_event_name: 'SubagentStop', agent_id: 'agent-7', last_assistant_message: 'x' }, env)
+    const again = runHook('subagent_stop.mjs', { session_id: 'sess-1', hook_event_name: 'SubagentStop', agent_id: 'agent-7', last_assistant_message: 'x', stop_hook_active: true }, env)
     assert.equal(again.stdout, '')
 
     const end = runHook('stop.mjs', { session_id: 'sess-1', hook_event_name: 'Stop', stop_hook_active: false }, env)
@@ -2363,7 +2527,7 @@ test('a slug named like an Object.prototype key works through every per-slug map
   assert.equal(Object.haiku, undefined)
 })
 
-const VERIFY_ALLOW_DEFAULT = 'npm test, npm run test, node --test, npx tsc, npx eslint, npx vitest, npx jest, npx playwright test, vendor/bin/phpunit, ./vendor/bin/phpunit, vendor/bin/phpstan, ./vendor/bin/phpstan, vendor/bin/phpcs, ./vendor/bin/phpcs, pytest, python -m pytest, go test, cargo test'
+const VERIFY_ALLOW_DEFAULT = 'npm test, npm run test, node --test, npx tsc, npx eslint, npx vitest, npx jest, npx playwright test, vendor/bin/phpunit, ./vendor/bin/phpunit, vendor/bin/phpstan, ./vendor/bin/phpstan, vendor/bin/phpcs, ./vendor/bin/phpcs, pytest, python -m pytest, go test, cargo test, wc -l, grep -c, git diff --name-only, git diff --stat, git status --short'
 
 test('manifest declares the verify knobs', () => {
   const manifest = JSON.parse(readFileSync(path.join(ROOT, '.claude-plugin/plugin.json'), 'utf8'))
@@ -2645,7 +2809,8 @@ test('a ceiling pass waits for the Stop gate', async () => {
     let state = tiers.withSession(ctx, { transcript_path: transcript }, (s) => s)
     assert.equal(state.log['users-pagination'], undefined)
     assert.equal(state.pending.length, 0)
-    assert.deepEqual(state.awaiting, [{ id: 'row:u1', role: 'orchestrator', text: CEILING('pass', '\nCC_TIERS_VERIFY: npm test') }])
+    assert.deepEqual(state.awaiting.map(({ parkedAt, ...item }) => item), [{ id: 'row:u1', role: 'orchestrator', text: CEILING('pass', '\nCC_TIERS_VERIFY: npm test') }])
+    assert.ok(state.awaiting[0].parkedAt > 0, 'a parked report records when it was parked')
     // A later scan of the same rows does not park the report twice.
     tiers.withSession(ctx, { transcript_path: transcript }, (s) => {
       s.cursor.offset = 0
@@ -2767,6 +2932,103 @@ test('Stop skips the tree check while a background writer still runs', async () 
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
+})
+
+/** A Stop on a preset session state: the ceiling pass of users-pagination is parked from the transcript, then gated (or not). */
+async function stopOnState(preset, verify = 'node fail.mjs') {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-'))
+  const project = ceilingProject(dir)
+  const env = hookEnv(dir, { CC_TIERS_CC_COST: '0', CLAUDE_PLUGIN_OPTION_VERIFY_ALLOW: verify })
+  const transcript = path.join(dir, 'main.jsonl')
+  writeFileSync(transcript, `${assistantRow('claude-opus-4-5', { input_tokens: 5 }, [{ type: 'text', text: CEILING('pass', `\nCC_TIERS_VERIFY: ${verify}`) }], { id: 'm1', uuid: 'u1' })}\n`)
+  const state = { ...tiers.emptyState('sess-1'), ...preset }
+  mkdirSync(path.join(dir, 'data'), { recursive: true })
+  writeFileSync(path.join(dir, 'data', 'session-sess-1.json'), JSON.stringify(state))
+  const proc = runHook('stop.mjs', { session_id: 'sess-1', hook_event_name: 'Stop', transcript_path: transcript, cwd: project, stop_hook_active: false }, env)
+  const after = JSON.parse(readFileSync(path.join(dir, 'data', 'session-sess-1.json'), 'utf8'))
+  await rm(dir, { recursive: true, force: true })
+  assert.equal(proc.status, 0, proc.stderr)
+  return { out: proc.stdout ? JSON.parse(proc.stdout) : {}, state: after }
+}
+
+test('Stop holds the parked checks while a background review runs in the same tree, without blocking', async () => {
+  const review = { 'agent-r': { role: 'reviewer', prompt: 'CC_TIERS_TASK: other-task\nReview the diff.', tool_use_id: 'r1', at: Date.now() } }
+  const { out, state } = await stopOnState({ background: review })
+  assert.equal(out.decision, undefined, 'holding the checks is not a reason to block')
+  assert.match(out.systemMessage, /cc-tiers gate: users-pagination waits: a review \(agent-r\) is still running in this tree/)
+  assert.equal(state.awaiting.length, 1, 'the report stays parked for the next Stop')
+  assert.equal(state.tasks['users-pagination'], undefined, 'nothing was counted')
+})
+
+test('Stop does not count a failing parked check when another task wrote in the tree after it was parked', async () => {
+  const { out, state } = await stopOnState({ writtenAt: { 'other-task': Date.now() + 60000 } })
+  const message = out.reason || out.systemMessage
+  assert.match(message, /cc-tiers gate: users-pagination not validated: the tree changed under other-task after this attempt: node fail\.mjs failed \(exit 1\)/)
+  assert.doesNotMatch(message, /not re-run/)
+  assert.equal(state.tasks['users-pagination']?.failures?.length || 0, 0)
+  const alone = await stopOnState({ writtenAt: { 'other-task': Date.now() - 60000 } })
+  assert.equal(alone.state.tasks['users-pagination'].failures.length, 1, 'a write before the attempt does not excuse it')
+})
+
+test('only another task that writes in the tree excuses a failing parked check: a review handed back later does not, a writer parked later does', async () => {
+  const later = (role, agent) => ({ id: `agent:${agent}`, agent_id: agent, role, prompt: 'CC_TIERS_TASK: other-task', text: `CC_TIERS_TASK: other-task\nCC_TIERS_ROLE: ${role}\nCC_TIERS_STATUS: pass\nCC_TIERS_REASON: ok`, parkedAt: Date.now() + 60000 })
+  const reviewed = await stopOnState({ awaiting: [later('reviewer', 'agent-o')] })
+  assert.equal(reviewed.state.tasks['users-pagination'].failures.length, 1, 'a reviewer writes nothing in the tree')
+  const written = await stopOnState({ awaiting: [later('implementer', 'agent-w')] })
+  assert.equal(written.state.tasks['users-pagination']?.failures?.length || 0, 0)
+  assert.match(written.out.reason || written.out.systemMessage, /the tree changed under other-task after this attempt/)
+})
+
+test('a writer in its own worktree does not count as a write in the shared tree', () => {
+  const routing = tiers.mergeRouting(tiers.loadJson(path.join(ROOT, 'config/routing.default.json')), null, { verify: 'off' })
+  const ctx = { routing, projectDir: '', dataDir: '' }
+  const state = tiers.emptyState('s')
+  state.active = {
+    apart: { role: 'implementer', files: ['src/x.js'], isolated: true, since: Date.now() },
+    shared: { role: 'implementer', files: ['src/y.js'], isolated: false, since: Date.now() },
+  }
+  const pass = (id, task) => ({ kind: 'report', id, role: 'implementer', prompt: `CC_TIERS_TASK: ${task}\nCC_TIERS_RESEARCH: none - x\nCC_TIERS_SPEC: none - x`, text: `CC_TIERS_TASK: ${task}\nCC_TIERS_ROLE: implementer\nCC_TIERS_STATUS: pass\nCC_TIERS_REASON: ok` })
+  tiers.processReport(ctx, state, pass('w1', 'apart'))
+  tiers.processReport(ctx, state, pass('w2', 'shared'))
+  assert.deepEqual(state.active, {}, 'both writers were released by their reports')
+  assert.equal(state.writtenAt?.apart, undefined)
+  assert.ok(state.writtenAt.shared > 0)
+})
+
+test('Stop gates a rework parked after its task finished, and stops holding for a review launched hours ago', async () => {
+  const done = { 'users-pagination': { at: Date.now() - 60000, seenUntil: Date.now() - 60000, result: { status: 'verified' }, line: 'cc-tiers completion: users-pagination verified' } }
+  const rework = await stopOnState({ completions: done })
+  assert.equal(rework.state.tasks['users-pagination'].failures.length, 1, 'a report parked after the completion is a new attempt')
+  const lost = { 'agent-r': { role: 'reviewer', prompt: 'CC_TIERS_TASK: other-task', tool_use_id: 'r1', at: Date.now() - 4 * 60 * 60 * 1000 } }
+  const stale = await stopOnState({ background: lost })
+  assert.equal(stale.state.tasks['users-pagination'].failures.length, 1, 'a review launched hours ago no longer holds the check')
+})
+
+test('a fix parked while the finishing review ran is new work: Stop gates it instead of dropping it', () => {
+  const routing = tiers.mergeRouting(tiers.loadJson(path.join(ROOT, 'config/routing.default.json')), null, { specify: 'off', verify: 'off', review_policy: 'always' })
+  const head = 'CC_TIERS_TASK: users-pagination\nCC_TIERS_TIER: opus'
+  const attempt = (id, parkedAt) => ({ id, role: 'orchestrator', parkedAt, text: `${head}\nCC_TIERS_ROLE: orchestrator\nCC_TIERS_VERIFY: none - x\nCC_TIERS_STATUS: pass\nCC_TIERS_REASON: ok` })
+  const count = (state, item) => tiers.applyEvent(state, tiers.prepareReport({ routing, projectDir: '' }, { kind: 'report', prompt: '', ...item }), routing)
+  const state = tiers.emptyState('s')
+  const now = Date.now()
+  assert.equal(count(state, attempt('row:a1', now - 10000)).meta.outcome, 'review')
+  const a2 = attempt('row:a2', now - 5000)
+  state.awaiting = [a2]
+  const review = tiers.agentReport('R1', { role: 'reviewer', prompt: 'CC_TIERS_TASK: users-pagination', at: now - 8000 }, `${head}\nCC_TIERS_ROLE: reviewer\nCC_TIERS_STATUS: pass\nCC_TIERS_REASON: ok`)
+  tiers.applyEvent(state, tiers.prepareReport({ routing, projectDir: '' }, review), routing)
+  const held = tiers.holdParked(state, tiers.peekAwaiting(state))
+  assert.deepEqual(held.gate.map((item) => item.id), ['row:a2'], 'the review launched before a2 was parked never saw it')
+  assert.deepEqual(held.notes, [])
+})
+
+test('Stop drops the parked report of a task that finished after it was parked, without running its check again', async () => {
+  const completions = { 'users-pagination': { at: Date.now() + 60000, seenUntil: Date.now() + 60000, result: { status: 'verified' }, line: 'cc-tiers completion: users-pagination verified' } }
+  const { out, state } = await stopOnState({ completions })
+  const message = out.reason || out.systemMessage || ''
+  assert.match(message, /cc-tiers gate: users-pagination finished after this report was parked; its check was not run again/)
+  assert.doesNotMatch(message, /failed: node fail\.mjs/)
+  assert.deepEqual(state.awaiting, [])
+  assert.equal(state.tasks['users-pagination'], undefined)
 })
 
 test('a passing ceiling gate clears the counter', async () => {
@@ -3648,4 +3910,70 @@ test('stored completions stay bounded', () => {
   assert.equal(Object.keys(state.completions).length, 200)
   assert.ok(state.completions['users-pagination'])
   assert.equal(state.completions.t0, undefined)
+})
+
+test('an attempt heredoc that opens with the spec block makes it the contract its closing criterion lines are judged against', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const project = ceilingProject(dir)
+    writeFileSync(path.join(project, 'ok.mjs'), 'process.exit(0)\n')
+    const routing = defaultRouting({ verify_allow: 'node ok.mjs' })
+    const opening = `${ATTEMPT_OPEN}\nCC_TIERS_SPEC_BEGIN\nCriteria:\n- the page size is 20 (request)\nChecks:\n- \`node ok.mjs\` passes (repo: package.json)\nCC_TIERS_SPEC_END`
+    const closing = `${ATTEMPT_OPEN}\nCC_TIERS_CRITERION: C1 pass - page size 20 asserted\nCC_TIERS_CRITERION: C2 pass - ran it\nCC_TIERS_REPRO: none - no bug\nCC_TIERS_VERIFY: node ok.mjs\nCC_TIERS_STATUS: pass\nCC_TIERS_REVIEW: skip\nCC_TIERS_REASON: done`
+    const transcript = path.join(dir, 'main.jsonl')
+    const row = (block, id) => assistantRow('claude-opus-4-5', { input_tokens: 5 }, [block], { id, uuid: `u${id}` })
+    writeFileSync(transcript, `${row(attempt(opening), 'm1')}\n${row({ type: 'text', text: 'editing' }, 'm2')}\n${row(attempt(closing), 'm3')}\n`)
+    const ctx = { routing, file: path.join(dir, 's.json'), sessionId: 's', env: {}, projectDir: project, ccCost: false }
+    const parked = tiers.withSession(ctx, { transcript_path: transcript }, (state) => {
+      assert.deepEqual(state.contracts['users-pagination'].criteria.map((item) => item.id), ['C1', 'C2'])
+      return tiers.peekAwaiting(state)
+    })
+    assert.equal(parked.length, 1)
+    const [prepared] = tiers.prepareParked(ctx, parked, {})
+    const message = tiers.withSession(ctx, { transcript_path: transcript }, (state) => {
+      const counted = tiers.countParked(ctx, state, prepared)
+      tiers.dropAwaiting(state, [prepared.id])
+      return counted
+    })
+    assert.match(message, /Criteria with evidence: 1\/2/)
+    assert.match(message, /\| C2 `node ok\.mjs` passes \| pass \| node ok\.mjs \|/)
+    assert.doesNotMatch(message, /No spec criteria/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a CC_TIERS_CRITERION line that does not read is named in a note and its criterion stays pending', () => {
+  const routing = defaultRouting({ review_policy: 'never' })
+  const state = tiers.emptyState('s')
+  state.contracts = { 'users-pagination': parseContract('Criteria:\n- the page size is 20 (request)') }
+  const text = `${report('implementer', 'sonnet', 'pass')}\nCC_TIERS_CRITERION: C1 passed it\nCC_TIERS_VERIFY: npm test`
+  const applied = tiers.applyEvent(state, gateEvent('x', text, { ...GATE_BASE, status: 'pass', verified: ['npm test'] }), routing)
+  assert.match(applied.message, /could not read.*"CC_TIERS_CRITERION: C1 passed it"/)
+  assert.match(applied.message, /\| C1 the page size is 20 \| pending \|/)
+})
+
+test('a session respec in the opening heredoc uncounts the failure that named the criteria it fixed, like a writer delegation', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const project = ceilingProject(dir)
+    const routing = respecRouting()
+    const closing = `${ATTEMPT_OPEN}\nCC_TIERS_CRITERION: C1 fail - broke\nCC_TIERS_STATUS: fail\nCC_TIERS_REASON: criteria failed`
+    const respec = `${ATTEMPT_OPEN}\nCC_TIERS_RESPEC: the spec said step 3, the parser has no such step\n${respecSpec('the parser handles step 2', 'the output is sorted')}`
+    const transcript = path.join(dir, 'main.jsonl')
+    const row = (block, id) => assistantRow('claude-opus-4-5', { input_tokens: 5 }, [block], { id, uuid: `u${id}` })
+    writeFileSync(transcript, `${row(attempt(`${ATTEMPT_OPEN}\n${FIRST_SPEC}`), 'm1')}\n${row(attempt(closing), 'm2')}\n${row(attempt(respec), 'm3')}\n`)
+    const ctx = { routing, file: path.join(dir, 's.json'), sessionId: 's', env: {}, projectDir: project, ccCost: false }
+    const state = tiers.withSession(ctx, { transcript_path: transcript }, (held) => held)
+    const entry = state.tasks[SEED_TASK]
+    assert.deepEqual(entry.failures, [])
+    assert.equal(entry.respecUncounted, 1)
+    assert.equal(entry.specFailed, undefined)
+    assert.equal(state.log[SEED_TASK].uncounted, 1)
+    assert.equal(state.contracts[SEED_TASK].criteria[0].text, 'the parser handles step 2')
+    assert.match(state.pending.join('\n'), /the last opus failure of users-pagination named C1 "the parser handles step 3", and CC_TIERS_RESPEC changed it, so the spec was the cause\. That failure is no longer counted \(0 of 2\)/)
+    assert.ok(state.audit.some((item) => /users-pagination: opus failure uncounted: the respec changed C1 "the parser handles step 3"/.test(item.problem)))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

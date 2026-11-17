@@ -21,6 +21,7 @@ export const FAILURE_CATEGORIES = [
   'flaky',
   'scope',
   'data',
+  'coverage',
   'unverifiable',
   'unknown',
 ]
@@ -35,7 +36,7 @@ const DEPENDENCY_MACHINE = new RegExp(`cannot find module|cannot find package|mo
 // From `database is locked` on: a lock or resource another run holds (a database, a flock wrapper, a busy device), which a rerun clears.
 // Prose such as `is in use` or `is already running` is left out: an application's own error says it too.
 const INFRA_MACHINE =
-  /econnrefused|enotfound|eaddrinuse|etimedout|enospc|eai_again|javascript heap out of memory|cannot connect to the docker daemon|database is locked|could not (?:obtain|acquire|get) (?:an? |the )?(?:\w+ )?lock\b|resource (?:temporarily unavailable|busy)|(?:another|outr[ao]) \w+ (?:holds|has|tem) (?:the|a) (?:lock|trava)/
+  /econnrefused|enotfound|eaddrinuse|etimedout|enospc|eai_again|javascript heap out of memory|cannot connect to the docker daemon|database is locked|deadlock found when trying to get lock|lock wait timeout exceeded|sqlstate\[hy000\] \[2002\]|could not (?:obtain|acquire|get) (?:an? |the )?(?:\w+ )?lock\b|resource (?:temporarily unavailable|busy)|(?:another|outr[ao]) \w+ (?:holds|has|tem) (?:the|a) (?:lock|trava)/
 
 /** The module a Node or Python import error names; a specifier that starts like a path, alias or subpath import is the project's own file. */
 const MISSING_NODE_RE = /cannot find (?:module|package) ['"]([^'"]+)['"]/i
@@ -150,6 +151,7 @@ const HYPOTHESES = {
   security: 'The change opens a security hole or exposes data.',
   infra: 'The environment failed (network, port, disk, memory, rate limit or service), not the code.',
   data: 'The test data the check needs is missing or wrong: a seed or fixture lacks rows, or already holds one the scenario needs absent.',
+  coverage: 'A spec criterion has no test that exercises it, so the review cannot confirm it holds.',
   flaky: 'The failure is intermittent and may pass on a rerun.',
   scope: 'The change touches files or behavior outside the task.',
   unverifiable: 'The repo has no way to exercise this failure, so another attempt cannot be checked.',
@@ -195,13 +197,14 @@ function normalize(symptom) {
 }
 
 export function diagnoseFailure(input) {
-  const { reason, detail, source, reviewCategory, previous } = input ?? {}
+  const { reason, detail, source, reviewCategory, reviewEvidence, previous } = input ?? {}
   const reasonText = asText(reason)
   const history = Array.isArray(previous) ? previous : []
   const detailLines = linesOf(asText(detail))
   const reasonLines = linesOf(reasonText)
 
-  const reviewed = source === 'review' ? reviewCategoryToCategory(asText(reviewCategory), reasonText) : null
+  // A finding that says a criterion has no test is a missing test, whatever its category: no test failed.
+  const reviewed = source !== 'review' ? null : reviewEvidence === 'coverage' ? 'coverage' : reviewCategoryToCategory(asText(reviewCategory), reasonText)
   const allowed = (rule) => !rule.unless || ![...detailLines, ...reasonLines].some((line) => rule.unless.test(fold(line)))
   const detailRule = reviewed ? null : RULES.find((rule) => !rule.reasonOnly && allowed(rule) && matchingLines(rule, detailLines, true).length)
   const category =
@@ -222,6 +225,7 @@ export function diagnoseFailure(input) {
     evidence: found.slice(0, MAX_EVIDENCE_LINES).join('\n').slice(0, MAX_EVIDENCE),
     hypothesis: HYPOTHESES[category],
     confirmed: Boolean(reviewed || detailRule),
+    source: asText(source),
     signature,
     repeated: history.some((entry) => entry?.signature === signature),
     tried: history.map((entry) => entry?.category).filter((item) => typeof item === 'string'),
@@ -243,6 +247,7 @@ const ACTIONS = {
   integration: ['retry', 'Check the contract on both sides, then retry.'],
   scope: ['retry', 'Revert what is outside the task and retry with only the files it names.'],
   data: ['retry', "If the seed or fixture lacks the data, fix it in the repo (changing it is allowed) or ask for the data when the repo cannot supply it; if the code mishandles that missing or empty data, fix the code. Then retry."],
+  coverage: ['retry', 'The review found a spec criterion with no test: write the missing test for that criterion, then rerun the suite.'],
   unverifiable: ['report-partial', 'The repo cannot exercise this failure: do not move up a tier. Deliver the verifiable part, report the task as partial, and name the test setup that is missing.'],
   unknown: ['retry', 'cc-tiers could not tell the cause from the report, so it has no advice for this attempt.'],
 }

@@ -10,6 +10,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const tiers = await import(pathToFileURL(path.join(ROOT, 'hooks', 'cc_tiers.mjs')).href)
 const { memoryPath } = await import(pathToFileURL(path.join(ROOT, 'hooks', 'memory.mjs')).href)
+const { parseContract } = await import(pathToFileURL(path.join(ROOT, 'hooks', 'contract.mjs')).href)
 const DEFAULTS = JSON.parse(readFileSync(path.join(ROOT, 'config', 'routing.default.json'), 'utf8'))
 
 const routingWith = (user = {}) => tiers.mergeRouting(DEFAULTS, null, { verify: 'off', hard_start: 'opus', ...user })
@@ -327,3 +328,97 @@ test('the qa skill makes no claim the research could not source: no "different p
   assert.throws(() => unsupportedClaims(skill, techniques.replace("Our own advice, not the syllabus's", 'Our own advice from CTFL')))
   assert.throws(() => unsupportedClaims(skill, techniques.replace('3-value where', '3-value in')))
 })
+
+const FINAL_SPEC = 'CC_TIERS_SPEC_BEGIN\nCriteria:\n- the totals match (request)\nChecks:\n- `node ok.mjs` passes (repo: ok.mjs)\nCC_TIERS_SPEC_END'
+const finalPrompt = (verify = 'CC_TIERS_VERIFY: node ok.mjs') => `CC_TIERS_TASK: final-gate\n${FINAL_SPEC}\n${verify}\nReview the integrated diff.`
+const finalRouting = () => tiers.mergeRouting(DEFAULTS, null, { verify_allow: 'node ok.mjs', hard_start: 'opus' })
+
+test('final-gate: the spec of its prompt is its contract and its CC_TIERS_VERIFY lines are the gate evidence of the completion', () =>
+  inTemp(async (dir) => {
+    writeFileSync(path.join(dir, 'ok.mjs'), 'process.exit(0)\n')
+    const routing = finalRouting()
+    const state = tiers.emptyState('s')
+    assert.equal(delegate(state, routing, 'reviewer', finalPrompt()).deny, '')
+    assert.deepEqual(state.contracts['final-gate'].criteria.map((item) => item.id), ['C1', 'C2'])
+    const message = report(dir, routing, state, 'g1', 'reviewer', trailer('final-gate', 'pass'), finalPrompt())
+    assert.match(message, /Checks run 1, passed 1, failed 0/)
+    assert.match(message, /Criteria with evidence: 1\/2/)
+    assert.match(message, /\| C2 `node ok\.mjs` passes \| pass \| node ok\.mjs \|/)
+    assert.doesNotMatch(message, /No spec criteria/)
+    assert.equal(state.contracts['final-gate'], undefined)
+  }))
+
+test('final-gate: a CC_TIERS_VERIFY line of the prompt that fails is a failed review, not a finished task, and no line leaves the checks at zero', () =>
+  inTemp(async (dir) => {
+    writeFileSync(path.join(dir, 'ok.mjs'), 'process.exit(1)\n')
+    const routing = finalRouting()
+    const state = tiers.emptyState('s')
+    const failing = report(dir, routing, state, 'g1', 'reviewer', trailer('final-gate', 'pass'), finalPrompt())
+    assert.match(failing, /cc-tiers gate: final-gate failed: node ok\.mjs \(exit 1\)/)
+    assert.match(failing, /Retry on opus/)
+    assert.doesNotMatch(failing, /cc-tiers completion/)
+    assert.equal(state.tasks['final-gate'].failures.length, 1)
+    assert.equal(state.tasks['final-gate'].rejected, true)
+    writeFileSync(path.join(dir, 'ok.mjs'), 'process.exit(0)\n')
+    assert.match(report(dir, routing, state, 'g3', 'reviewer', trailer('final-gate', 'pass'), finalPrompt()), /cc-tiers completion: final-gate/)
+    assert.equal(state.tasks['final-gate'], undefined, 'a later pass with a green gate finishes it')
+    const none = report(dir, routing, tiers.emptyState('s'), 'g2', 'reviewer', trailer('final-gate', 'pass'), finalPrompt('Run the tests.'))
+    assert.match(none, /Checks run 0/)
+  }))
+
+test('final-gate: a check of its prompt that fails on the environment is not counted, as for a writer', () =>
+  inTemp(async (dir) => {
+    writeFileSync(path.join(dir, 'ok.mjs'), "console.error('Error: connect ECONNREFUSED 127.0.0.1:5432')\nprocess.exit(1)\n")
+    const routing = finalRouting()
+    const state = tiers.emptyState('s')
+    const message = report(dir, routing, state, 'g1', 'reviewer', trailer('final-gate', 'pass'), finalPrompt())
+    assert.match(message, /failed on the environment, not the code/)
+    assert.equal(state.tasks['final-gate']?.failures?.length || 0, 0)
+  }))
+
+test('final-gate: a gate that fails stays a failure when the review carries only non-blocking findings', () =>
+  inTemp(async (dir) => {
+    writeFileSync(path.join(dir, 'ok.mjs'), 'process.exit(1)\n')
+    const routing = finalRouting()
+    const state = tiers.emptyState('s')
+    const note = finding.replace('severity: blocking', 'severity: note')
+    const message = report(dir, routing, state, 'g1', 'reviewer', `${trailer('final-gate', 'pass')}\n${note}`, finalPrompt())
+    assert.doesNotMatch(message, /cc-tiers completion/)
+    assert.equal(state.tasks['final-gate'].failures.length, 1)
+  }))
+
+test('final-gate: only a prompt written for final-gate has its CC_TIERS_VERIFY lines run, whatever task the report names', () =>
+  inTemp(async (dir) => {
+    writeFileSync(path.join(dir, 'ok.mjs'), 'process.exit(0)\n')
+    const routing = finalRouting()
+    const ctx = { routing, ccCost: false, projectDir: dir }
+    const gateOf = (prompt, text) => tiers.prepareReport(ctx, agentEvent('g1', 'reviewer', text, prompt)).gate
+    const other = finalPrompt().replace('final-gate', 'billing-totals')
+    assert.equal(gateOf(other, trailer('final-gate', 'pass')), undefined, 'a prompt for another task is not gated, though the report says final-gate')
+    assert.equal(gateOf(finalPrompt(), trailer('billing-totals', 'pass')), undefined, 'a report for another task is not gated')
+    assert.equal(gateOf(finalPrompt().replace('CC_TIERS_TASK: final-gate\n', ''), trailer('final-gate', 'pass')), undefined, 'a prompt with no task is not gated')
+    assert.equal(gateOf(finalPrompt(), trailer('final-gate', 'pass')).status, 'pass')
+    assert.equal(gateOf(finalPrompt(), trailer('final-gate', 'pass').replace('CC_TIERS_TASK: final-gate\n', '')).status, 'pass', 'a report with no task line follows its prompt')
+  }))
+
+test('a reviewer prompt that rewords the stored writer contract is still refused, final-gate or not', () => {
+  const routing = finalRouting()
+  const state = tiers.emptyState('s')
+  state.contracts = { 'final-gate': parseContract('Criteria:\n- the totals match (request)\n- the report is sorted (request)') }
+  const denied = delegate(state, routing, 'reviewer', finalPrompt())
+  assert.match(denied.deny, /must carry the same CC_TIERS_SPEC block/)
+  assert.equal(state.contracts['final-gate'].criteria.length, 2)
+})
+
+test('final-gate: a passing review after a final-gate rejection finishes the task', () =>
+  inTemp(async (dir) => {
+    writeFileSync(path.join(dir, 'ok.mjs'), 'process.exit(0)\n')
+    const routing = finalRouting()
+    const state = tiers.emptyState('s')
+    delegate(state, routing, 'reviewer', finalPrompt())
+    state.tasks['final-gate'] = { tier: 'opus', failures: [], carried: [], rejected: true }
+    const message = report(dir, routing, state, 'g1', 'reviewer', trailer('final-gate', 'pass'), finalPrompt())
+    assert.doesNotMatch(message, /already rejected/)
+    assert.match(message, /cc-tiers completion: final-gate/)
+    assert.equal(state.tasks['final-gate'], undefined)
+  }))
