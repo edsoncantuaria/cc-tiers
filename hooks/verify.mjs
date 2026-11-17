@@ -18,12 +18,48 @@ const WIN_META_RE = /[;|&><`$()\n\r%!^]/
 const ENV_RE = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s
 /** Env keys that change which program runs or load code before the tests, which would bypass the allow list. */
 const BLOCKED_ENV_RE =
-  /^(PATH|PATHEXT|LD_\w*|DYLD_\w*|NODE_OPTIONS|NODE_PATH|npm_config_\w*|PYTHONPATH|PYTHONSTARTUP|PYTHONHOME|BASH_ENV|ENV|PERL5OPT|PERL5LIB|RUBYOPT|JAVA_TOOL_OPTIONS|_JAVA_OPTIONS|PHPRC|PHP_INI_SCAN_DIR)$/i
+  /^(PATH|PATHEXT|LD_\w*|DYLD_\w*|GIT_\w*|NODE_OPTIONS|NODE_PATH|npm_config_\w*|PYTHONPATH|PYTHONSTARTUP|PYTHONHOME|PYTEST_ADDOPTS|PYTEST_PLUGINS|BASH_ENV|ENV|PERL5OPT|PERL5LIB|RUBYOPT|JAVA_TOOL_OPTIONS|_JAVA_OPTIONS|PHPRC|PHP_INI_SCAN_DIR)$/i
 /** A URL that carries the code itself, as node --import=data:... does. */
 const INLINE_RE = /data:|javascript:/i
-/** Flags that load or evaluate code named on the line, not a repo test; long ones are also refused abbreviated, as npm expands them. */
+/** The rule every line had: these whole short tokens in any case, and these long flags abbreviated too, as npm expands them and a runner may start npm. */
 const CODE_FLAGS = ['--import', '--require', '--loader', '--experimental-loader', '--eval', '--print', '--script-shell', '--node-options', '--userconfig', '--globalconfig']
 const CODE_SHORT_FLAGS = ['-r', '-e', '-p', '-pe']
+/** Refused whole on any line, abbreviated only by the package runners that expand them: --env alone is an app option (artisan --env=testing). */
+const EXACT_CODE_FLAGS = ['--env-file', '--env-file-if-exists', '--prefix']
+const ABBREVIATING_PROGRAMS = /^(npm|npx|pnpm|yarn)$/
+/** Programs that run no code and write nothing through the flags above (grep -e is a pattern, phinx -e names an environment), so only they skip that rule. */
+const NO_CODE_FLAGS = /^(grep|egrep|fgrep|rg|sort|ls|wc|diff|head|tail|cut|uniq|du|phinx|systemctl)$/
+/** git's own: --output writes a file, --no-index reads one outside the repo, the others make git run a program or config the line names. git accepts abbreviations of them too. */
+const GIT_FLAGS = ['--output', '--no-index', '--ext-diff', '--textconv', '--config-env']
+/** Whole git options that only look like an abbreviation of a GIT_FLAGS entry. */
+const GIT_SAFE = ['--text']
+/**
+ * Flags whose value decides, on any line: a node test reporter or destination outside the built-in ones loads a module or writes a file,
+ * and an ini override of addopts adds options (a -p plugin) the line no longer shows; pytest also takes it as -o.
+ */
+const VALUE_FLAGS = [
+  { flag: '--test-reporter', safe: /^(spec|tap|dot|junit|lcov)$/ },
+  { flag: '--test-reporter-destination', safe: /^(stdout|stderr)$/ },
+  { flag: '--override-ini', short: 'o', shortFor: /^(pytest|py\.test)$/, value: 'ckmrnpW', safe: /^(?!addopts\b)/i },
+]
+/**
+ * Short options that run or load code named on the line, by program, refused on top of the rule every line has: a bundle (-lc, -we, -pe) counts
+ * through its letters, up to one that takes the rest of the token as its value (-Wignore, -rA). script: the options end at the script, or at
+ * the -m module; a token right after an option may be its value, so it does not end them.
+ */
+const SHORT_FLAGS = [
+  { program: /^(node|nodejs|deno|bun|npm|npx|pnpm|yarn)$/, code: 'epr' },
+  { program: /^perl$/, code: 'eEpr', value: 'IMmiFxCdDV', script: true },
+  { program: /^ruby$/, code: 'epr', value: 'ICXEKFWix', script: true },
+  { program: /^php$/, code: 'rBREF', value: 'cdzfb', script: true },
+  { program: /^python(\d+(\.\d+)*)?$/, code: 'eprc', value: 'WX', module: 'm', script: true },
+  { program: /^(ba|da|z)?sh$/, code: 'c', script: true },
+  { program: /^(pytest|py\.test)$/, code: 'p', value: 'ckmornW' },
+  // Before the subcommand git -c sets config and -p starts the pager.
+  { program: /^git$/, code: 'cp', value: 'SGOUMCBl', script: true },
+  // docker is here for its own -e, which puts env into the container as BLOCKED_ENV refuses on the line.
+  { program: /^docker(-compose)?$/, code: 'e' },
+]
 const TAIL_LINES = 40
 const MAX_BUFFER = 32 * 1024 * 1024
 const MAX_CHANGED = 5
@@ -57,10 +93,74 @@ export function metaRe(platform = process.platform) {
   return platform === 'win32' ? WIN_META_RE : META_RE
 }
 
-function isCodeFlag(token) {
+function programName(file) {
+  return file.split(/[\\/]/).pop().toLowerCase().replace(/\.exe$/, '')
+}
+
+/** The rule every line had before the per-program rules: a whole short token in any case, or a long flag abbreviated. */
+function baseCodeFlag(token) {
   const name = token.split('=')[0].toLowerCase()
   if (CODE_SHORT_FLAGS.includes(name)) return true
   return name.startsWith('--') && name.length > 2 && CODE_FLAGS.some((flag) => flag.startsWith(name))
+}
+
+function longCodeFlag(token, program) {
+  const name = token.split('=')[0].toLowerCase()
+  if (!name.startsWith('--') || name.length <= 2 || NO_CODE_FLAGS.test(program)) return false
+  const matches = (flags, abbreviated) => flags.some((flag) => (abbreviated ? flag.startsWith(name) : flag === name))
+  return matches(EXACT_CODE_FLAGS, ABBREVIATING_PROGRAMS.test(program)) || (program === 'git' && !GIT_SAFE.includes(name) && matches(GIT_FLAGS, true))
+}
+
+/** Walks the short options of args as SHORT_FLAGS says: { flag } for the first token whose options run code, { module, rest } for a python -m module and its own arguments, or {}. */
+function scanShort(args, program) {
+  const rule = SHORT_FLAGS.find((entry) => entry.program.test(program))
+  if (!rule) return {}
+  let afterOption = false
+  for (let i = 0; i < args.length; i++) {
+    const token = args[i]
+    const option = /^[-+]./.test(token)
+    if (rule.script && (token === '--' || (!option && !afterOption))) return {}
+    afterOption = option
+    if (!token.startsWith('-') || token.startsWith('--')) continue
+    const letters = token.slice(1)
+    for (let j = 0; j < letters.length; j++) {
+      const letter = letters[j]
+      if (rule.code.includes(letter)) return { flag: token }
+      if (letter === rule.module) return { module: letters.slice(j + 1) || args[i + 1] || '', rest: args.slice(letters.slice(j + 1) ? i + 1 : i + 2) }
+      if (rule.value?.includes(letter)) break
+    }
+  }
+  return {}
+}
+
+/** The first token whose value names a module to load or a file to write, as VALUE_FLAGS says. */
+function valueCodeFlag(args, program) {
+  if (NO_CODE_FLAGS.test(program)) return undefined
+  for (const rule of VALUE_FLAGS) {
+    for (let i = 0; i < args.length; i++) {
+      const token = args[i]
+      const long = token === rule.flag || token.startsWith(`${rule.flag}=`)
+      // In a bundle (-qo), the letters before it must not be ones that take the rest of the token as their value.
+      const letters = rule.short && rule.shortFor.test(program) && /^-[^-]/.test(token) ? token.slice(1) : ''
+      const at = letters ? letters.indexOf(rule.short) : -1
+      const short = at >= 0 && ![...letters.slice(0, at)].some((letter) => rule.value.includes(letter))
+      if (!long && !short) continue
+      const inline = long ? token.slice(rule.flag.length + 1) : letters.slice(at + 1)
+      if (!rule.safe.test(inline || args[i + 1] || '')) return token
+    }
+  }
+  return undefined
+}
+
+/** The refusals added on top of the rule every line has; python -m pytest is also judged as pytest. */
+function addedCodeFlag(args, program) {
+  const long = args.find((token) => longCodeFlag(token, program))
+  if (long) return long
+  const short = scanShort(args, program)
+  if (short.flag) return short.flag
+  const value = valueCodeFlag(args, program)
+  if (value) return value
+  return short.module === 'pytest' ? addedCodeFlag(short.rest, 'pytest') : undefined
 }
 
 function parseLine(raw, platform = process.platform, projectDir = '') {
@@ -94,7 +194,13 @@ function parseLine(raw, platform = process.platform, projectDir = '') {
     env[key] = value
   }
   if (!tokens.length) return invalid('empty command')
-  const flag = tokens.slice(1).find(isCodeFlag)
+  // A docker exec line is judged by the command it runs, as gateAllows does.
+  const wrapped = wrappedCommand(tokens)
+  const [file, ...args] = wrapped ?? tokens
+  const program = programName(file)
+  // The rule every line had covers the whole line; only a program known to run no code with it skips it for its own arguments.
+  const base = (NO_CODE_FLAGS.test(program) ? tokens.slice(1, tokens.length - args.length - 1) : tokens.slice(1)).find(baseCodeFlag)
+  const flag = base ?? addedCodeFlag(args, program)
   if (flag) return invalid(`refused flag ${flag.split('=')[0]}`)
   return { raw, kind: 'command', argv: tokens, env, cwd }
 }
@@ -126,7 +232,7 @@ export function isAllowed(argv, allow) {
  * Anything else (-e, --env-file, --privileged, -d, an unknown option) makes the line a plain command again.
  */
 const WRAPPERS = [
-  // --user is left out: the code-flag check reads it as an abbreviation of --userconfig, so only -u gets here.
+  // --user is left out on purpose: only -u is accepted.
   { prefix: ['docker', 'exec'], flags: ['-i', '--interactive', '-t', '--tty', '-it', '-ti'], values: ['-w', '--workdir', '-u'] },
   { prefix: ['docker', 'compose', 'exec'], flags: ['-T', '--no-tty'], values: ['-w', '--workdir', '-u', '--index'] },
   { prefix: ['docker-compose', 'exec'], flags: ['-T', '--no-tty'], values: ['-w', '--workdir', '-u', '--index'] },
@@ -215,6 +321,13 @@ function inGitTree(dir) {
   }
 }
 
+/** The child repository of dir that holds every path of files, '' when there is none or they fall in more than one place. */
+function repoHolding(dir, files) {
+  const tops = new Set(files.map((file) => file.split('/')[0]))
+  const [top] = tops
+  return tops.size === 1 && existsSync(path.join(dir, top, '.git')) ? top : ''
+}
+
 /** A folder that is no repository itself but holds repositories, as a session started above them does. */
 function folderOfRepos(dir) {
   if (inGitTree(dir)) return false
@@ -230,10 +343,20 @@ function lastLines(text, count) {
   return lines.slice(-count).join('\n')
 }
 
+/** git diff runs the external diff or textconv program the repository config names unless told not to; a check wants neither. */
+function withoutDiffPrograms(argv) {
+  if (programName(argv[0] || '') !== 'git') return argv
+  // The subcommand comes after git's own options; -C takes the next token as its value.
+  let i = 1
+  while (i < argv.length && argv[i].startsWith('-')) i += argv[i] === '-C' ? 2 : 1
+  return argv[i] === 'diff' ? [...argv.slice(0, i + 1), '--no-ext-diff', '--no-textconv', ...argv.slice(i + 1)] : argv
+}
+
 /** Runs one parsed command as argv; on win32 a shell is needed for .cmd shims, safe since metacharacters were refused. */
 export function runCommand(cmd, { projectDir, timeoutS }) {
   const win = process.platform === 'win32'
-  const [file, ...args] = win ? cmd.argv.map((arg) => (/\s/.test(arg) ? `"${arg}"` : arg)) : cmd.argv
+  const argv = withoutDiffPrograms(cmd.argv)
+  const [file, ...args] = win ? argv.map((arg) => (/\s/.test(arg) ? `"${arg}"` : arg)) : argv
   const started = Date.now()
   const result = spawnSync(file, args, {
     cwd: path.resolve(projectDir, cmd.cwd || '.'),
@@ -267,9 +390,10 @@ export function runCommand(cmd, { projectDir, timeoutS }) {
  * a gate that cannot get it within its budget leaves its commands not validated, so two gates of a project never run at once.
  * detected is what the project dir declares; detectedIn(dir) is what a cd dir declares, which a line with a cd may also run.
  * A line with no cd is not run from a folder of repositories (outside git, with a repo among its children): it would run in the wrong place,
- * unless it is a one-file syntax check, which does not depend on where it runs. In such a folder a cd line runs what its own dir declares.
+ * unless it is a one-file syntax check, which does not depend on where it runs, or files (the task's CC_TIERS_FILES) all fall in one child repo, where it runs.
+ * In such a folder a cd line runs what its own dir declares. A syntax check of a file that is not there is not run: it would only fail.
  */
-export function runGate(text, { projectDir, allow, detected = [], detectedIn = () => [], timeoutS, budgetS, run = runCommand, cached = null, snapshot = null, preexisting = '', lock = null }) {
+export function runGate(text, { projectDir, allow, detected = [], detectedIn = () => [], files = [], timeoutS, budgetS, run = runCommand, cached = null, snapshot = null, preexisting = '', lock = null }) {
   const gate = { status: 'unverified', verified: [], flaky: [], unverified: [], failure: null, cached: [] }
   const lines = parseVerify(text, { projectDir })
   if (!lines.length) return { ...gate, status: 'missing' }
@@ -277,6 +401,7 @@ export function runGate(text, { projectDir, allow, detected = [], detectedIn = (
   let release = null
   let busy = false
   const reposFolder = folderOfRepos(projectDir)
+  const taskRepo = reposFolder ? repoHolding(projectDir, files) : ''
   const detectedFor = (cwd) => (cwd ? [...(reposFolder ? [] : detected), ...detectedIn(path.resolve(projectDir, cwd))] : detected)
   const skip = (raw, reason) => gate.unverified.push({ raw, reason })
   const exhausted = (raw) => skip(raw, `budget exhausted: ${raw}`)
@@ -294,12 +419,17 @@ export function runGate(text, { projectDir, allow, detected = [], detectedIn = (
         skip(line.raw, line.reason)
         continue
       }
+      if (!line.cwd && taskRepo && !isSyntaxCheck(line.argv)) line.cwd = taskRepo
       if (!insideProject(projectDir, line.cwd)) {
         skip(line.raw, `cd dir outside the project: ${line.raw}`)
         continue
       }
       if (!line.cwd && reposFolder && !isSyntaxCheck(line.argv)) {
         skip(line.raw, `${line.raw}: the gate runs from ${projectDir}, a folder of repositories; write \`cd <repo dir> && ${line.raw}\``)
+        continue
+      }
+      if (isSyntaxCheck(line.argv) && !existsSync(path.resolve(projectDir, line.cwd || '.', line.argv.at(-1)))) {
+        skip(line.raw, `file not found: ${line.raw}`)
         continue
       }
       if (!gateAllows(line.argv, allow, detectedFor(line.cwd), line.env)) {

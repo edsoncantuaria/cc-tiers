@@ -3499,7 +3499,8 @@ export function prepareReport(ctx, event, payload = {}, { budgetS = ctx.routing.
   const writing = peek?.writing || []
   const snapshot = projectDir && !writing.length ? () => workspaceSnapshot(projectDir) : null
   const preexisting = declaredPreexisting(event.text, projectDir)?.raw || ''
-  const options = { projectDir, allow: routing.verifyAllow, detected: detectedChecks(projectDir), detectedIn: detectedChecks, timeoutS: routing.verifyTimeout, budgetS, cached, snapshot, preexisting, lock: gateLock(ctx.dataDir, projectDir) }
+  const files = headers.FILES ? declaredFiles(headers, '').files : []
+  const options = { projectDir, allow: routing.verifyAllow, detected: detectedChecks(projectDir), detectedIn: detectedChecks, files, timeoutS: routing.verifyTimeout, budgetS, cached, snapshot, preexisting, lock: gateLock(ctx.dataDir, projectDir) }
   if (projectDir) {
     const treeCheck = writing.length ? { treeCheck: `skipped: ${writing.join(', ')} still writing` } : {}
     const gate = { ...runGate(event.text, options), tree, ...treeCheck }

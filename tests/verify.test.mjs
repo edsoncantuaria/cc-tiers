@@ -440,6 +440,265 @@ test('refuses inline code through flags, data URLs and env', () => {
   }
 })
 
+test('a short code flag is refused unless the program is known not to run code with it, or its own rule says the token is not one', () => {
+  const parsed = (raw) => verify.parseVerify(`CC_TIERS_VERIFY: ${raw}`)[0]
+  for (const raw of [
+    'vendor/bin/phinx status -e test',
+    'phinx status -e test',
+    'grep -E x f',
+    'grep -rn x .',
+    'grep -R x .',
+    'sort -r f',
+    'ls -r',
+    'systemctl --user status x',
+    'python -m pytest -q',
+    'bash scripts/test.sh',
+    'sh -n a.sh',
+    'docker exec -w /app qc vendor/bin/phinx status -e test',
+  ]) {
+    assert.equal(parsed(raw).kind, 'command', raw)
+  }
+  for (const raw of [
+    'node -e x',
+    'node -p x',
+    'node -pe x',
+    '/usr/bin/node -e x',
+    'nodejs -e x',
+    'deno -e x',
+    'bun -r x',
+    'perl -e x',
+    'perl -E x',
+    'ruby -e x',
+    'php -r x',
+    'python -p x',
+    'python3 -r x',
+    'python3.11 -e x',
+    'pytest -p plugin',
+    'mkdir -p x',
+    'python -c x',
+    'python3 -c x',
+    'bash -c x',
+    'sh -c x',
+    'docker exec qc node -e x',
+    'docker exec -e FOO=1 qc npm test',
+    'docker exec -w /app qc python -c x',
+  ]) {
+    const line = parsed(raw)
+    assert.equal(line.kind, 'invalid', raw)
+    assert.match(line.reason, /^refused flag -[a-z]+:/i, raw)
+  }
+})
+
+test('a long code flag is refused abbreviated on any line, as a runner may start npm, except for the programs known not to run code with it', () => {
+  const parsed = (raw) => verify.parseVerify(`CC_TIERS_VERIFY: ${raw}`)[0]
+  for (const raw of ['npm test --userconfig x', 'npm test --user x', 'npx tsc --imp x', 'node --test --imp=./x.mjs', 'node --test --import=./x.mjs', 'git --eval x', 'mocha --require ./x.js', 'git --pri x', 'docker exec --user root qc npm test', 'corepack npm test --node-opt=--require=/tmp/x.js', 'uv run npm test --script-sh x', 'uv run npm test --userc x', 'pnpm test --script-sh=/tmp/evil', 'npm test --pref /tmp/x']) {
+    assert.equal(parsed(raw).kind, 'invalid', raw)
+  }
+  for (const raw of ['systemctl --user status x', 'php artisan test --env=testing', 'node --test --env=x', 'grep --print x f']) {
+    assert.equal(parsed(raw).kind, 'command', raw)
+  }
+})
+
+const inTmp = async (fn) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-verify-parent-'))
+  try {
+    await fn(dir)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+}
+
+test('git: the flags that write a file or make it run a program are refused, abbreviated too; the read-only forms parse', () => {
+  const parsed = (raw) => verify.parseVerify(`CC_TIERS_VERIFY: ${raw}`)[0]
+  for (const raw of [
+    'git diff --name-only --output=/tmp/x',
+    'git diff --name-only --output /tmp/x',
+    'git diff --name-only --outp=/tmp/x',
+    'git diff --stat --ou=/tmp/x',
+    'git diff --ext-diff',
+    'git diff --ext',
+    'git diff --stat --textconv',
+    'git diff --stat --textc',
+    'git diff --config-env=a=b',
+    'git -c core.fsmonitor=x status',
+    'git -ccore.pager=x status',
+  ]) {
+    assert.equal(parsed(raw).kind, 'invalid', raw)
+  }
+  for (const raw of ['git diff --name-only', 'git diff --stat -- a.js', 'git status --short', 'git diff --no-ext-diff --name-only', 'git diff --no-textconv --stat']) {
+    assert.equal(parsed(raw).kind, 'command', raw)
+  }
+})
+
+test('git: an env key that makes git read config or run a program is refused', () => {
+  for (const raw of ['GIT_EXTERNAL_DIFF=x git diff --stat', 'GIT_CONFIG_COUNT=1 git status --short', 'GIT_CONFIG_GLOBAL=/tmp/c git status --short', 'GIT_DIR=/tmp/x git status --short', 'GIT_PAGER=x git diff --stat']) {
+    const [line] = verify.parseVerify(`CC_TIERS_VERIFY: ${raw}`)
+    assert.equal(line.kind, 'invalid', raw)
+    assert.match(line.reason, /^refused env GIT_/, raw)
+  }
+})
+
+test('git diff --name-only --output=<file> never writes a file, even with git diff on the allow list', async () => {
+  await inTmp((dir) => {
+    const project = path.join(dir, 'project')
+    mkdirSync(project)
+    spawnSync('git', ['init', '-q'], { cwd: project })
+    const target = path.join(dir, 'outside.txt')
+    const allow = verify.parseAllow('git diff --name-only, git diff --stat')
+    const result = verify.runGate(`CC_TIERS_VERIFY: git diff --name-only --output=${target}\nCC_TIERS_VERIFY: git diff --stat --output ${target}`, { projectDir: project, allow, timeoutS: 20, budgetS: 60 })
+    assert.equal(existsSync(target), false)
+    assert.equal(result.status, 'unverified')
+    assert.equal(result.failure, null)
+    assert.equal(result.unverified.length, 2)
+  })
+})
+
+test('runCommand runs git diff with the external diff and textconv programs off', async () => {
+  await inTmp((dir) => {
+    const run = (...args) => {
+      const result = spawnSync('git', args, { cwd: dir, encoding: 'utf8' })
+      assert.equal(result.status, 0, result.stderr)
+    }
+    const marker = path.join(dir, 'ran')
+    const script = path.join(dir, 'evil.sh')
+    writeFileSync(script, `#!/bin/sh\necho ran >> '${marker}'\ncat "$2" 2>/dev/null\n`)
+    run('init', '-q')
+    run('config', 'user.email', 't@example.invalid')
+    run('config', 'user.name', 't')
+    writeFileSync(path.join(dir, '.gitattributes'), '*.txt diff=evil\n')
+    writeFileSync(path.join(dir, 'a.txt'), 'one\n')
+    run('add', '.')
+    run('commit', '-qm', 'init')
+    writeFileSync(path.join(dir, 'a.txt'), 'two\n')
+    for (const key of ['command', 'textconv']) {
+      run('config', `diff.evil.${key}`, `sh ${script}`)
+      for (const argv of [['git', 'diff'], ['git', 'diff', '--stat', '-p'], ['git', '-C', '.', 'diff'], ['git', '--no-pager', 'diff', '-p']]) {
+        const result = verify.runCommand({ argv, env: {}, cwd: '' }, { projectDir: dir, timeoutS: 20 })
+        assert.equal(result.code, 0, `${argv.join(' ')}: ${result.tail}`)
+        assert.equal(existsSync(marker), false, `git diff ran the ${key} program for: ${argv.join(' ')}`)
+      }
+      run('config', '--unset', `diff.evil.${key}`)
+    }
+  })
+})
+
+test('npm, npx, pnpm and yarn refuse the interpreter short flags anywhere on the line, as node does', () => {
+  const parsed = (raw) => verify.parseVerify(`CC_TIERS_VERIFY: ${raw}`)[0]
+  for (const raw of [
+    'npm test -- -r ./x.js',
+    'npm run test -- -r ./x.js',
+    'npm test -- -e x',
+    'npm test -- -p x',
+    'npm test -- -pe x',
+    'npm test -- -ep x',
+    'npx tsc -r x',
+    'pnpm test -- -r x',
+    'yarn test -r x',
+    'node --test -r x',
+    'node --test t.mjs -r x',
+  ]) {
+    assert.equal(parsed(raw).kind, 'invalid', raw)
+  }
+  for (const raw of ['npm test -- --grep slot', 'npm test -- -g slot', 'npm test -- -t slot', 'node --test --test-name-pattern=slot', 'pnpm test -- --reporter=dot']) {
+    assert.equal(parsed(raw).kind, 'command', raw)
+  }
+})
+
+test('an interpreter option only counts before the script or the -m module; what follows gets the default rule, or the pytest rule after -m pytest', () => {
+  const parsed = (raw) => verify.parseVerify(`CC_TIERS_VERIFY: ${raw}`)[0]
+  for (const raw of [
+    'python -m pytest -c pytest.ini',
+    'python -u -m pytest -c x',
+    'python -Werror -m pytest -q',
+    'python script.py -c x',
+    'bash t.sh -c x',
+    'sh t.sh -c x',
+  ]) {
+    assert.equal(parsed(raw).kind, 'command', raw)
+  }
+  for (const raw of ['perl t.pl -e x', 'ruby t.rb -e x', 'php t.php -r x', 'bash t.sh -e x', 'python -m mymod -p x', 'python script.py -r x', 'python -W ignore -c x', 'python -X dev -c x', 'bash -o pipefail -c x', 'perl -I lib -e x', 'ruby -I lib -e x', 'php -d x=1 -r code']) {
+    assert.equal(parsed(raw).kind, 'invalid', raw)
+  }
+})
+
+test('python -m pytest follows the pytest rule, and the flags that load a plugin, a reporter or an env file named on the line are refused', () => {
+  const parsed = (raw) => verify.parseVerify(`CC_TIERS_VERIFY: ${raw}`)[0]
+  for (const raw of [
+    'python -m pytest -p evil',
+    'python3 -m pytest -pevil',
+    'python -mpytest -p evil',
+    'docker compose exec -T app python -m pytest -p evil',
+    'pytest -o addopts=-pevil',
+    'pytest -o addopts -pevil',
+    'pytest -qo addopts=-pevil',
+    'python -m pytest -qp evil',
+    'pytest --override-ini=addopts=-pevil',
+    'python -m pytest -o addopts=-pevil',
+    'PYTEST_ADDOPTS=-pevil pytest',
+    'PYTEST_PLUGINS=evil pytest',
+    'node --test --test-reporter=/tmp/x.mjs',
+    'node --test --test-reporter ./x.mjs',
+    'npm test -- --test-reporter=./x.mjs',
+    'node --test --test-reporter-destination=/tmp/x',
+    'node --test --test-reporter-destination /tmp/x',
+    'node --test --env-file=/tmp/x',
+    'node --test --env-file-if-exists=/tmp/x',
+    'npm test --prefix /tmp/evil',
+    'npm test --prefix=/tmp/evil',
+    'git -c core.pager=x diff --stat',
+    'git -p diff --stat',
+    'git log -p',
+    'git diff --stat -p --no-index /dev/null /etc/hostname',
+    'git diff --stat --patch --no-index /dev/null /etc/hostname',
+    'pytest -p no:cacheprovider',
+    'pytest -r a -k x',
+    'python3 -m pytest -p no:cacheprovider',
+    'docker compose run --rm app pytest -p evil',
+    'docker run img node -r ./evil.js',
+    'docker exec --privileged c pytest -p evil',
+    'docker-compose run app ruby -r ./evil x',
+    'node node_modules/.bin/mocha -R ./evil.js',
+    'bun x.js -R ./e',
+  ]) {
+    assert.equal(parsed(raw).kind, 'invalid', raw)
+  }
+  for (const raw of [
+    'pytest -o cache_dir=.cache',
+    'pytest -ko addopts',
+    'python -m pytest -q -o cache_dir=.cache',
+    'node --test --test-reporter=dot',
+    'node --test --test-reporter spec --test-reporter-destination=stdout',
+    'npm test -- --reporter=dot',
+    'git diff --stat --text',
+    'git diff --name-only -c',
+    'git -C . diff --stat',
+  ]) {
+    assert.equal(parsed(raw).kind, 'command', raw)
+  }
+})
+
+test('a program with no rule of its own keeps the code flags refused anywhere on the line, unless it is known not to run code with them', () => {
+  const parsed = (raw) => verify.parseVerify(`CC_TIERS_VERIFY: ${raw}`)[0]
+  for (const raw of ['uv run pytest -p evil', 'poetry run pytest -p evil', 'pipx run pytest -p evil', 'py.test -p evil', 'bundle exec rspec -r ./x', 'uv run python -e x', 'mytool -pe x', 'mytool --user x', 'mkdir -p d']) {
+    assert.equal(parsed(raw).kind, 'invalid', raw)
+  }
+  for (const raw of ['grep -e x f', 'egrep -r x .', 'rg -e x', 'ls -r', 'vendor/bin/phinx status -e test', 'systemctl --user status x']) {
+    assert.equal(parsed(raw).kind, 'command', raw)
+  }
+})
+
+test('a short flag bundled with others still counts as the code flag, unless a letter takes the rest of the token as its value', () => {
+  const parsed = (raw) => verify.parseVerify(`CC_TIERS_VERIFY: ${raw}`)[0]
+  for (const raw of ['bash -lc x', 'sh -ec x', 'python -Ic x', 'python3 -uc x', 'perl -we x', 'ruby -we x', 'node -ep x', 'php -B x', 'pytest -qp plugin']) {
+    const line = parsed(raw)
+    assert.equal(line.kind, 'invalid', raw)
+    assert.match(line.reason, /^refused flag -[a-z]+:/i, raw)
+  }
+  for (const raw of ['python -Werror -m pytest', 'pytest -rA', 'pytest -rp', 'pytest -kp', 'pytest -qq -x']) {
+    assert.equal(parsed(raw).kind, 'command', raw)
+  }
+})
+
 test('inline code on an allowed prefix never runs', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-verify-'))
   try {
@@ -794,15 +1053,43 @@ test('gateAllows: docker exec around a syntax-only check works as for the other 
   assert.equal(verify.gateAllows(argv('docker compose exec app php -l a.php'), [], [], { DOCKER_HOST: 'tcp://x' }), false)
 })
 
-test('the gate runs a syntax-only check even when verify_allow replaces the default list', () => {
-  const { run, calls } = scripted()
-  const result = verify.runGate(
-    'CC_TIERS_VERIFY: php -l Test/BookingTest.php\nCC_TIERS_VERIFY: bash -n scripts/semear.sh\nCC_TIERS_VERIFY: node --check public/app.js\nCC_TIERS_VERIFY: node --check public/app.js --import x\nCC_TIERS_VERIFY: php -l -d x=1 a.php',
-    { projectDir: PROJECT, allow: [], timeoutS: 60, budgetS: 600, run },
-  )
-  assert.deepEqual(calls.map((call) => call.cmd.argv.join(' ')), ['php -l Test/BookingTest.php', 'bash -n scripts/semear.sh', 'node --check public/app.js'])
-  assert.deepEqual(result.verified, ['php -l Test/BookingTest.php', 'bash -n scripts/semear.sh', 'node --check public/app.js'])
-  assert.deepEqual(result.unverified.map((item) => item.reason.split(':')[0]), ['refused flag --import', 'outside verify_allow'])
+test('the gate runs a syntax-only check even when verify_allow replaces the default list', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-verify-syntax-'))
+  try {
+    for (const file of ['Test/BookingTest.php', 'scripts/semear.sh', 'public/app.js', 'a.php']) {
+      mkdirSync(path.dirname(path.join(dir, file)), { recursive: true })
+      writeFileSync(path.join(dir, file), '')
+    }
+    const { run, calls } = scripted()
+    const result = verify.runGate(
+      'CC_TIERS_VERIFY: php -l Test/BookingTest.php\nCC_TIERS_VERIFY: bash -n scripts/semear.sh\nCC_TIERS_VERIFY: node --check public/app.js\nCC_TIERS_VERIFY: node --check public/app.js --import x\nCC_TIERS_VERIFY: php -l -d x=1 a.php',
+      { projectDir: dir, allow: [], timeoutS: 60, budgetS: 600, run },
+    )
+    assert.deepEqual(calls.map((call) => call.cmd.argv.join(' ')), ['php -l Test/BookingTest.php', 'bash -n scripts/semear.sh', 'node --check public/app.js'])
+    assert.deepEqual(result.verified, ['php -l Test/BookingTest.php', 'bash -n scripts/semear.sh', 'node --check public/app.js'])
+    assert.deepEqual(result.unverified.map((item) => item.reason.split(':')[0]), ['refused flag --import', 'outside verify_allow'])
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a one-file syntax check of a file that is not there is not validated with a file not found reason, and is not a failure', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-verify-syntax-'))
+  try {
+    mkdirSync(path.join(dir, 'api'))
+    writeFileSync(path.join(dir, 'api', 'a.php'), '')
+    const lines = ['php -l missing.php', 'bash -n scripts/gone.sh', 'sh -n gone.sh', 'node --check gone.mjs', 'cd api && php -l b.php', 'cd api && php -l a.php']
+    const { run, calls } = scripted()
+    const result = verify.runGate(lines.map((line) => `CC_TIERS_VERIFY: ${line}`).join('\n'), { projectDir: dir, allow: [], timeoutS: 60, budgetS: 600, run })
+    assert.deepEqual(calls.map((call) => call.cmd.argv.join(' ')), ['php -l a.php'], 'only the file that exists ran')
+    assert.deepEqual(result.verified, ['cd api && php -l a.php'])
+    assert.deepEqual(result.unverified, lines.slice(0, 5).map((raw) => ({ raw, reason: `file not found: ${raw}` })))
+    assert.equal(result.failure, null)
+    assert.equal(result.status, 'pass')
+    assert.match(verify.gateMessage('booking', result), /not validated: file not found: php -l missing\.php - not re-run/)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 })
 
 test('gateAllows: a detected make test is exact, so make variables need a verify_allow entry', () => {
@@ -874,15 +1161,6 @@ test('a Makefile target, a composer script and a syntax check the project declar
   }
 })
 
-const inTmp = async (fn) => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-verify-parent-'))
-  try {
-    await fn(dir)
-  } finally {
-    await rm(dir, { recursive: true, force: true })
-  }
-}
-
 test('a line with no cd is not run from a folder of repositories, and is not a failure', async () => {
   await inTmp((dir) => {
     mkdirSync(path.join(dir, 'api', '.git'), { recursive: true })
@@ -926,6 +1204,7 @@ test('in a folder of repositories a cd line runs what its own repo declares, and
 test('in a folder of repositories a bare one-file syntax check runs from the folder, any other bare line is told to cd', async () => {
   await inTmp((dir) => {
     mkdirSync(path.join(dir, 'app', '.git'), { recursive: true })
+    for (const file of ['app/x.php', 'run.sh', 'app/a.mjs']) writeFileSync(path.join(dir, file), '')
     const { run, calls } = scripted()
     const lines = ['php -l app/x.php', 'bash -n run.sh', 'node --check app/a.mjs', 'php -l app/x.txt', 'php -l a.php b.php']
     const result = verify.runGate(lines.map((line) => `CC_TIERS_VERIFY: ${line}`).join('\n'), { projectDir: dir, allow: [], timeoutS: 60, budgetS: 600, run })
@@ -933,6 +1212,45 @@ test('in a folder of repositories a bare one-file syntax check runs from the fol
     assert.deepEqual(result.verified, lines.slice(0, 3))
     for (const item of result.unverified) assert.match(item.reason, /a folder of repositories; write `cd <repo dir> && /, item.raw)
     assert.deepEqual(result.unverified.map((item) => item.raw), lines.slice(3))
+  })
+})
+
+test('in a folder of repositories a bare line runs in the one child repo that holds every file of the task, else it is told to cd', async () => {
+  await inTmp((dir) => {
+    for (const name of ['api', 'web']) mkdirSync(path.join(dir, name, '.git'), { recursive: true })
+    mkdirSync(path.join(dir, 'docs'))
+    const asked = []
+    const detectedIn = (where) => {
+      asked.push(where)
+      return where === path.join(dir, 'api') ? [['make', 'test']] : []
+    }
+    const gateIn = (files, text = 'CC_TIERS_VERIFY: make test\nCC_TIERS_VERIFY: npm test\nCC_TIERS_VERIFY: cd web && npm test') => {
+      const { run, calls } = scripted()
+      const result = verify.runGate(text, { projectDir: dir, allow: ALLOW, detectedIn, files, timeoutS: 60, budgetS: 600, run })
+      return { result, ran: calls.map((call) => [call.cmd.cwd, call.cmd.argv.join(' ')]) }
+    }
+
+    const one = gateIn(['api/src/a.php', 'api/tests', 'api'])
+    assert.deepEqual(one.ran, [['api', 'make test'], ['api', 'npm test'], ['web', 'npm test']], 'a bare line runs in api, a cd line where it says')
+    assert.deepEqual(one.result.verified, ['make test', 'npm test', 'cd web && npm test'])
+    assert.deepEqual(one.result.unverified, [])
+    assert.ok(asked.includes(path.join(dir, 'api')), 'the checks come from the repo it ran in')
+
+    for (const files of [[], ['api/a.php', 'web/b.php'], ['api/a.php', 'README.md'], ['docs/a.md'], ['.'], ['missing/a.php']]) {
+      const refused = gateIn(files)
+      assert.deepEqual(refused.ran, [['web', 'npm test']], JSON.stringify(files))
+      assert.deepEqual(refused.result.unverified.map((item) => item.raw), ['make test', 'npm test'], JSON.stringify(files))
+      for (const item of refused.result.unverified) assert.match(item.reason, /a folder of repositories; write `cd <repo dir> && /, JSON.stringify(files))
+    }
+  })
+})
+
+test('a bare line does not take its repo from the task files when the project is not a folder of repositories', async () => {
+  await inTmp((dir) => {
+    mkdirSync(path.join(dir, 'api'), { recursive: true })
+    const { run, calls } = scripted()
+    verify.runGate('CC_TIERS_VERIFY: npm test', { projectDir: dir, allow: ALLOW, files: ['api/a.php'], timeoutS: 60, budgetS: 600, run })
+    assert.deepEqual(calls.map((call) => call.cmd.cwd), [''])
   })
 })
 

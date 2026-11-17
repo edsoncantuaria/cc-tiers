@@ -2363,7 +2363,7 @@ test('a slug named like an Object.prototype key works through every per-slug map
   assert.equal(Object.haiku, undefined)
 })
 
-const VERIFY_ALLOW_DEFAULT = 'npm test, npm run test, node --test, npx tsc, npx eslint, npx vitest, npx jest, npx playwright test, vendor/bin/phpunit, ./vendor/bin/phpunit, vendor/bin/phpstan, ./vendor/bin/phpstan, vendor/bin/phpcs, ./vendor/bin/phpcs, pytest, python -m pytest, go test, cargo test'
+const VERIFY_ALLOW_DEFAULT = 'npm test, npm run test, node --test, npx tsc, npx eslint, npx vitest, npx jest, npx playwright test, vendor/bin/phpunit, ./vendor/bin/phpunit, vendor/bin/phpstan, ./vendor/bin/phpstan, vendor/bin/phpcs, ./vendor/bin/phpcs, pytest, python -m pytest, go test, cargo test, wc -l, grep -c, git diff --name-only, git diff --stat, git status --short'
 
 test('manifest declares the verify knobs', () => {
   const manifest = JSON.parse(readFileSync(path.join(ROOT, '.claude-plugin/plugin.json'), 'utf8'))

@@ -1528,6 +1528,31 @@ test('prepareReport: in a folder of repositories a cd line runs a check detected
   }
 })
 
+test('prepareReport: in a folder of repositories a bare line runs in the one repo that holds the CC_TIERS_FILES of the task', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-int-'))
+  try {
+    for (const name of ['app', 'web']) mkdirSync(path.join(dir, name, '.git'), { recursive: true })
+    writeFileSync(path.join(dir, 'app', 'package.json'), '{"scripts":{"test":"node --version"}}')
+    // npm test is not in verify_allow: only its detection in the repo it runs in lets the gate run it.
+    const ctx = { routing: routingWith({ verify_allow: 'node --test' }), ccCost: false, projectDir: dir }
+    const text = report('paging', 'implementer', 'sonnet', 'pass', ['CC_TIERS_VERIFY: npm test'])
+    const gateFor = (files) => tiers.prepareReport(ctx, event('m', 'implementer', text, writer('paging', `CC_TIERS_FILES: ${files}\n`)), {}, { budgetS: 60 }).gate
+
+    const inApp = gateFor('app/src/users.js, app/test')
+    assert.deepEqual(inApp.verified, ['npm test'])
+    assert.deepEqual(inApp.unverified, [])
+    assert.equal(inApp.failure, null)
+
+    for (const files of ['app/src/users.js, web/src/page.js', 'app/src/users.js, README.md']) {
+      const apart = gateFor(files)
+      assert.deepEqual(apart.verified, [], files)
+      assert.match(apart.unverified[0].reason, /a folder of repositories; write `cd <repo dir> && npm test`$/, files)
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('two gates of one project never run their commands at the same time', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-int-'))
   try {
