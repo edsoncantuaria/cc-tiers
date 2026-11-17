@@ -361,7 +361,8 @@ export function runCommand(cmd, { projectDir, timeoutS }) {
   const result = spawnSync(file, args, {
     cwd: path.resolve(projectDir, cmd.cwd || '.'),
     env: { ...process.env, ...(cmd.env || {}) },
-    timeout: timeoutS * 1000,
+    // spawnSync needs an integer and treats 0 as no limit.
+    timeout: Math.max(1, Math.ceil(timeoutS * 1000)),
     // SIGTERM can be trapped, and spawnSync would then wait forever.
     killSignal: 'SIGKILL',
     stdio: ['ignore', 'pipe', 'pipe'],

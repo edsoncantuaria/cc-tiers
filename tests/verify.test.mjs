@@ -386,6 +386,29 @@ test('runCommand runs a real node command', async () => {
   }
 })
 
+test('runCommand takes a fractional timeout: it runs, never gets 0 (no limit), and still kills a hang', () => {
+  // The gate budget is the verify timeout minus elapsed ms, so it is rarely a whole number of seconds.
+  const quick = verify.runCommand({ argv: [process.execPath, '-e', ''] }, { projectDir: os.tmpdir(), timeoutS: 29.869999999999997 })
+  assert.equal(quick.code, 0)
+  assert.equal(quick.timedOut, false)
+  const tiny = verify.runCommand({ argv: [process.execPath, '-e', 'setTimeout(() => {}, 3000)'] }, { projectDir: os.tmpdir(), timeoutS: 0.0001 })
+  assert.equal(tiny.timedOut, true)
+  const hung = verify.runCommand({ argv: [process.execPath, '-e', 'setTimeout(() => {}, 5000)'] }, { projectDir: os.tmpdir(), timeoutS: 1.0505 })
+  assert.equal(hung.timedOut, true)
+})
+
+test('runGate with a fractional budget below the timeout runs the real command and reports it', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-verify-'))
+  try {
+    await writeFile(path.join(dir, 'ok.mjs'), 'process.exit(0)\n')
+    const gate = verify.runGate('CC_TIERS_VERIFY: node ok.mjs', { projectDir: dir, allow: verify.parseAllow('node'), timeoutS: 60, budgetS: 29.869999999999997 })
+    assert.equal(gate.status, 'pass')
+    assert.deepEqual(gate.verified, ['node ok.mjs'])
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 const INLINE = [
   'node --test --import=data:text/javascript,import%7BwriteFileSync%20as%20w%7Dfrom%22node:fs%22%3Bw%28%22PWNED1%22,%22x%22%29',
   'NODE_OPTIONS=--import=data:text/javascript,import%7BwriteFileSync%20as%20w%7Dfrom%22node:fs%22%3Bw%28%22PWNED2%22,%22x%22%29 node --test',
