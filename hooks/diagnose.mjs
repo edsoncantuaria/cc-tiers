@@ -22,6 +22,7 @@ export const FAILURE_CATEGORIES = [
   'scope',
   'data',
   'coverage',
+  'defect',
   'unverifiable',
   'unknown',
 ]
@@ -152,6 +153,7 @@ const HYPOTHESES = {
   infra: 'The environment failed (network, port, disk, memory, rate limit or service), not the code.',
   data: 'The test data the check needs is missing or wrong: a seed or fixture lacks rows, or already holds one the scenario needs absent.',
   coverage: 'A spec criterion has no test that exercises it, so the review cannot confirm it holds.',
+  defect: 'A reviewer traced a defect in the changed code; no test ran, so there is no failing output yet.',
   flaky: 'The failure is intermittent and may pass on a rerun.',
   scope: 'The change touches files or behavior outside the task.',
   unverifiable: 'The repo has no way to exercise this failure, so another attempt cannot be checked.',
@@ -166,12 +168,14 @@ function linesOf(text) {
   return text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
 }
 
-function reviewCategoryToCategory(reviewCategory, reason) {
+function reviewCategoryToCategory(reviewCategory, reason, evidence) {
   const key = fold(reviewCategory).trim()
   const mapped = REVIEW_CATEGORIES[key]
   if (!mapped) return null
   const stateful = key === 'concurrency' || key === 'state'
-  return stateful && DESIGN_RE.test(fold(reason)) ? 'architecture' : mapped
+  const category = stateful && DESIGN_RE.test(fold(reason)) ? 'architecture' : mapped
+  // A traced finding was reasoned from the code and never run, so no test output backs a `test` diagnosis.
+  return category === 'test' && evidence === 'trace' ? 'defect' : category
 }
 
 const isAssertion = (line) => ASSERTION_RE.test(fold(line))
@@ -204,7 +208,7 @@ export function diagnoseFailure(input) {
   const reasonLines = linesOf(reasonText)
 
   // A finding that says a criterion has no test is a missing test, whatever its category: no test failed.
-  const reviewed = source !== 'review' ? null : reviewEvidence === 'coverage' ? 'coverage' : reviewCategoryToCategory(asText(reviewCategory), reasonText)
+  const reviewed = source !== 'review' ? null : reviewEvidence === 'coverage' ? 'coverage' : reviewCategoryToCategory(asText(reviewCategory), reasonText, reviewEvidence)
   const allowed = (rule) => !rule.unless || ![...detailLines, ...reasonLines].some((line) => rule.unless.test(fold(line)))
   const detailRule = reviewed ? null : RULES.find((rule) => !rule.reasonOnly && allowed(rule) && matchingLines(rule, detailLines, true).length)
   const category =
@@ -248,6 +252,7 @@ const ACTIONS = {
   scope: ['retry', 'Revert what is outside the task and retry with only the files it names.'],
   data: ['retry', "If the seed or fixture lacks the data, fix it in the repo (changing it is allowed) or ask for the data when the repo cannot supply it; if the code mishandles that missing or empty data, fix the code. Then retry."],
   coverage: ['retry', 'The review found a spec criterion with no test: write the missing test for that criterion, then rerun the suite.'],
+  defect: ['retry', 'Retry with the finding (expected, observed, where): fix the cause it names, and add a test that shows it.'],
   unverifiable: ['report-partial', 'The repo cannot exercise this failure: do not move up a tier. Deliver the verifiable part, report the task as partial, and name the test setup that is missing.'],
   unknown: ['retry', 'cc-tiers could not tell the cause from the report, so it has no advice for this attempt.'],
 }
