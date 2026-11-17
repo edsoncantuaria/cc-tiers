@@ -2816,11 +2816,18 @@ test('only another task that writes in the tree excuses a failing parked check: 
 })
 
 test('a writer in its own worktree does not count as a write in the shared tree', () => {
+  const routing = tiers.mergeRouting(tiers.loadJson(path.join(ROOT, 'config/routing.default.json')), null, { verify: 'off' })
+  const ctx = { routing, projectDir: '', dataDir: '' }
   const state = tiers.emptyState('s')
-  state.active = { apart: { role: 'implementer', files: ['src/x.js'], isolated: true, since: Date.now() } }
-  tiers.logReport(state, { task: 'apart', role: 'implementer', tier: 'sonnet', outcome: 'review' })
+  state.active = {
+    apart: { role: 'implementer', files: ['src/x.js'], isolated: true, since: Date.now() },
+    shared: { role: 'implementer', files: ['src/y.js'], isolated: false, since: Date.now() },
+  }
+  const pass = (id, task) => ({ kind: 'report', id, role: 'implementer', prompt: `CC_TIERS_TASK: ${task}\nCC_TIERS_RESEARCH: none - x\nCC_TIERS_SPEC: none - x`, text: `CC_TIERS_TASK: ${task}\nCC_TIERS_ROLE: implementer\nCC_TIERS_STATUS: pass\nCC_TIERS_REASON: ok` })
+  tiers.processReport(ctx, state, pass('w1', 'apart'))
+  tiers.processReport(ctx, state, pass('w2', 'shared'))
+  assert.deepEqual(state.active, {}, 'both writers were released by their reports')
   assert.equal(state.writtenAt?.apart, undefined)
-  tiers.logReport(state, { task: 'shared', role: 'implementer', tier: 'sonnet', outcome: 'review' })
   assert.ok(state.writtenAt.shared > 0)
 })
 

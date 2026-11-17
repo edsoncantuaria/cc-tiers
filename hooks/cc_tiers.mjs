@@ -1465,8 +1465,11 @@ export function applyEvent(state, event, routing) {
 
   const role = event.role
   if (role === 'researcher') return applyResearch(state, meta, task, headers, event)
-  // A delegated writer that reported, or crashed, is no longer editing the tree.
-  if (DELEGATED_WRITERS.has(role)) releaseActive(state, task)
+  // A delegated writer that reported, or crashed, is no longer editing the tree; whether it wrote in its own worktree is kept for the log.
+  if (DELEGATED_WRITERS.has(role)) {
+    meta.isolated = Boolean(own(state.active, task)?.isolated)
+    releaseActive(state, task)
+  }
   // Any writer report, a failure or crash too, makes the completion printed before it stale.
   if (!REVIEW_ROLES.has(role) && state.completions) delete state.completions[task]
   let tier = (headers.TIER || '').toLowerCase()
@@ -4123,7 +4126,7 @@ export function logReport(state, meta, mode = '') {
   const writer = WRITER_ROLES.has(meta.role) || SESSION_ROLES.has(meta.role)
   // When each task last wrote in the tree, so a check parked before another task's write can tell that write from its own.
   // A writer in its own worktree wrote in another tree.
-  if (writer && !own(state.active, meta.task)?.isolated) state.writtenAt = Object.fromEntries([...Object.entries(state.writtenAt || {}).filter(([name]) => name !== meta.task), [meta.task, Date.now()]].slice(-MAX_LOG))
+  if (writer && !meta.isolated) state.writtenAt = Object.fromEntries([...Object.entries(state.writtenAt || {}).filter(([name]) => name !== meta.task), [meta.task, Date.now()]].slice(-MAX_LOG))
   if (writer) {
     entry.attempts += 1
     if (mode && !entry.writer) entry.writer = mode
