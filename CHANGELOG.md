@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- The session lock file holds the pid of its holder. It is taken over only when that process is gone or the lock is older than 700 s (660 s for the gate lock); a lock with no pid (the old format) keeps the 10 s rule. The wait is 5 s (2 s for memory and history). Before, a hook that waited 3 s ran and saved without the lock, and a lock older than 10 s was taken over even with a live holder, so counts were lost.
+- Without the lock a hook still answers from the state it read, but saves nothing and records an internal hook error (the task is taken from the hook input), which the completion names. Memory and history writes, `/cc-tiers:redo` and `/cc-tiers:memory` also write nothing without the lock, and the commands say the state is busy.
+- An absolute path inside the project directory (a `CC_TIERS_FILES` entry, or a file named in a prompt or report) is compared as its project-relative path, symlinks resolved. Two writers with disjoint absolute files run in parallel, the scope check names the files outside them, and a folder of repositories finds the child repo. An absolute path outside the project keeps covering the whole project. Before, any absolute entry counted as the whole project.
+- Why: the review of the 0.13.6 work found two gaps (P1, P2): a hook that saved without the lock or took the lock of a live holder lost counts, and an absolute path made every writer share the whole project, so parallel writers ran alone and the scope check named nothing.
+
 ## 0.13.6 - 2026-11-17
 
 ### Added
