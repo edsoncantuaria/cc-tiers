@@ -2996,7 +2996,7 @@ test('a writer in its own worktree does not count as a write in the shared tree'
 })
 
 test('Stop gates a rework parked after its task finished, and stops holding for a review launched hours ago', async () => {
-  const done = { 'users-pagination': { at: Date.now() - 60000, result: { status: 'verified' }, line: 'cc-tiers completion: users-pagination verified' } }
+  const done = { 'users-pagination': { at: Date.now() - 60000, seenUntil: Date.now() - 60000, result: { status: 'verified' }, line: 'cc-tiers completion: users-pagination verified' } }
   const rework = await stopOnState({ completions: done })
   assert.equal(rework.state.tasks['users-pagination'].failures.length, 1, 'a report parked after the completion is a new attempt')
   const lost = { 'agent-r': { role: 'reviewer', prompt: 'CC_TIERS_TASK: other-task', tool_use_id: 'r1', at: Date.now() - 4 * 60 * 60 * 1000 } }
@@ -3004,8 +3004,25 @@ test('Stop gates a rework parked after its task finished, and stops holding for 
   assert.equal(stale.state.tasks['users-pagination'].failures.length, 1, 'a review launched hours ago no longer holds the check')
 })
 
+test('a fix parked while the finishing review ran is new work: Stop gates it instead of dropping it', () => {
+  const routing = tiers.mergeRouting(tiers.loadJson(path.join(ROOT, 'config/routing.default.json')), null, { specify: 'off', verify: 'off', review_policy: 'always' })
+  const head = 'CC_TIERS_TASK: users-pagination\nCC_TIERS_TIER: opus'
+  const attempt = (id, parkedAt) => ({ id, role: 'orchestrator', parkedAt, text: `${head}\nCC_TIERS_ROLE: orchestrator\nCC_TIERS_VERIFY: none - x\nCC_TIERS_STATUS: pass\nCC_TIERS_REASON: ok` })
+  const count = (state, item) => tiers.applyEvent(state, tiers.prepareReport({ routing, projectDir: '' }, { kind: 'report', prompt: '', ...item }), routing)
+  const state = tiers.emptyState('s')
+  const now = Date.now()
+  assert.equal(count(state, attempt('row:a1', now - 10000)).meta.outcome, 'review')
+  const a2 = attempt('row:a2', now - 5000)
+  state.awaiting = [a2]
+  const review = tiers.agentReport('R1', { role: 'reviewer', prompt: 'CC_TIERS_TASK: users-pagination', at: now - 8000 }, `${head}\nCC_TIERS_ROLE: reviewer\nCC_TIERS_STATUS: pass\nCC_TIERS_REASON: ok`)
+  tiers.applyEvent(state, tiers.prepareReport({ routing, projectDir: '' }, review), routing)
+  const held = tiers.holdParked(state, tiers.peekAwaiting(state))
+  assert.deepEqual(held.gate.map((item) => item.id), ['row:a2'], 'the review launched before a2 was parked never saw it')
+  assert.deepEqual(held.notes, [])
+})
+
 test('Stop drops the parked report of a task that finished after it was parked, without running its check again', async () => {
-  const completions = { 'users-pagination': { at: Date.now() + 60000, result: { status: 'verified' }, line: 'cc-tiers completion: users-pagination verified' } }
+  const completions = { 'users-pagination': { at: Date.now() + 60000, seenUntil: Date.now() + 60000, result: { status: 'verified' }, line: 'cc-tiers completion: users-pagination verified' } }
   const { out, state } = await stopOnState({ completions })
   const message = out.reason || out.systemMessage || ''
   assert.match(message, /cc-tiers gate: users-pagination finished after this report was parked; its check was not run again/)

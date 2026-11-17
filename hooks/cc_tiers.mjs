@@ -1801,7 +1801,9 @@ export function applyEvent(state, event, routing) {
   }
   if (meta.outcome === 'pass') {
     if (REVIEW_ROLES.has(role)) logEntry(state, task).reviewLaunched = launchTime(event)
-    const finished = finishTask(state, task, routing, { reviewed: REVIEW_ROLES.has(role) || reviewed, tier })
+    // What finished the task saw the work up to here: a review, what was there when it launched; a writer, its own report.
+    const seenUntil = REVIEW_ROLES.has(role) ? launchTime(event) : Date.now()
+    const finished = finishTask(state, task, routing, { reviewed: REVIEW_ROLES.has(role) || reviewed, tier, seenUntil })
     meta.completion = finished.result
     message = `${message}\n${finished.line}`
   }
@@ -1903,7 +1905,7 @@ function rememberGate(state, gate) {
  * The completion contract of a task that just passed: criteria states, checks run
  * and not run, and a qualitative confidence. A pass is never more than the evidence shows.
  */
-function finishTask(state, task, routing, { reviewed, tier }) {
+function finishTask(state, task, routing, { reviewed, tier, seenUntil }) {
   // A writer report or delegation drops the stored line, so one still there is a review asked again: it repeats that completion.
   const printed = own(state.completions, task)
   if (printed) return printed
@@ -1939,7 +1941,7 @@ function finishTask(state, task, routing, { reviewed, tier }) {
   const line =
     `cc-tiers completion: ${task} ${result.status} on ${tier}${after}, ${risk} risk; confidence ${result.confidence.level} (${result.confidence.reasons.join('; ')}). ` +
     `Checks run ${checks.run}${reused}, passed ${checks.passed}, failed ${checks.failed}, not run ${checks.notRun}.${criteriaPart}${remaining}`
-  const finished = { at: Date.now(), result: { status: result.status, confidence: result.confidence.level, risk }, line: criteria.length ? `${line}\n${criteriaTable(task, criteria)}` : line }
+  const finished = { at: Date.now(), seenUntil, result: { status: result.status, confidence: result.confidence.level, risk }, line: criteria.length ? `${line}\n${criteriaTable(task, criteria)}` : line }
   const completions = state.completions && typeof state.completions === 'object' ? state.completions : (state.completions = {})
   completions[task] = finished
   const names = Object.keys(completions)
@@ -3943,14 +3945,14 @@ export function peekParked(state, parked) {
   }))
 }
 
-/**
- * Sorts the parked reports before a Stop gates them. While a review this session launched still runs in the background, none is gated:
- * it may use the same test data, so a check run now could fail on its run. A report whose task finished after it was parked is dropped,
- * its check not run again. For the rest, changed names the other tasks that wrote in the tree after it was parked.
- */
 /** How long a background review with no report yet holds the parked checks: past it, the review is taken as lost. */
 const HOLD_FOR_REVIEW_MS = 3 * 60 * 60 * 1000
 
+/**
+ * Sorts the parked reports before a Stop gates them. While a review this session launched still runs in the background, none is gated:
+ * it may use the same test data, so a check run now could fail on its run. A report that what finished its task already saw is dropped (the
+ * finishing review launched after it was parked), its check not run again; one parked after that review launched is new work. For the rest, changed names the other tasks that wrote in the tree after it was parked.
+ */
 export function holdParked(state, parked) {
   // A review whose hand-back row is already parked has finished; only one with no report yet still runs, and one launched hours ago is taken as lost.
   const handedBack = new Set(parked.map((report) => report.agent_id).filter(Boolean))
@@ -3967,7 +3969,8 @@ export function holdParked(state, parked) {
   for (const report of parked) {
     const task = taskOf(report)
     const at = Number(report.parkedAt) || 0
-    if (at && task && !own(state.tasks, task) && Number(own(state.completions, task)?.at) > at) {
+    // Only a report the finishing review or writer saw is moot; one parked after the review launched is new, unreviewed work.
+    if (at && task && !own(state.tasks, task) && Number(own(state.completions, task)?.seenUntil) > at) {
       notes.push(`cc-tiers gate: ${task} finished after this report was parked; its check was not run again.`)
       dropAwaiting(state, [report.id])
       state.seen = [...(state.seen || []), report.id].slice(-MAX_SEEN)
