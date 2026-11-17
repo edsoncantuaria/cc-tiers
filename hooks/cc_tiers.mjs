@@ -1605,6 +1605,13 @@ export function applyEvent(state, event, routing) {
     delete current.rejected
     delete current.judged
   }
+  // A writer report that a passed review covered finishes the task with it; any other writer report ends that coverage.
+  const covers = REVIEW_ROLES.has(role) ? [] : current.reviewPassed || []
+  const reviewed = Boolean(id) && covers.includes(id)
+  if (covers.length) {
+    current = { ...current }
+    delete current.reviewPassed
+  }
 
   // The counter already moved past this tier. A stale lower-tier run must not reset it.
   let note = ''
@@ -1670,6 +1677,14 @@ export function applyEvent(state, event, routing) {
 
   let message
   if (REVIEW_ROLES.has(role)) {
+    // The writer attempts parked before this review started are the ones it saw; with no launch time, every parked one counts.
+    const launched = Number(event.launchedAt) > 0 || Number(event.durationMs) > 0 ? launchTime(event) : 0
+    const attempts = parkedFor(state, task, id, launched)
+    // An attempt the rejection did not judge is a new one: this review is of it, so the rejection of the attempt before no longer sticks.
+    if (current.rejected && attempts.some((item) => !(current.judged || []).includes(item.id))) {
+      delete current.rejected
+      delete current.judged
+    }
     // Evidence review: a rejection with no blocking finding approves; with findings, only they reach the writer.
     // A failed gate is no reviewer finding: judging the review's own findings would turn that failure back into a pass.
     const judged = routing.reviewEvidence && event.judged && !gateReason ? event.judged : null
@@ -1697,19 +1712,42 @@ export function applyEvent(state, event, routing) {
     } else {
       applied = status === 'fail' && current.rejected ? alreadyRejected(task, current, routing, reason) : applyReview(tasks, task, current, tier, status, reason, routing, role, inherited)
     }
+    // A pass covers the parked attempts Stop has not counted yet: the task finishes when it counts them, on their own gate and evidence.
+    const uncounted = applied.outcome === 'pass' ? attempts.filter((item) => !(state.seen || []).includes(item.id)) : []
+    if (uncounted.length) {
+      tasks[task] = { ...current, reviewPassed: uncounted.map((item) => item.id) }
+      logEntry(state, task).reviewLaunched = launchTime(event)
+      applied = {
+        outcome: 'review',
+        haikuFailure: false,
+        covering: true,
+        message: `Task ${task} passed ${role === 'checker' ? 'Sonnet' : 'Opus'} review of the attempt still waiting for its Stop gate. Do not send it to review again: cc-tiers counts that attempt when this turn ends and the task finishes then.`,
+      }
+    }
     meta.outcome = applied.outcome
     // A rejection sticks to the writer attempt it judged: a pass from another review of that attempt must not clear it.
     if (['retry', 'escalate', 'stop'].includes(applied.outcome)) {
-      const judged = [...new Set([...(tasks[task]?.judged || []), ...parkedFor(state, task, id).map((item) => item.id)])].slice(-MAX_JUDGED)
+      const judged = [...new Set([...(tasks[task]?.judged || []), ...attempts.map((item) => item.id)])].slice(-MAX_JUDGED)
       tasks[task] = { ...tasks[task], rejected: true, ...(judged.length ? { judged } : {}) }
     }
-    if (applied.outcome === 'review') meta.floor = reviewFloor(state, task, routing, flagged)
+    if (applied.outcome === 'review' && !applied.covering) meta.floor = reviewFloor(state, task, routing, flagged)
     if (verdictless && !applied.stillRejected) applied.message = `Task ${task}: the review had no CC_TIERS_STATUS line but had blocking findings, so it counts as a failure. ${applied.message}`
     message = reviewLine ? `${reviewLine}\n${applied.message}` : applied.message
     meta.haikuFailure = applied.haikuFailure
     meta.sonnetEscalated = applied.sonnetEscalated === true
     meta.stillRejected = applied.stillRejected === true
     meta.diagnosis = applied.diagnosis
+  } else if (status === 'pass' && reviewed) {
+    const rest = covers.filter((item) => item !== id)
+    if (rest.length) {
+      meta.outcome = 'review'
+      tasks[task] = { ...current, tier, reviewPassed: rest }
+      message = `Task ${task}: the review that passed already covered this attempt, which passed its gate. The task finishes when the ${plural(rest.length, 'other attempt')} it covered ${rest.length === 1 ? 'is' : 'are'} counted too.`
+    } else {
+      meta.outcome = 'pass'
+      delete tasks[task]
+      message = `Task ${task} passed on ${tier}: the review that passed already covered this attempt. cc-tiers cleared its attempt counter.`
+    }
   } else if (status === 'pass' && review === 'skip' && !reviewFloor(state, task, routing, flagged)) {
     meta.outcome = 'pass'
     delete tasks[task]
@@ -1753,7 +1791,7 @@ export function applyEvent(state, event, routing) {
   }
   if (meta.outcome === 'pass') {
     if (REVIEW_ROLES.has(role)) logEntry(state, task).reviewLaunched = launchTime(event)
-    const finished = finishTask(state, task, routing, { reviewed: REVIEW_ROLES.has(role), tier })
+    const finished = finishTask(state, task, routing, { reviewed: REVIEW_ROLES.has(role) || reviewed, tier })
     meta.completion = finished.result
     message = `${message}\n${finished.line}`
   }
@@ -1953,11 +1991,13 @@ function stoppedAt(current, routing) {
 
 const MAX_JUDGED = 10
 
-/** The writer reports of a task that wait for the Stop gate, oldest first; a parked review verdict is not a writer attempt. With before, only those parked ahead of that report: a later one is a new attempt. */
-function parkedFor(state, task, before = '') {
+/** The writer reports of a task that wait for the Stop gate, oldest first; a parked review verdict is not a writer attempt. With before, only those parked ahead of that report; with launched, only those parked by then: a later one is a new attempt. */
+function parkedFor(state, task, before = '', launched = 0) {
   const awaiting = state.awaiting || []
   const end = before ? awaiting.findIndex((item) => item?.id === before) : -1
-  return (end < 0 ? awaiting : awaiting.slice(0, end)).filter((item) => item?.id && !REVIEW_ROLES.has(item.role) && slug(parseHeaders(item.text || '').TASK || '') === task)
+  return (end < 0 ? awaiting : awaiting.slice(0, end)).filter(
+    (item) => item?.id && !REVIEW_ROLES.has(item.role) && slug(parseHeaders(item.text || '').TASK || '') === task && !(launched && item.parkedAt > launched),
+  )
 }
 
 /** The tier of the last writer attempt of a task: a session attempt still waiting for its gate, its counter, else its log; '' when none knows it. */
@@ -3677,7 +3717,7 @@ function prepareReview(routing, event, status, projectDir, budgetS) {
 function parkReport(state, report) {
   const awaiting = state.awaiting || []
   if (awaiting.some((item) => item.id === report.id) || (state.seen || []).includes(report.id)) return
-  state.awaiting = [...awaiting, report].slice(-MAX_PENDING)
+  state.awaiting = [...awaiting, { ...report, parkedAt: Date.now() }].slice(-MAX_PENDING)
 }
 
 const reportToken = (via, text) => `${via}:${lineId(String(text).replace(/\s+/g, ' ').trim())}`

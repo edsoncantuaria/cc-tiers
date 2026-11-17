@@ -694,6 +694,7 @@ test('a writer pass in a hand-back row waits for the Stop gate like a stop does'
       [{ id: 'agent:agent-w', role: 'implementer', agent_id: 'agent-w', prompt: WRITER_PROMPT, text }],
     )
     assert.ok(parked.awaiting[0].launchedAt > 0)
+    assert.ok(parked.awaiting[0].parkedAt > 0)
     assert.ok(parked.background['agent-w'], 'the agent stays registered until its report is counted')
 
     const end = endTurn(env, transcript, project)
@@ -1111,4 +1112,162 @@ test('a review rejection counted from its parked row judges the writer attempts 
   assert.equal(state.tasks['users-pagination'].rejected, undefined, 'the new attempt clears the rejection')
   assert.equal(state.tasks['users-pagination'].failures.length, 1)
   assert.deepEqual(state.evidence['users-pagination'].gate.unverified.map((item) => item.reason), ['no project dir'], 'its gate is kept as evidence')
+})
+
+const SESSION_HEAD = 'CC_TIERS_TASK: users-pagination\nCC_TIERS_TIER: opus'
+const parkedAttempt = (id, reason, parkedAt) => ({ id, role: 'orchestrator', parkedAt, text: `${SESSION_HEAD}\nCC_TIERS_ROLE: orchestrator\nCC_TIERS_VERIFY: none - x\nCC_TIERS_STATUS: pass\nCC_TIERS_REASON: ${reason}` })
+const VERDICTS = { reject: `${finding()}\nCC_TIERS_STATUS: fail\nCC_TIERS_REASON: off by one`, pass: 'CC_TIERS_STATUS: pass\nCC_TIERS_REASON: fixed' }
+
+/** A review counted by its report (SubagentStop or foreground), not by a parked row; launchedAt is when it started, or none, and extra is what a foreground run adds (durationMs). */
+function countReview(state, routing, id, verdict, launchedAt, extra = {}) {
+  const text = `${SESSION_HEAD}\nCC_TIERS_ROLE: reviewer\n${VERDICTS[verdict]}`
+  const event = tiers.agentReport(id, { role: 'reviewer', prompt: 'CC_TIERS_TASK: users-pagination\nreview it', at: launchedAt }, text)
+  return tiers.applyEvent(state, tiers.prepareReport({ routing, projectDir: '' }, { ...event, ...extra }), routing)
+}
+
+/** What Stop does with a parked session pass: gate it, count it. */
+const countAttempt = (state, routing, item) => tiers.applyEvent(state, tiers.prepareReport({ routing, projectDir: '' }, { kind: 'report', prompt: '', ...item }), routing)
+
+test('a rejection counted after the fix attempt was parked judges only the attempt parked before the review launched', () => {
+  const routing = routingWith({ review_policy: 'always' })
+  const state = tiers.emptyState('s')
+  state.awaiting = [parkedAttempt('row:a1', 'first', 100), parkedAttempt('row:a2', 'fixed the off by one', 300)]
+  const rejected = countReview(state, routing, 'R1', 'reject', 200)
+  assert.equal(rejected.meta.outcome, 'retry')
+  assert.deepEqual(state.tasks['users-pagination'].judged, ['row:a1'])
+
+  // Stop counts the parked attempts in order: the first is the one rejected, the fix is new and goes to review.
+  assert.match(countAttempt(state, routing, state.awaiting[0]).message, /its review already rejected this opus attempt/)
+  const fix = countAttempt(state, routing, state.awaiting[1])
+  assert.equal(fix.meta.outcome, 'review')
+  assert.equal(state.tasks['users-pagination'].rejected, undefined)
+  tiers.dropAwaiting(state, ['row:a1', 'row:a2'])
+  const passed = countReview(state, routing, 'R2', 'pass', 400)
+  assert.equal(passed.meta.outcome, 'pass')
+  assert.doesNotMatch(passed.message, /already rejected/)
+  assert.equal(state.tasks['users-pagination'], undefined)
+})
+
+test('a foreground review is placed by how long it ran: an attempt parked after it started is not judged', () => {
+  const routing = routingWith({ review_policy: 'always' })
+  const state = tiers.emptyState('s')
+  const now = Date.now()
+  state.awaiting = [parkedAttempt('row:a1', 'first', now - 5000), parkedAttempt('row:a2', 'fixed while the review ran', now - 100)]
+  assert.equal(countReview(state, routing, 'R1', 'reject', undefined, { durationMs: 1000 }).meta.outcome, 'retry')
+  assert.deepEqual(state.tasks['users-pagination'].judged, ['row:a1'])
+})
+
+test('a review pass counted while the fix attempt is still parked waits for that attempt to be counted, then finishes the task on its evidence', () => {
+  const routing = routingWith({ review_policy: 'always', verify: 'on' })
+  const state = tiers.emptyState('s')
+  state.awaiting = [parkedAttempt('row:a1', 'first', 100), parkedAttempt('row:a2', 'fixed the off by one', 300)]
+  assert.equal(countReview(state, routing, 'R1', 'reject', 200).meta.outcome, 'retry')
+  // What the rejected attempt proved: it must not decide the completion of the fix.
+  state.evidence = { 'users-pagination': { reports: [], verified: ['npm test'], gate: { status: 'verified', verified: ['npm test'], flaky: [], unverified: [], cached: [] } } }
+
+  const passed = countReview(state, routing, 'R2', 'pass', 400)
+  assert.equal(passed.meta.outcome, 'review')
+  assert.doesNotMatch(passed.message, /already rejected|completion/)
+  assert.match(passed.message, /Do not send it to review again/)
+  assert.deepEqual(state.tasks['users-pagination'].reviewPassed, ['row:a1', 'row:a2'])
+  assert.equal(state.tasks['users-pagination'].rejected, undefined)
+  assert.equal(state.completions?.['users-pagination'], undefined, 'nothing is finished before the attempt is counted')
+  assert.equal(state.awaiting.length, 2, 'the attempts stay parked for Stop')
+
+  // Stop counts them in order: the first is covered, the last one finishes the task.
+  const ctx = { routing, ccCost: false, projectDir: '' }
+  const stop = (item) => tiers.countParked(ctx, state, tiers.prepareParked(ctx, [item], {})[0])
+  const first = stop(state.awaiting[0])
+  assert.match(first, /already covered this attempt/)
+  assert.doesNotMatch(first, /Send the result to cc-tiers:reviewer/)
+  assert.deepEqual(state.tasks['users-pagination'].reviewPassed, ['row:a2'])
+  const fix = stop(state.awaiting[1])
+  assert.match(fix, /cc-tiers completion: users-pagination unverified on opus/, 'the fix has no check that ran: the rejected attempt\'s gate is not reused')
+  assert.equal(state.tasks['users-pagination'], undefined)
+  assert.equal(state.evidence['users-pagination'], undefined)
+  assert.equal(state.log['users-pagination'].status, 'done')
+  assert.equal(state.log['users-pagination'].attempts, 2, 'both attempts are logged')
+})
+
+test('a review pass counted before the session attempt it covers is gated at Stop does not reopen the task', () => {
+  const routing = routingWith({ review_policy: 'always' })
+  const state = tiers.emptyState('s')
+  state.awaiting = [parkedAttempt('row:a1', 'first', 100)]
+  const passed = countReview(state, routing, 'R1', 'pass', 200)
+  assert.equal(passed.meta.outcome, 'review')
+  const stop = countAttempt(state, routing, state.awaiting[0])
+  assert.equal(stop.meta.outcome, 'pass')
+  assert.doesNotMatch(stop.message, /Send the result to cc-tiers:reviewer/)
+  assert.equal(state.tasks['users-pagination'], undefined)
+})
+
+test('an attempt a passed review covered that fails its gate at Stop is a failure like any other', () => {
+  const routing = routingWith({ review_policy: 'always' })
+  const state = tiers.emptyState('s')
+  state.awaiting = [parkedAttempt('row:a1', 'first', 100)]
+  assert.equal(countReview(state, routing, 'R1', 'pass', 200).meta.outcome, 'review')
+  const failed = countAttempt(state, routing, { ...state.awaiting[0], text: state.awaiting[0].text.replace('CC_TIERS_STATUS: pass', 'CC_TIERS_STATUS: fail') })
+  assert.equal(failed.meta.outcome, 'retry')
+  assert.equal(state.tasks['users-pagination'].failures.length, 1)
+  assert.equal(state.tasks['users-pagination'].reviewPassed, undefined)
+})
+
+test('an attempt parked after the review launched is not covered by its pass', () => {
+  const routing = routingWith({ review_policy: 'always' })
+  const state = tiers.emptyState('s')
+  state.awaiting = [parkedAttempt('row:a1', 'first', 100), parkedAttempt('row:a2', 'changed after the review', 300)]
+  assert.equal(countReview(state, routing, 'R1', 'pass', 200).meta.outcome, 'review')
+  assert.deepEqual(state.tasks['users-pagination'].reviewPassed, ['row:a1'])
+  assert.equal(countAttempt(state, routing, state.awaiting[0]).meta.outcome, 'pass')
+  // The later attempt is new work nobody reviewed: it goes to review.
+  const later = countAttempt(state, routing, state.awaiting[1])
+  assert.equal(later.meta.outcome, 'review')
+  assert.match(later.message, /Send the result to cc-tiers:reviewer/)
+})
+
+test('a review that rejects the fix attempt while it is still parked counts a second failure', () => {
+  const routing = routingWith({ review_policy: 'always' })
+  const state = tiers.emptyState('s')
+  state.awaiting = [parkedAttempt('row:a1', 'first', 100), parkedAttempt('row:a2', 'still off by one', 300)]
+  countReview(state, routing, 'R1', 'reject', 200)
+  const again = countReview(state, routing, 'R2', 'reject', 400)
+  assert.equal(again.meta.outcome, 'stop', 'the second failure at the Opus ceiling reaches max_attempts')
+  assert.equal(again.meta.stillRejected, false)
+  assert.equal(state.tasks['users-pagination'].failures.length, 2)
+  assert.deepEqual(state.tasks['users-pagination'].judged, ['row:a1', 'row:a2'])
+})
+
+test('a pass from another review of the judged attempt still does not clear its rejection', () => {
+  const routing = routingWith({ review_policy: 'always' })
+  const state = tiers.emptyState('s')
+  state.awaiting = [parkedAttempt('row:a1', 'first', 100), parkedAttempt('row:a2', 'started after the slice', 300)]
+  countReview(state, routing, 'R1', 'reject', 200)
+  const slice = countReview(state, routing, 'R2', 'pass', 250)
+  assert.equal(slice.meta.outcome, 'retry')
+  assert.match(slice.message, /another review of this writer attempt already rejected it/)
+  assert.deepEqual(state.tasks['users-pagination'].judged, ['row:a1'])
+  assert.equal(state.tasks['users-pagination'].reviewPassed, undefined)
+  assert.equal(state.awaiting.length, 2)
+})
+
+test('a review with no launch time judges every parked attempt of the task', () => {
+  const routing = routingWith({ review_policy: 'always' })
+  const state = tiers.emptyState('s')
+  state.awaiting = [parkedAttempt('row:a1', 'first', 100), parkedAttempt('row:a2', 'second', 300)]
+  assert.equal(countReview(state, routing, 'R1', 'reject').meta.outcome, 'retry')
+  assert.deepEqual(state.tasks['users-pagination'].judged, ['row:a1', 'row:a2'])
+  assert.equal(countReview(state, routing, 'R2', 'pass').meta.stillRejected, true)
+})
+
+test('a review counted from its parked row does not judge an attempt parked ahead of the row but after the review launched', () => {
+  const routing = routingWith()
+  const ctx = { routing, ccCost: false, projectDir: '' }
+  const state = tiers.emptyState('s')
+  const text = `${SESSION_HEAD}\nCC_TIERS_ROLE: reviewer\n${VERDICTS.reject}`
+  const { kind, ...row } = tiers.agentReport('R', { role: 'reviewer', prompt: 'CC_TIERS_TASK: users-pagination\nreview it', at: 200 }, text)
+  state.background.R = { role: 'reviewer', prompt: 'CC_TIERS_TASK: users-pagination\nreview it', at: 200 }
+  state.awaiting = [parkedAttempt('row:a1', 'first', 100), parkedAttempt('row:a2', 'fixed while the review ran', 300), { ...row, parkedAt: 400 }]
+  const [, , rejection] = tiers.prepareParked(ctx, tiers.peekAwaiting(state), {})
+  assert.match(tiers.countParked(ctx, state, rejection), /counted a failure for users-pagination/)
+  assert.deepEqual(state.tasks['users-pagination'].judged, ['row:a1'])
 })

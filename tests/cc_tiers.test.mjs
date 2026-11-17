@@ -2645,7 +2645,8 @@ test('a ceiling pass waits for the Stop gate', async () => {
     let state = tiers.withSession(ctx, { transcript_path: transcript }, (s) => s)
     assert.equal(state.log['users-pagination'], undefined)
     assert.equal(state.pending.length, 0)
-    assert.deepEqual(state.awaiting, [{ id: 'row:u1', role: 'orchestrator', text: CEILING('pass', '\nCC_TIERS_VERIFY: npm test') }])
+    assert.deepEqual(state.awaiting.map(({ parkedAt, ...item }) => item), [{ id: 'row:u1', role: 'orchestrator', text: CEILING('pass', '\nCC_TIERS_VERIFY: npm test') }])
+    assert.ok(state.awaiting[0].parkedAt > 0, 'a parked report records when it was parked')
     // A later scan of the same rows does not park the report twice.
     tiers.withSession(ctx, { transcript_path: transcript }, (s) => {
       s.cursor.offset = 0
