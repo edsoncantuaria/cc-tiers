@@ -1205,8 +1205,10 @@ test('the gate and the review use the project list only when trusted', async () 
     const review = { kind: 'report', id: 'r1', role: 'reviewer', prompt: 'CC_TIERS_TASK: t', text: `${finding}\nCC_TIERS_TASK: t\nCC_TIERS_ROLE: reviewer\nCC_TIERS_STATUS: fail` }
     const untrusted = tiers.prepareReport(ctx, review, {}, { peek: { projectFile: stampBefore, writing: [], cache: {} } })
     assert.equal(untrusted.judged.blocking.length, 1, 'a writer-created entry cannot discard a reviewer finding')
+    assert.match(untrusted.judged.projectAllow, /changed since/, 'the review says why the project entry was left out')
     const judged = tiers.prepareReport(ctx, review, {}, { peek: { projectFile: tiers.projectFileStamp(dir), writing: [], cache: {} } })
     assert.equal(judged.judged.discarded.length, 1)
+    assert.equal(judged.judged.projectAllow, undefined)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
@@ -3144,6 +3146,35 @@ test('only another task that writes in the tree excuses a failing parked check: 
   assert.match(written.out.reason || written.out.systemMessage, /the tree changed under other-task after this attempt/)
 })
 
+test('a writer parked later that ran in its own worktree does not excuse a failing parked check', async () => {
+  const later = { id: 'agent:agent-i', agent_id: 'agent-i', role: 'implementer', isolated: true, prompt: 'CC_TIERS_TASK: other-task', text: 'CC_TIERS_TASK: other-task\nCC_TIERS_ROLE: implementer\nCC_TIERS_STATUS: pass\nCC_TIERS_REASON: ok', parkedAt: Date.now() + 60000 }
+  const apart = await stopOnState({ awaiting: [later] })
+  assert.equal(apart.state.tasks['users-pagination'].failures.length, 1, 'an isolated writer wrote nothing in the shared tree')
+  const shared = await stopOnState({ awaiting: [{ ...later, isolated: false }] })
+  assert.equal(shared.state.tasks['users-pagination']?.failures?.length || 0, 0, 'the same report from the shared tree does excuse it')
+})
+
+test('a hand-back row of a writer parked while its task is active in its own worktree is stamped isolated', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const report = 'CC_TIERS_TASK: users-pagination\nCC_TIERS_TIER: sonnet\nCC_TIERS_ROLE: implementer\nCC_TIERS_STATUS: pass'
+    const handback = (agent) => JSON.stringify({ type: 'user', isMeta: true, isSidechain: false, uuid: `h-${agent}`, timestamp: new Date().toISOString(), origin: { kind: 'peer', from: agent, handback: true, handbackReportText: report }, message: { role: 'user', content: [] } })
+    const parkedFor = (isolated) => {
+      const agent = `agent-${isolated}`
+      const transcript = path.join(dir, `${agent}.jsonl`)
+      writeFileSync(transcript, `${handback(agent)}\n`)
+      const ctx = { routing: defaultRouting({ verify: 'off' }), file: path.join(dir, `${agent}.json`), sessionId: 's', env: {}, projectDir: '', ccCost: false }
+      const launched = { role: 'implementer', prompt: report, at: Date.now() - 60000 }
+      writeFileSync(ctx.file, JSON.stringify({ ...tiers.emptyState('s'), background: { [agent]: launched }, active: { 'users-pagination': { role: 'implementer', files: ['a.js'], isolated, since: Date.now() } } }))
+      return tiers.withSession(ctx, { transcript_path: transcript }, (state) => tiers.peekAwaiting(state))
+    }
+    assert.deepEqual(parkedFor(true).map((item) => item.isolated), [true])
+    assert.deepEqual(parkedFor(false).map((item) => item.isolated), [false])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('a writer in its own worktree does not count as a write in the shared tree', () => {
   const routing = tiers.mergeRouting(tiers.loadJson(path.join(ROOT, 'config/routing.default.json')), null, { verify: 'off' })
   const ctx = { routing, projectDir: '', dataDir: '' }
@@ -3184,6 +3215,26 @@ test('a fix parked while the finishing review ran is new work: Stop gates it ins
   const held = tiers.holdParked(state, tiers.peekAwaiting(state))
   assert.deepEqual(held.gate.map((item) => item.id), ['row:a2'], 'the review launched before a2 was parked never saw it')
   assert.deepEqual(held.notes, [])
+})
+
+test('a writer that finishes its task from a parked report is seen up to when it was parked, so one parked after it is gated', () => {
+  const routing = tiers.mergeRouting(tiers.loadJson(path.join(ROOT, 'config/routing.default.json')), null, { specify: 'off', verify: 'off' })
+  const head = 'CC_TIERS_TASK: users-pagination\nCC_TIERS_TIER: opus'
+  const attempt = (id, parkedAt) => ({ id, role: 'orchestrator', parkedAt, text: `${head}\nCC_TIERS_ROLE: orchestrator\nCC_TIERS_VERIFY: none - x\nCC_TIERS_STATUS: pass\nCC_TIERS_REVIEW: skip\nCC_TIERS_REASON: ok` })
+  const count = (state, item) => tiers.applyEvent(state, tiers.prepareReport({ routing, projectDir: '' }, { kind: 'report', prompt: '', ...item }), routing)
+  const parkedAt = Date.now() - 60000
+  const state = tiers.emptyState('s')
+  assert.equal(count(state, attempt('row:a1', parkedAt)).meta.outcome, 'pass')
+  assert.equal(state.completions['users-pagination'].seenUntil, parkedAt, 'the finishing writer saw its own report, parked before its gate ran')
+  state.awaiting = [attempt('row:a2', parkedAt + 1), attempt('row:a0', parkedAt - 1)]
+  const held = tiers.holdParked(state, tiers.peekAwaiting(state))
+  assert.deepEqual(held.gate.map((item) => item.id), ['row:a2'], 'a report parked after it is new work, one parked before it is moot')
+  assert.match(held.notes.join('\n'), /users-pagination finished after this report was parked/)
+
+  const before = Date.now()
+  const foreground = tiers.emptyState('s')
+  count(foreground, attempt('row:f1', undefined))
+  assert.ok(foreground.completions['users-pagination'].seenUntil >= before, 'a report that was never parked is seen up to when it was counted')
 })
 
 test('Stop drops the parked report of a task that finished after it was parked, without running its check again', async () => {

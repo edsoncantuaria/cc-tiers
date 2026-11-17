@@ -931,6 +931,8 @@ test('review message and writer note', () => {
   assert.match(verify.reviewMessage('T1', { blocking: [], discarded: [], notes: [], invalid: [] }, { failed: true }), /rejected without evidence; 0 finding/)
   const real = judge(FIELDS)
   assert.equal(verify.findingsNote(real), 'state @ src/a.js:1: stays open / closed')
+  assert.match(verify.reviewMessage('T1', { ...real, projectAllow: 'not applied: .claude/cc-tiers.json changed since cc-tiers first read it in this session' }), /^cc-tiers review: T1 project verifyAllow not applied: /)
+  assert.doesNotMatch(verify.reviewMessage('T1', real), /verifyAllow/)
 })
 
 const argv = (text) => text.split(' ')

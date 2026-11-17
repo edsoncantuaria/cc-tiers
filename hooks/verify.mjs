@@ -686,6 +686,7 @@ export function reviewMessage(task, judged, { failed = false } = {}) {
   if (judged.discarded.length) lines.push(`${prefix} discarded ${judged.discarded.length} finding(s): the evidence command passed`)
   const demoted = judged.invalid.length + judged.discarded.length + judged.notes.length
   if (failed && !judged.blocking.length) lines.push(`${prefix} rejected without evidence; ${demoted} finding(s) became notes`)
+  if (judged.projectAllow) lines.push(`${prefix} project verifyAllow ${judged.projectAllow}`)
   if (judged.notes.length) {
     lines.push('Notes:')
     for (const note of judged.notes.slice(0, MAX_NOTES)) {

@@ -33,7 +33,7 @@ import { readHookErrors, recordHookError, taskOf } from './integrity.mjs'
 import { clip } from './redact.mjs'
 import { KEYWORD_FACTOR, TEXT_KEYWORD_FACTOR, assessRisk, isSensitivePath, riskRank, testsAvailableIn } from './risk.mjs'
 import { parseTelemetry, recordEvent, telemetryPath } from './telemetry.mjs'
-import { attemptChanges, git, outOfScope, sensitiveFiles, treeFingerprint, validateState, workspaceSnapshot } from './workspace.mjs'
+import { PROJECT_FILE, attemptChanges, git, outOfScope, sensitiveFiles, treeFingerprint, validateState, workspaceSnapshot } from './workspace.mjs'
 import { findingsNote, fold, gateFailure, gateMessage, isBlocking, judgeFindings, parseFindings, parseVerify, reviewMessage, runGate } from './verify.mjs'
 
 export { TIERS, dollars, extractFiles, fold, writeAtomic }
@@ -483,8 +483,8 @@ export function matchesKeyword(text, keywords) {
   })
 }
 
-export function isRisky(text, routing, { waivable = true } = {}) {
-  return waivable ? keywordRisk(text, routing) === true : matchesReview(text, routing)
+export function isRisky(text, routing, { waivable = true, projectDir = '' } = {}) {
+  return waivable ? keywordRisk(text, routing, projectDir) === true : matchesReview(text, routing)
 }
 
 function matchesReview(text, routing) {
@@ -496,8 +496,8 @@ function matchesReview(text, routing) {
 const looksLikeFile = (file) => /\.[^./]+$/.test(file.slice(file.lastIndexOf('/') + 1))
 
 /** Files named one by one, none a directory or the whole tree, and none sensitive by path. */
-function namesOnlyOrdinaryFiles(text) {
-  const { files } = declaredFiles(parseHeaders(text), stripHeaders(text))
+function namesOnlyOrdinaryFiles(text, projectDir) {
+  const { files } = declaredFiles(parseHeaders(text), stripHeaders(text), projectDir)
   return files.length > 0 && files.every((file) => looksLikeFile(file) && !isSensitivePath(file) && !sensitiveFiles([file]).length)
 }
 
@@ -505,9 +505,9 @@ function namesOnlyOrdinaryFiles(text) {
  * true when a review keyword makes the task risky; 'text' when the keyword is only in the text and every named file is ordinary;
  * false without a keyword, or when CC_TIERS_RISK: none (with a reason) waives it.
  */
-export function keywordRisk(text, routing) {
+export function keywordRisk(text, routing, projectDir = '') {
   if (RISK_NONE_RE.test(parseHeaders(text).RISK || '') || !matchesReview(text, routing)) return false
-  return namesOnlyOrdinaryFiles(text) ? 'text' : true
+  return namesOnlyOrdinaryFiles(text, projectDir) ? 'text' : true
 }
 
 export function isTrivial(text, routing) {
@@ -791,7 +791,7 @@ export function taskRisk(text, routing, { history = null, projectDir = '' } = {}
   return assessRisk({
     text: body,
     files,
-    keywordRisk: keywordRisk(text, routing),
+    keywordRisk: keywordRisk(text, routing, projectDir),
     complexity: assessComplexity(text, routing, { projectDir }),
     history: { haiku: Boolean(history) && historyMatches(text, history, 'haiku'), sonnet: Boolean(history) && historyMatches(text, history, 'sonnet') },
     testsAvailable: projectDir ? testsAvailableIn(projectDir) : null,
@@ -830,7 +830,7 @@ function classify(text, routing, { history, conserve, ceiling, projectDir, risk 
     tier = 'sonnet'
     because = 'risk'
   }
-  if (routing.hardStart === 'opus' && tier === 'sonnet' && (isRisky(text, routing) || risk?.level === 'critical')) {
+  if (routing.hardStart === 'opus' && tier === 'sonnet' && (isRisky(text, routing, { projectDir }) || risk?.level === 'critical')) {
     tier = 'opus'
     because = 'hard'
   }
@@ -1870,8 +1870,8 @@ export function applyEvent(state, event, routing) {
   }
   if (meta.outcome === 'pass') {
     if (REVIEW_ROLES.has(role)) logEntry(state, task).reviewLaunched = launchTime(event)
-    // What finished the task saw the work up to here: a review, what was there when it launched; a writer, its own report.
-    const seenUntil = REVIEW_ROLES.has(role) ? launchTime(event) : Date.now()
+    // What finished the task saw the work up to here: a review, what was there when it launched; a writer, its own report (when it was parked, as its gate ran later).
+    const seenUntil = REVIEW_ROLES.has(role) ? launchTime(event) : Number(event.parkedAt) || Date.now()
     const finished = finishTask(state, task, routing, { reviewed: REVIEW_ROLES.has(role) || reviewed, tier, seenUntil })
     meta.completion = finished.result
     message = `${message}\n${finished.line}`
@@ -2720,8 +2720,6 @@ export function preToolOutput(deny, context, updatedInput = null) {
   return { hookSpecificOutput: output }
 }
 
-const PROJECT_FILE = '.claude/cc-tiers.json'
-
 /**
  * The project's own verifyAllow, read once: the hash of those same bytes is its stamp ('none' when absent, '' with no project dir),
  * so the list that is used is the list that was compared.
@@ -2773,7 +2771,7 @@ export function projectAllowInEffect(ctx, state) {
 
 export function readProjectFile(projectDir) {
   if (!projectDir) return { project: null, note: 'not checked' }
-  const file = path.join(projectDir, '.claude', 'cc-tiers.json')
+  const file = path.join(projectDir, PROJECT_FILE)
   if (!existsSync(file)) return { project: null, note: 'not present' }
   try {
     return { project: loadJson(file), note: file }
@@ -3889,7 +3887,7 @@ export function prepareReport(ctx, event, payload = {}, { budgetS = ctx.routing.
   const status = ((REVIEW_ROLES.has(event.role) ? reported.STATUS : headers.STATUS) || '').toLowerCase()
   const projectDir = ctx.projectDir || String(payload.cwd || '')
   if (REVIEW_ROLES.has(event.role)) {
-    const reviewed = routing.reviewEvidence ? prepareReview(routing, event, status, projectDir, budgetS, gateLock(ctx.dataDir, projectDir), trustedAllow(ctx, peek, projectDir).allow) : event
+    const reviewed = routing.reviewEvidence ? prepareReview(routing, event, status, projectDir, budgetS, gateLock(ctx.dataDir, projectDir), trustedAllow(ctx, peek, projectDir)) : event
     // final-gate has no writer report: the CC_TIERS_VERIFY lines of its own prompt are what the gate runs, never those of a prompt written for another task.
     const reportedTask = slug(reported.TASK || '')
     if (slug(parseHeaders(event.prompt || '').TASK || '') !== FINAL_GATE || (reportedTask && reportedTask !== FINAL_GATE) || status !== 'pass') return reviewed
@@ -4040,13 +4038,15 @@ export function releaseIdleWriters(state) {
 }
 
 /** A reviewer fail, or a report with no verdict, is judged finding by finding (commands run here, outside the lock); a pass only keeps its notes. */
-function prepareReview(routing, event, status, projectDir, budgetS, lock = null, allow = routing.verifyAllow) {
+function prepareReview(routing, event, status, projectDir, budgetS, lock = null, trusted = { allow: routing.verifyAllow, note: '' }) {
   let findings = parseFindings(event.text)
   if (status === 'pass') findings = findings.filter((f) => f.valid && !isBlocking(f.severity))
   if (!findings.length && status === 'pass') return event
-  const options = { allow, detected: detectedChecks(projectDir), projectDir, timeoutS: routing.verifyTimeout, budgetS, lock }
+  const options = { allow: trusted.allow, detected: detectedChecks(projectDir), projectDir, timeoutS: routing.verifyTimeout, budgetS, lock }
   // Nothing may run without a project dir: a command finding then stays blocking, unchecked.
   const judged = judgeFindings(findings, { ...options, specText: specText(event.prompt), run: projectDir ? undefined : () => ({ code: 1 }) })
+  // A command finding that stays blocking may do so only because the project's own list was left out of the allow list.
+  if (trusted.note && judged.blocking.some((finding) => finding.evidence === 'command')) judged.projectAllow = trusted.note
   return { ...event, judged }
 }
 
@@ -4163,7 +4163,9 @@ function countHandback(ctx, state, row) {
   if (!entry?.role || (status !== 'pass' && status !== 'fail') || claimTwin(state, row.agent_id, 'row', row.text)) return
   const event = { ...agentReport(row.agent_id, entry, row.text), reportedAt: row.at }
   if (entry.role !== 'researcher') {
-    parkReport(state, event)
+    // Stamped now: the task may be released from state.active before Stop weighs this report against the others.
+    const task = slug({ ...parseHeaders(event.prompt), ...parseHeaders(event.text) }.TASK || '')
+    parkReport(state, { ...event, isolated: Boolean(own(state.active, task)?.isolated) })
     return
   }
   const message = processAgentReport(ctx, state, event, null, 'row')
@@ -4241,8 +4243,8 @@ export function holdParked(state, parked) {
     }
     gate.push(report)
     if (!at) continue
-    // Only a writer's or the session's own attempt writes in the tree; a review handed back later wrote nothing.
-    const writes = (other) => WRITER_ROLES.has(other.role) || SESSION_ROLES.has(other.role || 'orchestrator')
+    // Only a writer's or the session's own attempt writes in the tree; a review handed back later wrote nothing, nor did a writer isolated in its own worktree.
+    const writes = (other) => (WRITER_ROLES.has(other.role) && !other.isolated) || SESSION_ROLES.has(other.role || 'orchestrator')
     const later = parked.filter((other) => taskOf(other) !== task && Number(other.parkedAt) > at && writes(other)).map(taskOf)
     const wrote = Object.entries(state.writtenAt || {}).filter(([name, time]) => name !== task && Number(time) > at).map(([name]) => name)
     changed.set(report.id, [...later, ...wrote].filter(Boolean))
@@ -4309,22 +4311,23 @@ export function processReport(ctx, state, event, usage = null) {
   if (!applied.meta.planner && ctx.routing.memory && ctx.projectDir) rememberOutcome(ctx, state, applied.meta, task)
   if (applied.meta.haikuFailure && ctx.routing.learn && ctx.projectDir) {
     const file = historyPath(ctx.projectDir)
-    withLock(file, (held) => {
-      if (!held) return
+    const written = withLock(file, (held) => {
+      if (!held) return false
       const history = noteHaikuFailure(loadHistory(file), {
         task,
         prompt: applied.meta.prompt,
         reason: applied.meta.reason,
       })
       saveHistory(file, history)
+      return true
     }, NESTED_LOCK_WAIT_MS)
     ensureHistoryIgnored(ctx.projectDir)
-    message += `\ncc-tiers recorded a Haiku failure for ${task}. Similar tasks will start on Sonnet.`
+    if (written) message += `\ncc-tiers recorded a Haiku failure for ${task}. Similar tasks will start on Sonnet.`
   }
   if (applied.meta.sonnetEscalated && ctx.routing.learn && ctx.projectDir) {
     const file = historyPath(ctx.projectDir)
-    withLock(file, (held) => {
-      if (!held) return
+    const written = withLock(file, (held) => {
+      if (!held) return false
       const history = noteFailure(loadHistory(file), {
         tier: 'sonnet',
         task,
@@ -4332,10 +4335,11 @@ export function processReport(ctx, state, event, usage = null) {
         reason: applied.meta.reason,
       })
       saveHistory(file, history)
+      return true
     }, NESTED_LOCK_WAIT_MS)
     ensureHistoryIgnored(ctx.projectDir)
     const top = effortTop(ctx.routing, 'sonnet', { conserve: ctx.routing.conserve === true })
-    message += `\ncc-tiers recorded that ${task} escalated past Sonnet. Similar tasks will start on Sonnet${top ? ` at effort ${top}` : ''}.`
+    if (written) message += `\ncc-tiers recorded that ${task} escalated past Sonnet. Similar tasks will start on Sonnet${top ? ` at effort ${top}` : ''}.`
   }
   if (applied.meta.planner) return ''
   if (ctx.ccCost && task && own(state.spend, task)) {

@@ -241,10 +241,10 @@ test('a Haiku failure or a Sonnet escalation counted while another hook holds th
     const kinds = () => (existsSync(history) ? JSON.parse(readFileSync(history, 'utf8')).entries.map((entry) => `${entry.tier || 'haiku'}:${entry.kind}`) : [])
 
     hold()
-    tiers.processReport(ctx, tiers.emptyState('s'), fail('h1', 'worker', 'haiku'))
+    assert.doesNotMatch(tiers.processReport(ctx, tiers.emptyState('s'), fail('h1', 'worker', 'haiku')), /recorded a Haiku failure/, 'nothing written, nothing said')
     assert.deepEqual(kinds(), [], 'a Haiku failure writes no history without the lock')
     free()
-    tiers.processReport(ctx, tiers.emptyState('s'), fail('h2', 'worker', 'haiku'))
+    assert.match(tiers.processReport(ctx, tiers.emptyState('s'), fail('h2', 'worker', 'haiku')), /recorded a Haiku failure for t-worker/)
     assert.equal(kinds().length, 1, 'and writes it once the lock is free')
 
     const sonnet = (state) => {
@@ -253,10 +253,10 @@ test('a Haiku failure or a Sonnet escalation counted while another hook holds th
     }
     hold()
     const before = kinds().length
-    assert.match(sonnet(tiers.emptyState('s')), /escalated past Sonnet/)
+    assert.doesNotMatch(sonnet(tiers.emptyState('s')), /recorded that t-implementer escalated past Sonnet/, 'nothing written, nothing said')
     assert.equal(kinds().length, before, 'a Sonnet escalation writes no history without the lock')
     free()
-    sonnet(tiers.emptyState('s'))
+    assert.match(sonnet(tiers.emptyState('s')), /recorded that t-implementer escalated past Sonnet/)
     assert.equal(kinds().length, before + 1, 'and writes it once the lock is free')
   })
 })
