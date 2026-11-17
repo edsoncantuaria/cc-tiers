@@ -3154,6 +3154,16 @@ test('a writer parked later that ran in its own worktree does not excuse a faili
   assert.equal(shared.state.tasks['users-pagination']?.failures?.length || 0, 0, 'the same report from the shared tree does excuse it')
 })
 
+test('a failing check that ran in the writer\'s own worktree is not excused by writers in the shared tree', () => {
+  const failed = { status: 'fail', verified: [], flaky: [], unverified: [], failure: { raw: 'node fail.mjs', code: 1 } }
+  const shared = tiers.excuseSharedTree({ gate: failed }, ['other-task'])
+  assert.equal(shared.gate.status, 'unverified', 'the same failure in the shared tree is excused')
+  assert.equal(shared.gate.failure, null)
+  assert.match(shared.gate.unverified[0].reason, /the tree changed under other-task after this attempt/)
+  const apart = { gate: failed, worktree: '/project/.claude/worktrees/agent-a' }
+  assert.equal(tiers.excuseSharedTree(apart, ['other-task']), apart, 'no other writer touched that worktree')
+})
+
 test('a hand-back row of a writer parked while its task is active in its own worktree is stamped isolated', () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'cc-tiers-'))
   try {

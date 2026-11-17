@@ -3428,21 +3428,24 @@ export function agentTranscriptPath(sessionFile, agentId) {
   return path.join(path.dirname(sessionFile), path.basename(sessionFile, '.jsonl'), 'subagents', `agent-${agentId}.jsonl`)
 }
 
-/** The git worktree an isolated agent ran in: its meta file says so, else the one under `<project>/.claude/worktrees/` that the cwd of its first row is in. '' when it ran in the project. */
+/**
+ * The git worktree an isolated agent ran in, as `{ path }`: its meta file says so, else the one under `<project>/.claude/worktrees/` that the cwd of its first row is in.
+ * Null when it ran in the project; path is '' when the meta says it had a worktree but not where (Claude Code drops worktreePath when it removes a clean one).
+ */
 export function agentWorktree(file, projectDir) {
-  if (!file) return ''
+  if (!file) return null
   try {
     const meta = JSON.parse(readFileSync(file.replace(/\.jsonl$/, '.meta.json'), 'utf8'))
-    return meta?.spawnedWithWorktree === true && typeof meta.worktreePath === 'string' ? meta.worktreePath : ''
+    return meta?.spawnedWithWorktree === true ? { path: typeof meta.worktreePath === 'string' ? meta.worktreePath : '' } : null
   } catch {
     // No readable meta: the agent's own cwd tells where it worked.
   }
   const cwd = transcriptRows(file).find((row) => typeof row?.cwd === 'string' && row.cwd)?.cwd
-  if (!cwd) return ''
+  if (!cwd) return null
   const root = path.join(path.resolve(projectDir), '.claude', 'worktrees')
   const relative = path.relative(root, path.resolve(cwd))
   const [name] = relative.split(path.sep)
-  return name && name !== '..' && !path.isAbsolute(relative) ? path.join(root, name) : ''
+  return name && name !== '..' && !path.isAbsolute(relative) ? { path: path.join(root, name) } : null
 }
 
 export function usageFromToolResponse(response, role, routing = null) {
@@ -3898,24 +3901,24 @@ export function prepareReport(ctx, event, payload = {}, { budgetS = ctx.routing.
   // Only an attempt with a snapshot from its delegation can be held to what it changed.
   if (projectDir && peek?.snapshot) event = { ...event, workspace: inspectWorkspace(projectDir, peek.snapshot, event, headers, String(payload.transcript_path || '')) }
   // An isolated writer edited its own worktree: its checks run there, never in the project tree.
-  const worktree = projectDir ? agentWorktree(agentTranscript, projectDir) : ''
+  const worktree = projectDir ? agentWorktree(agentTranscript, projectDir) : null
   return gateReport(ctx, event, event.text, headers, projectDir, budgetS, peek, worktree)
 }
 
-/** Runs the CC_TIERS_VERIFY lines of text through the gate and attaches the result to a copy of the event; an isolated writer's gate runs in its worktree, with the project's stamp and lock. */
-function gateReport(ctx, event, text, headers, projectDir, budgetS, peek, worktree = '') {
+/** Runs the CC_TIERS_VERIFY lines of text through the gate and attaches the result to a copy of the event; an isolated writer's gate runs in its worktree (named on the event), with the project's stamp and lock. */
+function gateReport(ctx, event, text, headers, projectDir, budgetS, peek, worktree = null) {
   const routing = ctx.routing
   if (!routing.verify) return event
-  if (worktree && !existsSync(worktree)) {
+  if (worktree && !(worktree.path && existsSync(worktree.path))) {
     const lines = parseVerify(text, { projectDir })
-    const reason = `the writer's worktree is gone: ${worktree}`
+    const reason = `the writer's worktree is gone${worktree.path ? `: ${worktree.path}` : ''}`
     return { ...event, gate: { status: lines.length ? 'unverified' : 'missing', verified: [], flaky: [], unverified: lines.map((line) => ({ raw: line.raw, reason })), failure: null } }
   }
-  const dir = worktree || projectDir
+  const dir = worktree?.path || projectDir
   const tree = dir ? treeFingerprint(dir) : ''
   const cached = tree && peek?.cache ? (raw) => peek.cache[raw] === tree : null
-  // Another writer sharing the tree may save files while the command runs; its edits are not this command's.
-  const writing = peek?.writing || []
+  // Another writer sharing the tree may save files while the command runs; its edits are not this command's. A worktree is shared with no one.
+  const writing = worktree ? [] : peek?.writing || []
   const snapshot = dir && !writing.length ? () => workspaceSnapshot(dir) : null
   const preexisting = declaredPreexisting(text, dir)?.raw || ''
   const files = headers.FILES ? declaredFiles(headers, '', dir).files : []
@@ -3926,7 +3929,7 @@ function gateReport(ctx, event, text, headers, projectDir, budgetS, peek, worktr
     const gate = { ...runGate(text, options), tree, ...treeCheck, ...(trusted.note ? { projectAllow: trusted.note } : {}) }
     const missing = missingFromGate(gate, dir)
     // applyEvent reads the declared pre-existing line again and needs the same dir to parse a cd to an absolute path.
-    return { ...event, projectDir: dir, gate: missing ? { ...gate, missing } : gate }
+    return { ...event, projectDir: dir, ...(worktree ? { worktree: dir } : {}), gate: missing ? { ...gate, missing } : gate }
   }
   // Nothing may run without a project dir; a declaration still tells missing from not validated.
   const gate = parseVerify(text).length ? 'unverified' : 'missing'
@@ -4252,11 +4255,11 @@ export function holdParked(state, parked) {
   return { gate, changed, notes }
 }
 
-/** A failed check after other tasks wrote in the same tree is theirs as much as this attempt's: not validated, not counted. */
+/** A failed check after other tasks wrote in the same tree is theirs as much as this attempt's: not validated, not counted. A check that ran in the writer's own worktree has no other writer. */
 export function excuseSharedTree(event, names) {
   const gate = event?.gate
   const others = [...new Set(names || [])]
-  if (!others.length || gate?.status !== 'fail' || !gate.failure) return event
+  if (event?.worktree || !others.length || gate?.status !== 'fail' || !gate.failure) return event
   const { raw, code } = gate.failure
   const reason = `the tree changed under ${others.join(', ')} after this attempt: ${raw} failed (exit ${code ?? 'none'})`
   const excused = { ...gate, failure: null, unverified: [...gate.unverified, { raw, reason, ran: true }] }

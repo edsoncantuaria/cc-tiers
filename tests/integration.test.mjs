@@ -1525,18 +1525,24 @@ test('prepareReport: an isolated writer is gated in its worktree, with the proje
     writeFileSync(path.join(tree, 'check.mjs'), 'process.exit(0)\n')
     const ctx = { routing: routingWith({ verify_allow: 'node check.mjs' }), ccCost: false, projectDir: project, dataDir: path.join(dir, 'data') }
     const text = report('paging', 'implementer', 'sonnet', 'pass', ['CC_TIERS_VERIFY: node check.mjs'])
-    const prepare = (agentTranscript, budgetS = 60) => tiers.prepareReport(ctx, event('m', 'implementer', text, writer('paging')), {}, { budgetS, agentTranscript })
+    const prepare = (agentTranscript, budgetS = 60, peek = null) => tiers.prepareReport(ctx, event('m', 'implementer', text, writer('paging')), {}, { budgetS, agentTranscript, peek })
     const meta = (extra) => writeFileSync(path.join(agents, 'agent-a.meta.json'), JSON.stringify(extra))
     const transcript = path.join(agents, 'agent-a.jsonl')
 
     assert.equal(prepare(transcript).gate.failure.raw, 'node check.mjs', 'no meta and no transcript: the project dir, as before')
+    const peekWriting = { writing: ['other'] }
     meta({ spawnedWithWorktree: false })
     assert.equal(prepare(transcript).gate.failure.raw, 'node check.mjs', 'a writer that is not isolated runs in the project')
+    const shared = prepare(transcript, 60, peekWriting)
+    assert.equal(shared.gate.treeCheck, 'skipped: other still writing', 'a writer in the project tree shares it with the other writer')
+    assert.equal(shared.worktree, undefined, 'a gate that ran in the project names no worktree')
     meta({ spawnedWithWorktree: true, worktreePath: tree })
     const isolated = prepare(transcript)
     assert.deepEqual(isolated.gate.verified, ['node check.mjs'], 'the command that passes only in the worktree is verified')
     assert.equal(isolated.gate.failure, null)
     assert.equal(isolated.projectDir, tree)
+    assert.equal(isolated.worktree, tree, 'the event says where its gate ran')
+    assert.equal(prepare(transcript, 60, peekWriting).gate.treeCheck, undefined, 'a writer in the project tree is no one in this worktree: its tree check runs')
 
     const held = tiers.gateLock(ctx.dataDir, project)(0)
     const blocked = prepare(transcript, 0.1).gate
@@ -1564,6 +1570,11 @@ test('prepareReport: an isolated writer is gated in its worktree, with the proje
     assert.equal(gone.failure, null)
     assert.equal(gone.status, 'unverified')
     assert.deepEqual(gone.unverified, [{ raw: 'node check.mjs', reason: `the writer's worktree is gone: ${path.join(dir, 'removed')}` }])
+    meta({ spawnedWithWorktree: true, worktreeCleanlyRemoved: true })
+    const dropped = prepare(transcript).gate
+    assert.equal(dropped.failure, null, 'a worktree removed clean has no path in the meta, and no failure')
+    assert.equal(dropped.status, 'unverified')
+    assert.deepEqual(dropped.unverified, [{ raw: 'node check.mjs', reason: "the writer's worktree is gone" }])
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -692,6 +692,41 @@ test('an isolated writer parked as a hand-back row is gated in its worktree at S
     assert.deepEqual(sessionState(dir).awaiting, [])
   } finally {
     await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a failing check of an isolated writer in its worktree counts at Stop even with main-tree writers; the same report gated in the project is excused', async () => {
+  const stopWith = async (inWorktree, otherWriter) => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-status-'))
+    try {
+      const { project, transcript, env, text } = isolatedProject(dir, 'w1')
+      writeFileSync(path.join(project, '.claude', 'worktrees', 'w1', 'check.mjs'), 'process.exit(1)\n')
+      // Without its meta file and cwd the writer is gated in the project, where the check fails too.
+      if (!inWorktree) rmSync(path.join(dir, 'sess-1', 'subagents', 'agent-w1.meta.json'))
+      writeFileSync(transcript, `${handbackRow('w1', text, 'u1')}\n`)
+      launchAgent(env, 'w1', 'implementer', WRITER_PROMPT)
+      scanMain(env, transcript, project)
+      const file = tiers.sessionPath(path.join(dir, 'data'), 'sess-1')
+      const state = tiers.loadState(file, 'sess-1')
+      if (otherWriter === 'written') state.writtenAt = { 'other-task': Date.now() + 60000 }
+      if (otherWriter === 'active') {
+        state.active['other-task'] = { role: 'implementer', files: ['src/o.js'], isolated: false, since: Date.now() }
+        state.background['agent-o'] = { role: 'implementer', prompt: 'CC_TIERS_TASK: other-task\nWork.', at: Date.now() }
+      }
+      writeFileSync(file, JSON.stringify(state))
+      const end = JSON.parse(endTurn(env, transcript, project).stdout)
+      return { message: end.reason || end.systemMessage, failures: sessionState(dir).tasks['users-pagination']?.failures?.length || 0 }
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  }
+  for (const otherWriter of ['written', 'active']) {
+    const apart = await stopWith(true, otherWriter)
+    assert.equal(apart.failures, 1, `in its worktree the failure counts (${otherWriter})`)
+    assert.doesNotMatch(apart.message, /the tree changed under/, otherWriter)
+    const shared = await stopWith(false, otherWriter)
+    assert.equal(shared.failures, 0, `in the project the failure is excused (${otherWriter})`)
+    assert.match(shared.message, /the tree changed under other-task after this attempt: node check\.mjs failed/, otherWriter)
   }
 })
 
