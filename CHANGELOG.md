@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.13.8 - 2026-11-17
+
+### Fixed
+
+- The gate gives `spawnSync` an integer timeout (never 0, which means no limit). The budget left under `verify_timeout` is rarely a whole number of seconds, and a fractional value made the gate throw `ERR_OUT_OF_RANGE`, seen as an intermittent test.
+- A fork (SessionStart source `fork`) carries the task records of its parent session. The parent is the sibling transcript that holds the fork's first row (the `session_id` of the rows is only a hint, and after a `/clear` it names the session from before it). The parent's state file is only read, never written, and the copied rows are not folded again, so the parent's attempts are not counted twice. When the parent's state is gone, a note says the tasks start over.
+- A state that comes back missing or corrupt in the middle of a session (after cc-tiers started it) is told in a note and recorded as `state.recovered`. It is never stamped again, so the project `verifyAllow` file is not applied until a new session, and its transcript is not read again, so old passes are not gated again on today's tree.
+- The lock file holds `pid@host`. A pid from another host (a container sharing the data directory) is not judged with `process.kill`: only the age frees such a lock.
+- The gate of a writer with `isolation: "worktree"` runs in its worktree, not in the main tree where it failed for the wrong reason. The path comes from the `worktreePath` of the agent's `agent-<id>.meta.json`; without that file, only a cwd under `.claude/worktrees` counts. The gate lock and the project allow list stay on the main project. A worktree that was already removed runs nothing: its lines are not validated, and it is no failure.
+- An agent resumed with `SendMessage` counts as running again until it stops once more. A resumed reviewer holds the parked checks and a resumed writer is not released as idle, and the 3 hours of the hold count from the resume. Stop asks for a verdict at most 3 times per agent across all its stops, not 3 in a row per stop.
+- A review that covers an attempt keeps the attempts it judged. A judged attempt whose gate fails at Stop is not a second failure, in either order with the covered fix: the task finishes with one failure. A `final-gate` pass launched before a counted `final-gate` rejection saw the rejected diff, so it does not clear it.
+- Six loose ends of the accounting: `seenUntil` of a writer that finishes at Stop starts from the time its report was parked; an isolated writer parked later does not excuse a failing gate; the history message appears only when the history was written; a review that rejects on a command finding says why the project `verifyAllow` was not applied; an absolute path inside the project that is named only in the text counts as an ordinary file for the keyword-only risk; and `PROJECT_FILE` is declared once, in `workspace.mjs`.
+
+### Changed
+
+- A blocking review finding with `evidence: trace` that would have been diagnosed `test` (correctness, error handling, concurrency, state) is diagnosed `defect`: no test ran, so it gets its own hypothesis and next step (fix the cause the finding names and add a test that shows it) and starts no failure research. Evidence `command` stays `test`, and `api-usage` stays `docs-version`.
+- The orchestrator, the dispatcher and the tiers skill no longer say that the spec block of your own attempt goes in the message: it goes inside the attempt's opening heredoc, where cc-tiers stores it as the task's criteria. An attempt with the spec only in the message finished with "No spec criteria".
+- Why: real use of 0.13.7 on 17 November showed an intermittent gate crash, forks and resumed agents that lost or double-counted work, an isolated writer failing for the main tree, and a judged attempt counted as a second failure.
+
 ## 0.13.7 - 2026-11-17
 
 ### Changed
