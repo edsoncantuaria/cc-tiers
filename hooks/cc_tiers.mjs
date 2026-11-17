@@ -1805,15 +1805,17 @@ export function applyEvent(state, event, routing) {
   } else if (status === 'fail' && reviewed && (current.judged || []).includes(id)) {
     // The review that rejected this attempt counted its failure already: its gate failing at Stop is not a second one, and the other covered attempts stay covered.
     const rest = covers.filter((item) => item !== id)
-    tasks[task] = { ...current, ...(rest.length ? { reviewPassed: rest } : {}) }
-    meta.outcome = stoppedAt(current, routing) ? 'stop' : 'retry'
-    meta.stillRejected = true
-    const next = rest.length
-      ? `The task finishes when the ${plural(rest.length, 'other attempt')} the passed review covered ${rest.length === 1 ? 'is' : 'are'} counted.`
-      : meta.outcome === 'stop'
-        ? 'The task stays stopped: report it to the user.'
-        : `Retry with that review's notes (${implementerFor(current.tier)}).`
-    message = `Task ${task}: its review already rejected this ${tier} attempt, so its failing gate is not a second failure. ${next}`
+    if (rest.length) {
+      tasks[task] = { ...current, reviewPassed: rest }
+      meta.outcome = stoppedAt(current, routing) ? 'stop' : 'retry'
+      meta.stillRejected = true
+      message = `Task ${task}: its review already rejected this ${tier} attempt, so its failing gate is not a second failure. The task finishes when the ${plural(rest.length, 'other attempt')} the passed review covered ${rest.length === 1 ? 'is' : 'are'} counted.`
+    } else {
+      // That review covered this attempt only together with the fix after it, so the fix was counted first and passed its gate.
+      meta.outcome = 'pass'
+      delete tasks[task]
+      message = `Task ${task} passed on ${tier}: its review already rejected this attempt, so its failing gate is not a second failure, and the fix that review covered was already counted. cc-tiers cleared its attempt counter.`
+    }
   } else if (status === 'pass' && reviewed) {
     const rest = covers.filter((item) => item !== id)
     if (rest.length) {
