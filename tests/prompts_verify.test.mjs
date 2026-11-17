@@ -244,3 +244,10 @@ test('prompts carry the fix-the-cause and no-speculative-code rules', () => {
   for (const file of ['agents/reviewer.md', 'agents/checker.md']) assert.ok(read(file).includes('hides a failure instead of fixing its cause'), `${file} blocks a hidden failure`)
   for (const file of ['agents/orchestrator.md', 'agents/dispatcher.md', 'skills/tiers/SKILL.md']) assert.ok(read(file).includes('the cause, not the symptom'), `${file} names the cause rule`)
 })
+
+test('session prompts put the spec block in the opening attempt heredoc', () => {
+  for (const file of ['agents/orchestrator.md', 'agents/dispatcher.md', 'skills/tiers/SKILL.md']) {
+    const text = read(file)
+    assert.ok(text.includes('`CC_TIERS_SPEC_BEGIN` to `CC_TIERS_SPEC_END`') && text.includes('a spec written only in your message is never stored'), `${file} says the opening heredoc carries the spec`)
+  }
+})

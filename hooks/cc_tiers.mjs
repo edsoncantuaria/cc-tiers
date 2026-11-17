@@ -21,7 +21,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { TIERS, dollars, extractFiles, slug, writeAtomic } from './base.mjs'
 import { BUDGET_OVERRIDE_RE, budgetMessage, budgetStatus, parseTaskBudget } from './budget.mjs'
-import { checksCommand, completion, evaluateCriteria, oneSpacing, parseContract, parseCriterionReports, parseReproLines, plural, weakenedCriteria } from './contract.mjs'
+import { checksCommand, completion, evaluateCriteria, oneSpacing, parseContract, parseCriterionReports, parseReproLines, plural, unreadCriterionLines, weakenedCriteria } from './contract.mjs'
 import { declaresPackage, diagnoseFailure, failureResearchLines, missingPackage, nextAction } from './diagnose.mjs'
 import { MEMORY_BEGIN, MEMORY_END, MEMORY_IGNORE, addRecord, formatRecall, loadMemory, memoryPath, recall, sanitize, saveMemory } from './memory.mjs'
 import { checkParallel, declaredFiles, overlaps, pruneActive, registerActive, releaseActive } from './parallel.mjs'
@@ -1521,8 +1521,10 @@ export function applyEvent(state, event, routing) {
   }
 
   const tasks = state.tasks || (state.tasks = {})
+  // final-gate has no writer report: the gate of its own prompt is its evidence, and a prompt with no CC_TIERS_VERIFY line has none to fail.
+  const finalGated = REVIEW_ROLES.has(role) && task === FINAL_GATE && event.gate !== undefined && event.gate.status !== 'missing'
   // Session-role reports get their gate in the Stop hook; until then only a gate already attached applies.
-  const gated = routing.verify && status === 'pass' && !REVIEW_ROLES.has(role) && (event.gate !== undefined || DELEGATED_WRITERS.has(role))
+  const gated = routing.verify && status === 'pass' && (finalGated || (!REVIEW_ROLES.has(role) && (event.gate !== undefined || DELEGATED_WRITERS.has(role))))
   let gateNote = ''
   let gateDetail = ''
   let gateReason = ''
@@ -1564,6 +1566,11 @@ export function applyEvent(state, event, routing) {
   }
   const covered = status === 'pass' && !REVIEW_ROLES.has(role) && coveredByReview(state, tasks, task, event)
   if (status === 'pass' && !REVIEW_ROLES.has(role) && !covered) recordEvidence(state, task, criterionReports, meta.gate || null, { repro })
+  if (status === 'pass' && finalGated) recordEvidence(state, task, [], meta.gate)
+  const unread = REVIEW_ROLES.has(role) ? [] : unreadCriterionLines(event.text || '')
+  if (unread.length) {
+    gateNote += `cc-tiers: ${task} has ${plural(unread.length, 'CC_TIERS_CRITERION line')} it could not read, so ${unread.length === 1 ? 'that criterion counts' : 'those criteria count'} as pending: ${unread.slice(0, 3).map((line) => `"${clip(line, 100)}"`).join('; ')}. Write each as CC_TIERS_CRITERION: C1 pass|fail|unverifiable|na - <evidence> (na and unverifiable need the evidence).\n`
+  }
   const scopeNote = workspaceNote(task, event.workspace, Object.keys(tasks).filter((name) => name !== task))
   const flagged = Boolean(event.workspace?.sensitive?.length)
   if (scopeNote) gateNote += `${scopeNote}\n`
@@ -1580,7 +1587,8 @@ export function applyEvent(state, event, routing) {
 
   let current = own(tasks, task)
   if (!current || typeof current !== 'object') current = { tier, failures: [], carried: [] }
-  if (current.rejected && !REVIEW_ROLES.has(role)) {
+  // final-gate has no writer attempt to supersede its rejection, so its next passing review is a fresh look at the diff.
+  if (current.rejected && (!REVIEW_ROLES.has(role) || (task === FINAL_GATE && status === 'pass'))) {
     // The session's own pass, parked until Stop, of the attempt a review already rejected: it is that attempt, not a new one.
     if (id && (current.judged || []).includes(id)) {
       meta.tier = tier
@@ -1663,7 +1671,8 @@ export function applyEvent(state, event, routing) {
   let message
   if (REVIEW_ROLES.has(role)) {
     // Evidence review: a rejection with no blocking finding approves; with findings, only they reach the writer.
-    const judged = routing.reviewEvidence && event.judged ? event.judged : null
+    // A failed gate is no reviewer finding: judging the review's own findings would turn that failure back into a pass.
+    const judged = routing.reviewEvidence && event.judged && !gateReason ? event.judged : null
     const inherited = role === 'checker' && Boolean(own(state.evidence, task)?.preexisting)
     let reviewLine = ''
     let applied
@@ -2464,6 +2473,8 @@ function checkReview(state, input, routing, { task, prompt, headers, scoped, pro
       )
     }
   }
+  // final-gate has no writer to delegate the spec, so its own prompt sets the contract.
+  if (task === FINAL_GATE && !stored) holdContract(state, task, prompt, headers, routing).commit?.()
   const context = largeDiffNote(state, task, projectDir)
   const focus = reviewFocus(body)
   const rubric = readRubric(projectDir)
@@ -3001,6 +3012,8 @@ function foldTrailer(text, owner, reportId, cursor, sink) {
   if (!SESSION_ROLES.has(role)) return false
   cursor.task = slug(headers.TASK)
   const status = (headers.STATUS || '').toLowerCase()
+  // An opening that carries the spec sets the task's contract, counted before the closing report.
+  if (cursor.task && !status && specText(text).trim()) sink.reports.push({ id: `${reportId}:opening`, text, role, opening: true })
   if (!cursor.task || (status !== 'pass' && status !== 'fail')) return false
   const token = reportToken(owner, headerLines(text))
   if (!cursor.trailers.includes(token)) {
@@ -3429,6 +3442,10 @@ export function withSession(ctx, payload, fn) {
     const budget = budgetDecision(collectLimits({ payload, cursor: state.cursor, env: ctx.env }), ctx.routing)
     ctx.routing.conserve = budget.conserve
     for (const report of scan.reports) {
+      if (report.opening) {
+        holdOpening(ctx, state, report)
+        continue
+      }
       if (report.agent_id) {
         countHandback(ctx, state, report)
         continue
@@ -3446,6 +3463,23 @@ export function withSession(ctx, payload, fn) {
     if (ctx.file) saveState(ctx.file, state)
     return result
   })
+}
+
+/** The spec of a session attempt's opening heredoc is held like a writer delegation's: a respec that fixes the criteria the last failure named uncounts it. */
+function holdOpening(ctx, state, report) {
+  const headers = parseHeaders(report.text)
+  const task = slug(headers.TASK)
+  const current = own(state.tasks, task)
+  const held = holdContract(state, task, report.text, headers, ctx.routing, current?.specFailed)
+  if (held.deny) {
+    queueMessage(state, held.deny)
+    return
+  }
+  // Same tier only: a respec after an escalation finds the failed criteria already dropped from the entry.
+  const uncounted = held.dropped?.length && current?.specFailed && current.tier === ROLES[report.role] ? uncountSpecFailure(state, task, current, held.dropped, report.role, ctx.routing) : ''
+  if (uncounted) queueMessage(state, uncounted)
+  if (current) delete current.specFailed
+  held.commit?.()
 }
 
 /** Marks each task a failed hook named and tells the orchestrator once per batch of new failures. */
@@ -3487,29 +3521,41 @@ export function prepareReport(ctx, event, payload = {}, { budgetS = ctx.routing.
   const headers = { ...parseHeaders(event.prompt || ''), ...reported }
   const status = ((REVIEW_ROLES.has(event.role) ? reported.STATUS : headers.STATUS) || '').toLowerCase()
   const projectDir = ctx.projectDir || String(payload.cwd || '')
-  if (REVIEW_ROLES.has(event.role)) return routing.reviewEvidence ? prepareReview(routing, event, status, projectDir, budgetS) : event
+  if (REVIEW_ROLES.has(event.role)) {
+    const reviewed = routing.reviewEvidence ? prepareReview(routing, event, status, projectDir, budgetS) : event
+    // final-gate has no writer report: the CC_TIERS_VERIFY lines of its own prompt are what the gate runs, never those of a prompt written for another task.
+    const reportedTask = slug(reported.TASK || '')
+    if (slug(parseHeaders(event.prompt || '').TASK || '') !== FINAL_GATE || (reportedTask && reportedTask !== FINAL_GATE) || status !== 'pass') return reviewed
+    return gateReport(ctx, reviewed, stripBriefs(event.prompt || ''), headers, projectDir, budgetS, peek)
+  }
   if (!WRITER_ROLES.has(event.role) && !SESSION_ROLES.has(event.role)) return event
   if (!slug(headers.TASK || '') || status !== 'pass') return event
   // Only an attempt with a snapshot from its delegation can be held to what it changed.
   if (projectDir && peek?.snapshot) event = { ...event, workspace: inspectWorkspace(projectDir, peek.snapshot, event, headers, String(payload.transcript_path || '')) }
+  return gateReport(ctx, event, event.text, headers, projectDir, budgetS, peek)
+}
+
+/** Runs the CC_TIERS_VERIFY lines of text through the gate and attaches the result to a copy of the event. */
+function gateReport(ctx, event, text, headers, projectDir, budgetS, peek) {
+  const routing = ctx.routing
   if (!routing.verify) return event
   const tree = projectDir ? treeFingerprint(projectDir) : ''
   const cached = tree && peek?.cache ? (raw) => peek.cache[raw] === tree : null
   // Another writer sharing the tree may save files while the command runs; its edits are not this command's.
   const writing = peek?.writing || []
   const snapshot = projectDir && !writing.length ? () => workspaceSnapshot(projectDir) : null
-  const preexisting = declaredPreexisting(event.text, projectDir)?.raw || ''
+  const preexisting = declaredPreexisting(text, projectDir)?.raw || ''
   const files = headers.FILES ? declaredFiles(headers, '').files : []
   const options = { projectDir, allow: routing.verifyAllow, detected: detectedChecks(projectDir), detectedIn: detectedChecks, files, timeoutS: routing.verifyTimeout, budgetS, cached, snapshot, preexisting, lock: gateLock(ctx.dataDir, projectDir) }
   if (projectDir) {
     const treeCheck = writing.length ? { treeCheck: `skipped: ${writing.join(', ')} still writing` } : {}
-    const gate = { ...runGate(event.text, options), tree, ...treeCheck }
+    const gate = { ...runGate(text, options), tree, ...treeCheck }
     const missing = missingFromGate(gate, projectDir)
     // applyEvent reads the declared pre-existing line again and needs the same dir to parse a cd to an absolute path.
     return { ...event, projectDir, gate: missing ? { ...gate, missing } : gate }
   }
   // Nothing may run without a project dir; a declaration still tells missing from not validated.
-  const gate = parseVerify(event.text).length ? 'unverified' : 'missing'
+  const gate = parseVerify(text).length ? 'unverified' : 'missing'
   return { ...event, gate: { status: gate, verified: [], flaky: [], unverified: gate === 'missing' ? [] : [{ raw: '', reason: 'no project dir' }], failure: null } }
 }
 

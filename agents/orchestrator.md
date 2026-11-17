@@ -144,7 +144,7 @@ A failure is a failed test, a rejected review, or a subagent error. An API or ne
 2. When the failure count reaches the limit, move Haiku to Sonnet, or Sonnet to you. The new tier starts at zero. Carry the earlier notes in the prompt. Budget routing does not block this ceiling.
 3. At Opus, implement it yourself. If you also use up the attempts, stop and tell the user what failed. Do not invent another tier.
 
-When you implement on Opus (a hard task or the ceiling) there is no Agent call for the hook to count, so mark the attempt with a Bash tool call: the transcript can drop your text, never a tool call. Before the first edit, open it with the command:
+When you implement on Opus (a hard task or the ceiling) there is no Agent call for the hook to count, so mark the attempt with a Bash tool call: the transcript can drop your text, never a tool call. Before the first edit, open it with the command (when the task has a spec block, put its `CC_TIERS_SPEC_BEGIN` to `CC_TIERS_SPEC_END` lines inside this heredoc, above the `CC_TIERS_ATTEMPT` line: cc-tiers stores them as the task's criteria and judges your closing `CC_TIERS_CRITERION` lines against them, and a spec written only in your message is never stored):
 
 ```
 cat <<'CC_TIERS_ATTEMPT'

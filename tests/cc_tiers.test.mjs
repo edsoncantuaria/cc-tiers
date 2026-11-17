@@ -3649,3 +3649,69 @@ test('stored completions stay bounded', () => {
   assert.ok(state.completions['users-pagination'])
   assert.equal(state.completions.t0, undefined)
 })
+
+test('an attempt heredoc that opens with the spec block makes it the contract its closing criterion lines are judged against', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const project = ceilingProject(dir)
+    writeFileSync(path.join(project, 'ok.mjs'), 'process.exit(0)\n')
+    const routing = defaultRouting({ verify_allow: 'node ok.mjs' })
+    const opening = `${ATTEMPT_OPEN}\nCC_TIERS_SPEC_BEGIN\nCriteria:\n- the page size is 20 (request)\nChecks:\n- \`node ok.mjs\` passes (repo: package.json)\nCC_TIERS_SPEC_END`
+    const closing = `${ATTEMPT_OPEN}\nCC_TIERS_CRITERION: C1 pass - page size 20 asserted\nCC_TIERS_CRITERION: C2 pass - ran it\nCC_TIERS_REPRO: none - no bug\nCC_TIERS_VERIFY: node ok.mjs\nCC_TIERS_STATUS: pass\nCC_TIERS_REVIEW: skip\nCC_TIERS_REASON: done`
+    const transcript = path.join(dir, 'main.jsonl')
+    const row = (block, id) => assistantRow('claude-opus-4-5', { input_tokens: 5 }, [block], { id, uuid: `u${id}` })
+    writeFileSync(transcript, `${row(attempt(opening), 'm1')}\n${row({ type: 'text', text: 'editing' }, 'm2')}\n${row(attempt(closing), 'm3')}\n`)
+    const ctx = { routing, file: path.join(dir, 's.json'), sessionId: 's', env: {}, projectDir: project, ccCost: false }
+    const parked = tiers.withSession(ctx, { transcript_path: transcript }, (state) => {
+      assert.deepEqual(state.contracts['users-pagination'].criteria.map((item) => item.id), ['C1', 'C2'])
+      return tiers.peekAwaiting(state)
+    })
+    assert.equal(parked.length, 1)
+    const [prepared] = tiers.prepareParked(ctx, parked, {})
+    const message = tiers.withSession(ctx, { transcript_path: transcript }, (state) => {
+      const counted = tiers.countParked(ctx, state, prepared)
+      tiers.dropAwaiting(state, [prepared.id])
+      return counted
+    })
+    assert.match(message, /Criteria with evidence: 1\/2/)
+    assert.match(message, /\| C2 `node ok\.mjs` passes \| pass \| node ok\.mjs \|/)
+    assert.doesNotMatch(message, /No spec criteria/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a CC_TIERS_CRITERION line that does not read is named in a note and its criterion stays pending', () => {
+  const routing = defaultRouting({ review_policy: 'never' })
+  const state = tiers.emptyState('s')
+  state.contracts = { 'users-pagination': parseContract('Criteria:\n- the page size is 20 (request)') }
+  const text = `${report('implementer', 'sonnet', 'pass')}\nCC_TIERS_CRITERION: C1 passed it\nCC_TIERS_VERIFY: npm test`
+  const applied = tiers.applyEvent(state, gateEvent('x', text, { ...GATE_BASE, status: 'pass', verified: ['npm test'] }), routing)
+  assert.match(applied.message, /could not read.*"CC_TIERS_CRITERION: C1 passed it"/)
+  assert.match(applied.message, /\| C1 the page size is 20 \| pending \|/)
+})
+
+test('a session respec in the opening heredoc uncounts the failure that named the criteria it fixed, like a writer delegation', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const project = ceilingProject(dir)
+    const routing = respecRouting()
+    const closing = `${ATTEMPT_OPEN}\nCC_TIERS_CRITERION: C1 fail - broke\nCC_TIERS_STATUS: fail\nCC_TIERS_REASON: criteria failed`
+    const respec = `${ATTEMPT_OPEN}\nCC_TIERS_RESPEC: the spec said step 3, the parser has no such step\n${respecSpec('the parser handles step 2', 'the output is sorted')}`
+    const transcript = path.join(dir, 'main.jsonl')
+    const row = (block, id) => assistantRow('claude-opus-4-5', { input_tokens: 5 }, [block], { id, uuid: `u${id}` })
+    writeFileSync(transcript, `${row(attempt(`${ATTEMPT_OPEN}\n${FIRST_SPEC}`), 'm1')}\n${row(attempt(closing), 'm2')}\n${row(attempt(respec), 'm3')}\n`)
+    const ctx = { routing, file: path.join(dir, 's.json'), sessionId: 's', env: {}, projectDir: project, ccCost: false }
+    const state = tiers.withSession(ctx, { transcript_path: transcript }, (held) => held)
+    const entry = state.tasks[SEED_TASK]
+    assert.deepEqual(entry.failures, [])
+    assert.equal(entry.respecUncounted, 1)
+    assert.equal(entry.specFailed, undefined)
+    assert.equal(state.log[SEED_TASK].uncounted, 1)
+    assert.equal(state.contracts[SEED_TASK].criteria[0].text, 'the parser handles step 2')
+    assert.match(state.pending.join('\n'), /the last opus failure of users-pagination named C1 "the parser handles step 3", and CC_TIERS_RESPEC changed it, so the spec was the cause\. That failure is no longer counted \(0 of 2\)/)
+    assert.ok(state.audit.some((item) => /users-pagination: opus failure uncounted: the respec changed C1 "the parser handles step 3"/.test(item.problem)))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

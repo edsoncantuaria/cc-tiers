@@ -24,7 +24,7 @@ Opus costs the most, so call it only for the reasons in that table. If the sessi
 
 ## Doing a task yourself
 
-A request that is one task, trivial or ordinary (not hard), needs no planner and no subagent: do it yourself, on Sonnet, in this session. Mark the attempt with a Bash tool call so the hook counts it: the transcript can drop your text, never a tool call. Before the first edit, open it with the command:
+A request that is one task, trivial or ordinary (not hard), needs no planner and no subagent: do it yourself, on Sonnet, in this session. Mark the attempt with a Bash tool call so the hook counts it: the transcript can drop your text, never a tool call. Before the first edit, open it with the command (when the task has a spec block, put its `CC_TIERS_SPEC_BEGIN` to `CC_TIERS_SPEC_END` lines inside this heredoc, above the `CC_TIERS_ATTEMPT` line: cc-tiers stores them as the task's criteria and judges your closing `CC_TIERS_CRITERION` lines against them, and a spec written only in your message is never stored):
 
 ```
 cat <<'CC_TIERS_ATTEMPT'
