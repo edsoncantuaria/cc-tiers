@@ -92,11 +92,28 @@ test('a live holder keeps its lock past the old 10 s rule; a dead one, or one ol
   })
 })
 
+test('a lock from another host is not judged by a local pid: it is kept until 700 s, a dead local pid on this host is taken', async () => {
+  await inTempDir((dir) => {
+    const file = path.join(dir, 'session-sess-1.json')
+    const lock = `${file}.lock`
+    const aged = (seconds) => new Date(Date.now() - seconds * 1000)
+    const dead = spawnSync(process.execPath, ['-e', '']).pid
+    writeFileSync(lock, `${dead}@another-host-${os.hostname()}`)
+    utimesSync(lock, aged(30), aged(30))
+    assert.equal(tiers.withLock(file, (taken) => taken, 200), false, 'a pid from another container may be alive there')
+    utimesSync(lock, aged(701), aged(701))
+    assert.equal(tiers.withLock(file, (taken) => taken, 200), true, 'past the longest hook it is taken')
+
+    writeFileSync(lock, `${dead}@${os.hostname()}`)
+    assert.equal(tiers.withLock(file, (taken) => taken, 5000), true, 'the same host checks the pid')
+  })
+})
+
 test('the lock names its holder, so a crash can be told from a slow hook', async () => {
   await inTempDir((dir) => {
     const file = path.join(dir, 'session-sess-1.json')
     const seen = tiers.withLock(file, () => readFileSync(`${file}.lock`, 'utf8'))
-    assert.equal(seen, String(process.pid))
+    assert.equal(seen, `${process.pid}@${os.hostname()}`)
   })
 })
 

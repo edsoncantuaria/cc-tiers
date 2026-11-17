@@ -19,6 +19,7 @@ import {
   writeSync,
 } from 'node:fs'
 import { createHash } from 'node:crypto'
+import { hostname } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { TIERS, dollars, extractFiles, slug, writeAtomic } from './base.mjs'
@@ -1154,6 +1155,13 @@ export function formatTaskSpend(task, tiers) {
   return `cc-tiers spend for ${line} (input + cache write + output; cache reads excluded, same as cc-cost).`
 }
 
+/** How far into a fork's transcript its parent's session id is looked for. */
+const FORK_HEAD_BYTES = 1024 * 1024
+/** How much of a sibling transcript is read to find its first row, and how many of the newest siblings are tried. */
+const SIBLING_HEAD_BYTES = 64 * 1024
+const MAX_FORK_SIBLINGS = 200
+const SCAN_CHUNK_BYTES = 4 * 1024 * 1024
+
 function freshCursor() {
   return { file: '', offset: 0, task: '', ids: [], trailers: [], limits: {} }
 }
@@ -1193,11 +1201,16 @@ export function sessionPath(dataDir, sessionId) {
   return path.join(dataDir, `session-${safe}.json`)
 }
 
-export function loadState(file, sessionId) {
-  if (!file || !existsSync(file)) return emptyState(sessionId)
+/** onEmpty, when given, hears why an empty state came back: missing, corrupt, or no tasks. */
+export function loadState(file, sessionId, onEmpty = () => {}) {
+  const empty = (why) => {
+    onEmpty(why)
+    return emptyState(sessionId)
+  }
+  if (!file || !existsSync(file)) return empty('missing')
   try {
     const data = JSON.parse(readFileSync(file, 'utf8'))
-    if (!data || typeof data !== 'object' || !data.tasks || typeof data.tasks !== 'object') return emptyState(sessionId)
+    if (!data || typeof data !== 'object' || !data.tasks || typeof data.tasks !== 'object') return empty('no tasks')
     const base = emptyState(sessionId)
     for (const key of ['seen', 'spent', 'asked', 'pending', 'awaiting', 'events', 'audit']) if (!Array.isArray(data[key])) data[key] = base[key]
     for (const key of ['spend', 'cost', 'log', 'background', 'finished', 'researched', 'contracts', 'evidence', 'completions', 'snapshots', 'verifyCache', 'active']) {
@@ -1216,7 +1229,7 @@ export function loadState(file, sessionId) {
     }
     return data
   } catch {
-    return emptyState(sessionId)
+    return empty('corrupt')
   }
 }
 
@@ -1245,15 +1258,22 @@ function sleep(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
 }
 
-/** Whether the process that wrote a lock is gone: its pid is the lock's content; a lock with no pid tells nothing. */
+/**
+ * Whether the process that wrote a lock is gone: the lock holds `pid@host`; a lock with no pid tells nothing.
+ * A pid from another host (a container sharing the data dir) cannot be checked here, so it counts as alive.
+ */
 function holderGone(lock) {
   let pid
+  let host
   try {
-    pid = Number.parseInt(readFileSync(lock, 'utf8'), 10)
+    const [held, ...rest] = readFileSync(lock, 'utf8').split('@')
+    pid = Number.parseInt(held, 10)
+    host = rest.join('@')
   } catch {
     return null
   }
   if (!(pid > 0)) return null
+  if (host && host !== hostname()) return false
   try {
     process.kill(pid, 0)
     return false
@@ -1273,7 +1293,7 @@ function takeLock(lock, waitMs, staleMs, maxHeldMs = LOCK_MAX_HELD_MS) {
     try {
       const fd = openSync(lock, 'wx')
       try {
-        writeSync(fd, String(process.pid))
+        writeSync(fd, `${process.pid}@${hostname()}`)
       } finally {
         closeSync(fd)
       }
@@ -2724,6 +2744,7 @@ export function trustedAllow(ctx, peek, projectDir) {
   const { stamp, allow, note } = projectAllowFrom(projectDir)
   if (!allow.length) return { allow: base, note }
   if (!ctx.dataDir) return { allow: base, note: 'not applied: no plugin data dir keeps the stamp of .claude/cc-tiers.json' }
+  if (peek?.projectFile === 'unstamped' || peek?.projectFile === 'lost') return { allow: base, note: "not applied: cc-tiers had no saved state for this session when it first read .claude/cc-tiers.json; a new session picks it up" }
   if (!peek || peek.projectFile !== stamp) return { allow: base, note: 'not applied: .claude/cc-tiers.json changed since cc-tiers first read it in this session; a new session picks it up' }
   return { allow: [...base, ...allow], note: '' }
 }
@@ -3578,9 +3599,15 @@ export function openContext(payload, env = process.env) {
  */
 export function withSession(ctx, payload, fn) {
   return withLock(ctx.file, (held) => {
-    const state = ctx.file ? loadState(ctx.file, ctx.sessionId) : emptyState(ctx.sessionId)
+    let lost = ''
+    const state = ctx.file ? loadState(ctx.file, ctx.sessionId, (why) => (lost = why)) : emptyState(ctx.sessionId)
+    const starting = payload.hook_event_name === 'SessionStart' && NEW_SESSION_SOURCES.has(payload.source || 'startup')
+    if (lost === 'missing' && starting && payload.source === 'fork') carryFork(ctx, state, payload)
+    else if (lost === 'missing' && ctx.file && !starting && !ranBefore(payload.transcript_path)) state.projectFile = 'unstamped'
+    else if (lost && ctx.file && !starting) loseState(ctx, state, lost, payload)
     absorbHookErrors(state, ctx.dataDir)
-    // The project file as this session first saw it; trustedAllow compares every later read with it. Only a saved state can keep it.
+    // The project file as this session first saw it; trustedAllow compares every later read with it. Only a saved state can keep it,
+    // and only a new session stamps it: a state file deleted mid-session must not let a changed file through. Neither marker matches a stamp.
     // Only that file is kept out of git: one created during the session stays in git status and in the attempt's diff for review.
     if (ctx.file && ctx.projectDir && state.projectFile === undefined) {
       state.projectFile = projectFileStamp(ctx.projectDir)
@@ -3623,6 +3650,124 @@ export function withSession(ctx, payload, fn) {
     }
     return result
   }, ctx.lockWaitMs)
+}
+
+/** SessionStart sources that open a session of their own; resume and compact continue one, so they find its state. */
+const NEW_SESSION_SOURCES = new Set(['startup', 'clear', 'fork'])
+
+/** What a fork carries from its parent: the task records. Agents, parked reports and dedupe lists stay with the parent, which still runs. */
+const FORK_KEYS = ['tasks', 'log', 'contracts', 'evidence', 'researched', 'completions', 'snapshots', 'depends']
+
+/** The rows at the head of a transcript, parsed; a torn last line is skipped. */
+function headRows(file, bytes) {
+  let text
+  try {
+    text = readRange(file, 0, Math.min(statSync(file).size, bytes)).toString('utf8')
+  } catch {
+    return []
+  }
+  const rows = []
+  for (const line of text.split('\n')) {
+    try {
+      const row = JSON.parse(line)
+      if (row && typeof row === 'object') rows.push(row)
+    } catch {
+      // A line cut by the byte limit.
+    }
+  }
+  return rows
+}
+
+/**
+ * The session a fork copied its transcript from. The copy keeps each row's uuid, so the parent is the sibling transcript that starts
+ * with the same row. A row's session_id is only a hint: after a /clear it still names the session from before the clear.
+ */
+function forkParent(file, sessionId) {
+  const rows = headRows(file, FORK_HEAD_BYTES)
+  const first = rows.find((row) => typeof row.uuid === 'string')?.uuid
+  const hint = rows.map((row) => row.session_id).find((id) => typeof id === 'string' && id && id !== sessionId) || ''
+  if (!first) return hint
+  const dir = path.dirname(file)
+  let names = []
+  try {
+    names = readdirSync(dir).filter((name) => name.endsWith('.jsonl') && path.join(dir, name) !== file)
+  } catch {
+    return hint
+  }
+  const starts = (name) => headRows(path.join(dir, name), SIBLING_HEAD_BYTES).find((row) => typeof row.uuid === 'string')?.uuid === first
+  const mtime = (name) => {
+    try {
+      return statSync(path.join(dir, name)).mtimeMs
+    } catch {
+      return 0
+    }
+  }
+  const matches = names.sort((a, b) => mtime(b) - mtime(a)).slice(0, MAX_FORK_SIBLINGS).filter(starts).map((name) => name.slice(0, -'.jsonl'.length))
+  if (matches.includes(hint)) return hint
+  return matches[0] || hint
+}
+
+/**
+ * A fork starts with a copy of its parent's transcript under a new session id. Its task records come from the parent's state (read,
+ * never written: the parent may still run), and the copied rows are not folded again, or they would count the parent's attempts twice.
+ */
+function carryFork(ctx, state, payload) {
+  const file = payload.transcript_path
+  if (!skipTranscript(state, file)) return
+  const parent = forkParent(file, ctx.sessionId)
+  if (!parent) return
+  let missing = ''
+  const from = loadState(sessionPath(ctx.dataDir, parent), parent, (why) => (missing = why))
+  if (missing) {
+    queueMessage(state, `cc-tiers: this session is a fork of ${parent}, whose saved state is ${missing === 'missing' ? 'gone' : 'unreadable'}; its tasks start over here. Check the working tree before you delegate any of them again.`)
+    return
+  }
+  for (const key of FORK_KEYS) if (from[key] && typeof from[key] === 'object') state[key] = from[key]
+  const count = Object.keys(state.tasks).length + Object.keys(state.log).length
+  if (count) queueMessage(state, `cc-tiers carried the task records of session ${parent} into this fork. Agents still running there report to that session, not this one.`)
+}
+
+/** cc-tiers SessionStart text in the transcript: this session had a state, so a missing file was deleted or pruned, not never written. */
+const SESSION_START_RE = /cc-tiers routing is active|cc-tiers is enabled\. The routing summary/
+
+function ranBefore(file) {
+  if (!file) return false
+  let size
+  try {
+    size = statSync(file).size
+  } catch {
+    return false
+  }
+  // Read in chunks that overlap by more than the marker, so one cut in two is still found.
+  for (let start = 0; start < size; start += SCAN_CHUNK_BYTES - 256) {
+    try {
+      if (SESSION_START_RE.test(readRange(file, start, Math.min(size, start + SCAN_CHUNK_BYTES)).toString('utf8'))) return true
+    } catch {
+      return false
+    }
+  }
+  return false
+}
+
+/** Starts the transcript cursor at the end, so rows already counted (or copied from a parent) are not folded again. */
+function skipTranscript(state, file) {
+  try {
+    state.cursor = { ...freshCursor(), file, offset: statSync(file).size }
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * A state that came back empty in the middle of a session lost its counts and its project file stamp: it is told, never re-stamped,
+ * and the transcript is not re-read, or old passes would be parked and gated again on today's tree.
+ */
+function loseState(ctx, state, why, payload) {
+  state.projectFile = 'lost'
+  if (payload.transcript_path) skipTranscript(state, payload.transcript_path)
+  queueEvent(state, { type: 'state.recovered', because: why })
+  queueMessage(state, `cc-tiers found ${why === 'missing' ? 'no saved state for this session' : "this session's saved state unreadable"}: attempt counts, reviews and parked reports start over, and the project's verifyAllow is not applied until a new session. Check git status and the working tree before you delegate or review anything again.`)
 }
 
 /** The spec of a session attempt's opening heredoc is held like a writer delegation's: a respec that fixes the criteria the last failure named uncounts it. */
