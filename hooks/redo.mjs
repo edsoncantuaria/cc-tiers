@@ -77,7 +77,7 @@ function saveOther(file, state, stat) {
 }
 
 /** Runs one action and returns the text to print; the mark is saved under the lock of the session file that holds the task. */
-export function run(argv, { now = Date.now(), env = process.env } = {}) {
+export function run(argv, { now = Date.now(), env = process.env, lockWaitMs } = {}) {
   const [dataDir, sessionId, ...args] = argv
   const { env: settings, rest } = takeSettings(args)
   const undo = rest[0] === '--undo'
@@ -88,7 +88,8 @@ export function run(argv, { now = Date.now(), env = process.env } = {}) {
   const holder = undo ? holders.find((item) => item.redo > 0) : holders[0]
   if (!holder) return { code: 1, out: holders.length ? `${task} has no re-ask mark to undo.\n` : `No such task is recorded: ${task}.\n` }
   const ctx = openContext({ session_id: holder.id }, { ...env, ...settings, CLAUDE_PLUGIN_DATA: dataDir })
-  return withLock(holder.file, () => {
+  return withLock(holder.file, (held) => {
+    if (!held) return { code: 1, out: 'The cc-tiers session state is busy: another hook is saving it. Try again in a moment.\n' }
     const state = loadState(holder.file, holder.id)
     const entry = undo ? undoRedo(state, task) : markRedo(state, task, { source: 'command', reason: words.join(' '), now })
     if (!entry) return { code: 1, out: `No such task is recorded: ${task}.\n` }
@@ -96,7 +97,7 @@ export function run(argv, { now = Date.now(), env = process.env } = {}) {
     if (holder.file === sessionPath(dataDir, sessionId)) saveState(holder.file, state)
     else saveOther(holder.file, state, holder.stat)
     return { code: 0, out: undo ? `Removed one re-ask mark from ${task}; ${entry.redo || 'none'} left.\n` : `Marked ${task} as sent back by the user (${entry.redo}).\n` }
-  })
+  }, lockWaitMs)
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)

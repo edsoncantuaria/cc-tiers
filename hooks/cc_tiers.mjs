@@ -16,6 +16,7 @@ import {
   statSync,
   unlinkSync,
   writeFileSync,
+  writeSync,
 } from 'node:fs'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
@@ -27,7 +28,7 @@ import { declaresPackage, diagnoseFailure, failureResearchLines, missingPackage,
 import { MEMORY_BEGIN, MEMORY_END, MEMORY_IGNORE, addRecord, formatRecall, loadMemory, memoryPath, recall, sanitize, saveMemory } from './memory.mjs'
 import { checkParallel, declaredFiles, overlaps, pruneActive, registerActive, releaseActive } from './parallel.mjs'
 import { availableChecks, parseProfile, profileSettings, reviewRequired, selectChecks } from './policy.mjs'
-import { readHookErrors } from './integrity.mjs'
+import { readHookErrors, recordHookError, taskOf } from './integrity.mjs'
 import { clip } from './redact.mjs'
 import { KEYWORD_FACTOR, TEXT_KEYWORD_FACTOR, assessRisk, isSensitivePath, riskRank, testsAvailableIn } from './risk.mjs'
 import { parseTelemetry, recordEvent, telemetryPath } from './telemetry.mjs'
@@ -104,8 +105,13 @@ const MAX_AUDIT = 40
 const MAX_EVENTS = 60
 const MAX_CACHE = 40
 const SCAN_FIRST_CAP = 32 * 1024 * 1024
-const LOCK_WAIT_MS = 3000
+/** Leaves a 15 s hook (PreToolUse blocks the delegation when it times out) 10 s for its own work. */
+const LOCK_WAIT_MS = 5000
+/** Memory and history are a convenience written while the session lock is held: they wait less and skip the write when busy. */
+const NESTED_LOCK_WAIT_MS = 2000
 const LOCK_STALE_MS = 10000
+/** No hook runs longer than its 660 s timeout, so a lock this old is a holder Claude Code killed, whatever its pid says. */
+const LOCK_MAX_HELD_MS = 700000
 /** A gate holds its lock for up to a verify budget; past the hook timeout in hooks.json its process is gone. */
 const GATE_LOCK_STALE_MS = 660000
 const HEADER_RE = /^CC_TIERS_([A-Z]+):\s*(.*?)\s*$/
@@ -1239,17 +1245,45 @@ function sleep(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
 }
 
-/** Creates the lock file, waiting up to waitMs; a lock older than staleMs is a crashed holder and is taken over. False when it was not taken. */
-function takeLock(lock, waitMs, staleMs) {
+/** Whether the process that wrote a lock is gone: its pid is the lock's content; a lock with no pid tells nothing. */
+function holderGone(lock) {
+  let pid
+  try {
+    pid = Number.parseInt(readFileSync(lock, 'utf8'), 10)
+  } catch {
+    return null
+  }
+  if (!(pid > 0)) return null
+  try {
+    process.kill(pid, 0)
+    return false
+  } catch (error) {
+    // EPERM: the process exists but belongs to someone else.
+    return error.code === 'ESRCH'
+  }
+}
+
+/**
+ * Creates the lock file with this process's pid, waiting up to waitMs. A lock whose holder is gone, or one older than maxHeldMs,
+ * is taken over; one with no pid (written before the pid was kept) is taken over once older than staleMs. False when it was not taken.
+ */
+function takeLock(lock, waitMs, staleMs, maxHeldMs = LOCK_MAX_HELD_MS) {
   const deadline = Date.now() + waitMs
   for (;;) {
     try {
-      closeSync(openSync(lock, 'wx'))
+      const fd = openSync(lock, 'wx')
+      try {
+        writeSync(fd, String(process.pid))
+      } finally {
+        closeSync(fd)
+      }
       return true
     } catch (error) {
       if (error.code !== 'EEXIST') return false
       try {
-        if (Date.now() - statSync(lock).mtimeMs > staleMs) {
+        const age = Date.now() - statSync(lock).mtimeMs
+        const gone = holderGone(lock)
+        if (gone === true || age > maxHeldMs || (gone === null && age > staleMs)) {
           unlinkSync(lock)
           continue
         }
@@ -1271,18 +1305,17 @@ function dropLock(lock) {
 }
 
 /**
- * Run fn while holding `<file>.lock`. Parallel subagents fire hooks at the same
- * time, and without the lock their read-modify-write would drop counts.
- * A lock older than LOCK_STALE_MS is a crashed hook and is taken over.
- * After LOCK_WAIT_MS the hook runs anyway rather than miss its timeout.
+ * Run fn(held) while holding `<file>.lock`. Parallel subagents fire hooks at the same time, and without the lock their
+ * read-modify-write would drop counts. A lock whose holder is gone is taken over; a live holder keeps it. After waitMs fn still runs,
+ * so the hook answers within its timeout, but with held false: it must not write what the holder may be writing.
  */
-export function withLock(file, fn) {
-  if (!file) return fn()
+export function withLock(file, fn, waitMs = LOCK_WAIT_MS) {
+  if (!file) return fn(true)
   const lock = `${file}.lock`
   mkdirSync(path.dirname(lock), { recursive: true })
-  const held = takeLock(lock, LOCK_WAIT_MS, LOCK_STALE_MS)
+  const held = takeLock(lock, waitMs, LOCK_STALE_MS)
   try {
-    return fn()
+    return fn(held)
   } finally {
     if (held) dropLock(lock)
   }
@@ -1297,7 +1330,7 @@ export function gateLock(dataDir, projectDir) {
   const lock = path.join(dataDir, `gate-${lineId(path.resolve(projectDir))}.lock`)
   return (waitS) => {
     mkdirSync(dataDir, { recursive: true })
-    return takeLock(lock, waitS * 1000, GATE_LOCK_STALE_MS) ? () => dropLock(lock) : null
+    return takeLock(lock, waitS * 1000, GATE_LOCK_STALE_MS, GATE_LOCK_STALE_MS) ? () => dropLock(lock) : null
   }
 }
 
@@ -3544,7 +3577,7 @@ export function openContext(payload, env = process.env) {
  * its gate or judgment runs commands, which only the Stop hook does, outside this lock.
  */
 export function withSession(ctx, payload, fn) {
-  return withLock(ctx.file, () => {
+  return withLock(ctx.file, (held) => {
     const state = ctx.file ? loadState(ctx.file, ctx.sessionId) : emptyState(ctx.sessionId)
     absorbHookErrors(state, ctx.dataDir)
     // The project file as this session first saw it; trustedAllow compares every later read with it. Only a saved state can keep it.
@@ -3580,10 +3613,16 @@ export function withSession(ctx, payload, fn) {
       if (message) queueMessage(state, message)
     }
     const result = fn(state, { budget })
-    flushEvents(ctx, state)
-    if (ctx.file) saveState(ctx.file, state)
+    if (held) {
+      flushEvents(ctx, state)
+      if (ctx.file) saveState(ctx.file, state)
+    } else {
+      // Another hook holds the state and will save it: writing ours over it would drop what it counted. This event is not recorded, and the next hook says so.
+      const task = taskOf(payload)
+      recordHookError(ctx.dataDir, { session: ctx.sessionId, hook: 'lock', task, error: new Error('the session state was busy past the wait; this event was not saved') })
+    }
     return result
-  })
+  }, ctx.lockWaitMs)
 }
 
 /** The spec of a session attempt's opening heredoc is held like a writer delegation's: a respec that fixes the criteria the last failure named uncounts it. */
@@ -4046,20 +4085,22 @@ export function processReport(ctx, state, event, usage = null) {
   if (!applied.meta.planner && ctx.routing.memory && ctx.projectDir) rememberOutcome(ctx, state, applied.meta, task)
   if (applied.meta.haikuFailure && ctx.routing.learn && ctx.projectDir) {
     const file = historyPath(ctx.projectDir)
-    withLock(file, () => {
+    withLock(file, (held) => {
+      if (!held) return
       const history = noteHaikuFailure(loadHistory(file), {
         task,
         prompt: applied.meta.prompt,
         reason: applied.meta.reason,
       })
       saveHistory(file, history)
-    })
+    }, NESTED_LOCK_WAIT_MS)
     ensureHistoryIgnored(ctx.projectDir)
     message += `\ncc-tiers recorded a Haiku failure for ${task}. Similar tasks will start on Sonnet.`
   }
   if (applied.meta.sonnetEscalated && ctx.routing.learn && ctx.projectDir) {
     const file = historyPath(ctx.projectDir)
-    withLock(file, () => {
+    withLock(file, (held) => {
+      if (!held) return
       const history = noteFailure(loadHistory(file), {
         tier: 'sonnet',
         task,
@@ -4067,7 +4108,7 @@ export function processReport(ctx, state, event, usage = null) {
         reason: applied.meta.reason,
       })
       saveHistory(file, history)
-    })
+    }, NESTED_LOCK_WAIT_MS)
     ensureHistoryIgnored(ctx.projectDir)
     const top = effortTop(ctx.routing, 'sonnet', { conserve: ctx.routing.conserve === true })
     message += `\ncc-tiers recorded that ${task} escalated past Sonnet. Similar tasks will start on Sonnet${top ? ` at effort ${top}` : ''}.`
@@ -4157,11 +4198,12 @@ function rememberOutcome(ctx, state, meta, task) {
   if (!records.length) return
   const file = memoryPath(ctx.projectDir)
   try {
-    withLock(file, () => {
+    withLock(file, (held) => {
+      if (!held) return
       let memory = loadMemory(file)
       for (const record of records) memory = addRecord(memory, record, { projectDir: ctx.projectDir }).memory
       saveMemory(file, memory)
-    })
+    }, NESTED_LOCK_WAIT_MS)
     ensureHistoryIgnored(ctx.projectDir, MEMORY_IGNORE, '# cc-tiers engineering memory, local to this checkout')
   } catch {
     // Memory is a convenience; a write that fails must not break the hook.

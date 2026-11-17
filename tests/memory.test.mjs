@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -246,6 +246,22 @@ test('a secret in evidence, task or the tie-in path reaches neither the file, th
     }
     assert.equal(record.validWhile, null, 'a tie-in path that holds a secret is not kept')
     assert.ok(block.includes('deploy needs the staging flag'))
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('memory_cli changes nothing while another hook holds the memory file, and says it is busy', async () => {
+  const cli = await import(pathToFileURL(path.join(ROOT, 'hooks', 'memory_cli.mjs')).href)
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-memory-'))
+  try {
+    const file = memory.memoryPath(dir)
+    mkdirSync(path.dirname(file), { recursive: true })
+    writeFileSync(`${file}.lock`, String(process.pid))
+    const result = cli.run([dir, 'add', 'convention', 'tabs', 'not', 'spaces'], { lockWaitMs: 200 })
+    assert.equal(result.code, 1)
+    assert.match(result.out, /busy/)
+    assert.equal(existsSync(file), false, 'nothing written')
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

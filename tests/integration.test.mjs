@@ -1479,6 +1479,9 @@ test('gateLock: a lock left by a dead gate is taken over, a live gate within its
     assert.equal(lock(0), null, 'a gate still inside the hook timeout keeps its lock')
     age(GATE_LOCK_STALE_MS + 5000)
     assert.equal(typeof lock(0), 'function', 'past the hook timeout its process is gone')
+    // The lock just taken is this live process's; written fresh with a dead pid it is a crashed gate's.
+    writeFileSync(file, String(spawnSync(process.execPath, ['-e', '']).pid))
+    assert.equal(typeof lock(0), 'function', 'a gate whose process died frees its lock at once')
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
