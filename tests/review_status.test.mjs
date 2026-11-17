@@ -634,6 +634,67 @@ function gateProject(dir) {
   return { project, out, env, text: trailer('implementer', 'pass', ['CC_TIERS_REVIEW: skip', `CC_TIERS_VERIFY: node probe.mjs ${out}`]) }
 }
 
+/** A project whose check fails, and an isolated writer's worktree (named in its meta file next to the session transcript) where it passes. */
+function isolatedProject(dir, agentId) {
+  const project = path.join(dir, 'project')
+  const worktree = path.join(project, '.claude', 'worktrees', agentId)
+  mkdirSync(worktree, { recursive: true })
+  writeFileSync(path.join(project, 'check.mjs'), 'process.exit(1)\n')
+  writeFileSync(path.join(worktree, 'check.mjs'), 'process.exit(0)\n')
+  const transcript = path.join(dir, 'sess-1.jsonl')
+  writeFileSync(transcript, '')
+  mkdirSync(path.join(dir, 'sess-1', 'subagents'), { recursive: true })
+  writeFileSync(path.join(dir, 'sess-1', 'subagents', `agent-${agentId}.meta.json`), JSON.stringify({ spawnedWithWorktree: true, worktreePath: worktree }))
+  const env = { ...hookEnv(dir), CLAUDE_PROJECT_DIR: project, CLAUDE_PLUGIN_OPTION_VERIFY_ALLOW: 'node check.mjs' }
+  return { project, transcript, env, text: trailer('implementer', 'pass', ['CC_TIERS_REVIEW: skip', 'CC_TIERS_VERIFY: node check.mjs']) }
+}
+
+test('a foreground isolated writer is gated in its worktree, and one that is not isolated in the project', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-status-'))
+  try {
+    const { project, transcript, env, text } = isolatedProject(dir, 'w1')
+    const foreground = (agentId, toolUseId) => {
+      const proc = run(
+        'after_agent.mjs',
+        {
+          session_id: 'sess-1',
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Agent',
+          tool_use_id: toolUseId,
+          transcript_path: transcript,
+          cwd: project,
+          tool_input: { subagent_type: 'cc-tiers:implementer', prompt: WRITER_PROMPT },
+          tool_response: { status: 'completed', agentId, content: [{ type: 'text', text }] },
+        },
+        env,
+      )
+      assert.equal(proc.status, 0, proc.stderr)
+      return JSON.parse(proc.stdout).hookSpecificOutput.additionalContext
+    }
+    assert.match(foreground('w1', 'fg-1'), /users-pagination verified: node check\.mjs/, 'the check that passes only in the worktree')
+    assert.doesNotMatch(foreground('w2', 'fg-2'), /users-pagination verified/, 'no meta: the project, where it fails')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('an isolated writer parked as a hand-back row is gated in its worktree at Stop', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-status-'))
+  try {
+    const { project, transcript, env, text } = isolatedProject(dir, 'w1')
+    writeFileSync(transcript, `${handbackRow('w1', text, 'u1')}\n`)
+    launchAgent(env, 'w1', 'implementer', WRITER_PROMPT)
+    scanMain(env, transcript, project)
+    assert.equal(sessionState(dir).awaiting.length, 1)
+
+    const end = endTurn(env, transcript, project)
+    assert.match(JSON.parse(end.stdout).reason, /cc-tiers gate: users-pagination verified: node check\.mjs/)
+    assert.deepEqual(sessionState(dir).awaiting, [])
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('a peer hand-back row in the main transcript counts as its agent\'s report', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-status-'))
   try {

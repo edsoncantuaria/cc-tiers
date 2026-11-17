@@ -3402,6 +3402,29 @@ export function agentHandbackReport(file) {
   return report
 }
 
+/** An agent's transcript file, from the session transcript `<dir>/<session id>.jsonl` and the agent id; '' when either is missing. */
+export function agentTranscriptPath(sessionFile, agentId) {
+  if (!sessionFile || !/^[\w-]+$/.test(String(agentId || ''))) return ''
+  return path.join(path.dirname(sessionFile), path.basename(sessionFile, '.jsonl'), 'subagents', `agent-${agentId}.jsonl`)
+}
+
+/** The git worktree an isolated agent ran in: its meta file says so, else the one under `<project>/.claude/worktrees/` that the cwd of its first row is in. '' when it ran in the project. */
+export function agentWorktree(file, projectDir) {
+  if (!file) return ''
+  try {
+    const meta = JSON.parse(readFileSync(file.replace(/\.jsonl$/, '.meta.json'), 'utf8'))
+    return meta?.spawnedWithWorktree === true && typeof meta.worktreePath === 'string' ? meta.worktreePath : ''
+  } catch {
+    // No readable meta: the agent's own cwd tells where it worked.
+  }
+  const cwd = transcriptRows(file).find((row) => typeof row?.cwd === 'string' && row.cwd)?.cwd
+  if (!cwd) return ''
+  const root = path.join(path.resolve(projectDir), '.claude', 'worktrees')
+  const relative = path.relative(root, path.resolve(cwd))
+  const [name] = relative.split(path.sep)
+  return name && name !== '..' && !path.isAbsolute(relative) ? path.join(root, name) : ''
+}
+
 export function usageFromToolResponse(response, role, routing = null) {
   if (!response || typeof response !== 'object' || !response.usage) return null
   const amount = freshTokens(response.usage)
@@ -3832,7 +3855,7 @@ export function absorbHookErrors(state, dataDir) {
  * Run the verification gate of a writer pass and attach it to a copy of the event.
  * Commands can take minutes, so this runs before withSession, never under its lock.
  */
-export function prepareReport(ctx, event, payload = {}, { budgetS = ctx.routing.verifyBudget, peek = null } = {}) {
+export function prepareReport(ctx, event, payload = {}, { budgetS = ctx.routing.verifyBudget, peek = null, agentTranscript = '' } = {}) {
   const routing = ctx.routing
   if (event?.kind !== 'report') return event
   const reported = parseHeaders(event.text || '')
@@ -3850,28 +3873,36 @@ export function prepareReport(ctx, event, payload = {}, { budgetS = ctx.routing.
   if (!slug(headers.TASK || '') || status !== 'pass') return event
   // Only an attempt with a snapshot from its delegation can be held to what it changed.
   if (projectDir && peek?.snapshot) event = { ...event, workspace: inspectWorkspace(projectDir, peek.snapshot, event, headers, String(payload.transcript_path || '')) }
-  return gateReport(ctx, event, event.text, headers, projectDir, budgetS, peek)
+  // An isolated writer edited its own worktree: its checks run there, never in the project tree.
+  const worktree = projectDir ? agentWorktree(agentTranscript, projectDir) : ''
+  return gateReport(ctx, event, event.text, headers, projectDir, budgetS, peek, worktree)
 }
 
-/** Runs the CC_TIERS_VERIFY lines of text through the gate and attaches the result to a copy of the event. */
-function gateReport(ctx, event, text, headers, projectDir, budgetS, peek) {
+/** Runs the CC_TIERS_VERIFY lines of text through the gate and attaches the result to a copy of the event; an isolated writer's gate runs in its worktree, with the project's stamp and lock. */
+function gateReport(ctx, event, text, headers, projectDir, budgetS, peek, worktree = '') {
   const routing = ctx.routing
   if (!routing.verify) return event
-  const tree = projectDir ? treeFingerprint(projectDir) : ''
+  if (worktree && !existsSync(worktree)) {
+    const lines = parseVerify(text, { projectDir })
+    const reason = `the writer's worktree is gone: ${worktree}`
+    return { ...event, gate: { status: lines.length ? 'unverified' : 'missing', verified: [], flaky: [], unverified: lines.map((line) => ({ raw: line.raw, reason })), failure: null } }
+  }
+  const dir = worktree || projectDir
+  const tree = dir ? treeFingerprint(dir) : ''
   const cached = tree && peek?.cache ? (raw) => peek.cache[raw] === tree : null
   // Another writer sharing the tree may save files while the command runs; its edits are not this command's.
   const writing = peek?.writing || []
-  const snapshot = projectDir && !writing.length ? () => workspaceSnapshot(projectDir) : null
-  const preexisting = declaredPreexisting(text, projectDir)?.raw || ''
-  const files = headers.FILES ? declaredFiles(headers, '', projectDir).files : []
+  const snapshot = dir && !writing.length ? () => workspaceSnapshot(dir) : null
+  const preexisting = declaredPreexisting(text, dir)?.raw || ''
+  const files = headers.FILES ? declaredFiles(headers, '', dir).files : []
   const trusted = trustedAllow(ctx, peek, projectDir)
-  const options = { projectDir, allow: trusted.allow, detected: detectedChecks(projectDir), detectedIn: detectedChecks, files, timeoutS: routing.verifyTimeout, budgetS, cached, snapshot, preexisting, lock: gateLock(ctx.dataDir, projectDir) }
-  if (projectDir) {
+  const options = { projectDir: dir, allow: trusted.allow, detected: detectedChecks(dir), detectedIn: detectedChecks, files, timeoutS: routing.verifyTimeout, budgetS, cached, snapshot, preexisting, lock: gateLock(ctx.dataDir, projectDir) }
+  if (dir) {
     const treeCheck = writing.length ? { treeCheck: `skipped: ${writing.join(', ')} still writing` } : {}
     const gate = { ...runGate(text, options), tree, ...treeCheck, ...(trusted.note ? { projectAllow: trusted.note } : {}) }
-    const missing = missingFromGate(gate, projectDir)
+    const missing = missingFromGate(gate, dir)
     // applyEvent reads the declared pre-existing line again and needs the same dir to parse a cd to an absolute path.
-    return { ...event, projectDir, gate: missing ? { ...gate, missing } : gate }
+    return { ...event, projectDir: dir, gate: missing ? { ...gate, missing } : gate }
   }
   // Nothing may run without a project dir; a declaration still tells missing from not validated.
   const gate = parseVerify(text).length ? 'unverified' : 'missing'
@@ -4130,7 +4161,7 @@ export function prepareParked(ctx, parked, payload = {}, { now = Date.now, peeks
   const started = now()
   return parked.map((report) => {
     const budgetS = Math.max(0, ctx.routing.verifyBudget - (now() - started) / 1000)
-    return prepareReport(ctx, { kind: 'report', prompt: '', ...report }, payload, { budgetS, peek: peeks.get(report.id) })
+    return prepareReport(ctx, { kind: 'report', prompt: '', ...report }, payload, { budgetS, peek: peeks.get(report.id), agentTranscript: agentTranscriptPath(payload.transcript_path, report.agent_id) })
   })
 }
 

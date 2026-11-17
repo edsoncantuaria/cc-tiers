@@ -1513,6 +1513,67 @@ test('prepareReport: a gate that cannot get its project lock in its budget does 
   }
 })
 
+test('prepareReport: an isolated writer is gated in its worktree, with the project stamp and lock', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-int-'))
+  try {
+    const project = path.join(dir, 'project')
+    const tree = path.join(dir, 'worktree')
+    const agents = path.join(dir, 'session', 'subagents')
+    for (const folder of [project, tree, agents]) mkdirSync(folder, { recursive: true })
+    writeFileSync(path.join(project, 'check.mjs'), 'process.exit(1)\n')
+    writeFileSync(path.join(tree, 'check.mjs'), 'process.exit(0)\n')
+    const ctx = { routing: routingWith({ verify_allow: 'node check.mjs' }), ccCost: false, projectDir: project, dataDir: path.join(dir, 'data') }
+    const text = report('paging', 'implementer', 'sonnet', 'pass', ['CC_TIERS_VERIFY: node check.mjs'])
+    const prepare = (agentTranscript, budgetS = 60) => tiers.prepareReport(ctx, event('m', 'implementer', text, writer('paging')), {}, { budgetS, agentTranscript })
+    const meta = (extra) => writeFileSync(path.join(agents, 'agent-a.meta.json'), JSON.stringify(extra))
+    const transcript = path.join(agents, 'agent-a.jsonl')
+
+    assert.equal(prepare(transcript).gate.failure.raw, 'node check.mjs', 'no meta and no transcript: the project dir, as before')
+    meta({ spawnedWithWorktree: false })
+    assert.equal(prepare(transcript).gate.failure.raw, 'node check.mjs', 'a writer that is not isolated runs in the project')
+    meta({ spawnedWithWorktree: true, worktreePath: tree })
+    const isolated = prepare(transcript)
+    assert.deepEqual(isolated.gate.verified, ['node check.mjs'], 'the command that passes only in the worktree is verified')
+    assert.equal(isolated.gate.failure, null)
+    assert.equal(isolated.projectDir, tree)
+
+    const held = tiers.gateLock(ctx.dataDir, project)(0)
+    const blocked = prepare(transcript, 0.1).gate
+    assert.match(blocked.unverified[0].reason, /another cc-tiers gate was running/, 'the lock is the project’s')
+    held()
+
+    rmSync(path.join(agents, 'agent-a.meta.json'))
+    const isolatedTree = path.join(project, '.claude', 'worktrees', 'agent-a')
+    mkdirSync(path.join(isolatedTree, 'src'), { recursive: true })
+    writeFileSync(path.join(isolatedTree, 'check.mjs'), 'process.exit(0)\n')
+    const startedIn = (cwd) => writeFileSync(transcript, `${JSON.stringify({ type: 'user', cwd })}\n`)
+    startedIn(isolatedTree)
+    const fromCwd = prepare(transcript)
+    assert.equal(fromCwd.gate.status, 'pass', 'no meta: the isolated worktree the first row ran in')
+    assert.equal(fromCwd.projectDir, isolatedTree)
+    startedIn(path.join(isolatedTree, 'src'))
+    assert.equal(prepare(transcript).projectDir, isolatedTree, 'a cwd inside the worktree is the worktree')
+    for (const cwd of [project, path.join(project, 'src'), path.join(project, '.claude', 'worktrees'), tree]) {
+      startedIn(cwd)
+      assert.equal(prepare(transcript).gate.failure.raw, 'node check.mjs', `${cwd} is no isolated worktree`)
+    }
+
+    meta({ spawnedWithWorktree: true, worktreePath: path.join(dir, 'removed') })
+    const gone = prepare(transcript).gate
+    assert.equal(gone.failure, null)
+    assert.equal(gone.status, 'unverified')
+    assert.deepEqual(gone.unverified, [{ raw: 'node check.mjs', reason: `the writer's worktree is gone: ${path.join(dir, 'removed')}` }])
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('agentTranscriptPath: the agent file sits next to the session transcript, in a folder named for the session', () => {
+  assert.equal(tiers.agentTranscriptPath('/d/s1.jsonl', 'ab-1'), '/d/s1/subagents/agent-ab-1.jsonl')
+  assert.equal(tiers.agentTranscriptPath('/d/s1.jsonl', '../x'), '')
+  assert.equal(tiers.agentTranscriptPath('', 'ab'), '')
+})
+
 test('prepareReport: in a folder of repositories a cd line runs a check detected in that repo, and a bare one is told to cd', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-int-'))
   try {

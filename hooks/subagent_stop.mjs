@@ -68,7 +68,7 @@ async function main(payload) {
   if (!launched) return
   const role = launched.role || matchRole(payload.agent_type)
   // The main-transcript row already brought this report: it is not judged or counted again.
-  const event = role && !twin ? prepareReport(ctx, agentReport(agentId, { ...launched, role }, text), payload, { peek }) : null
+  const event = role && !twin ? prepareReport(ctx, agentReport(agentId, { ...launched, role }, text), payload, { peek, agentTranscript: payload.agent_transcript_path }) : null
 
   // A blocking finding that holds up already counts a review that has no verdict line.
   const counted = REVIEW_ROLES.has(role) && ctx.routing.reviewEvidence && Boolean(event?.judged?.blocking.length)

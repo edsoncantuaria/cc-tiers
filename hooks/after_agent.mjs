@@ -5,6 +5,7 @@ import { runHook } from './integrity.mjs'
 
 async function main(payload) {
   const {
+    agentTranscriptPath,
     hookOutput,
     normalizeEvent,
     openContext,
@@ -23,7 +24,7 @@ async function main(payload) {
   if (Number.isFinite(measured) && measured > 0 && normalized.kind !== 'background') normalized.durationMs = measured
   // The tree before the attempt and the reusable gate results, read before the gate runs outside the lock.
   const peek = normalized.kind === 'report' ? withSession(ctx, payload, (state) => peekFor(state, normalized)) : null
-  const event = prepareReport(ctx, normalized, payload, { peek })
+  const event = prepareReport(ctx, normalized, payload, { peek, agentTranscript: agentTranscriptPath(payload.transcript_path, normalized.agent_id) })
 
   const message = withSession(ctx, payload, (state) => {
     let text
