@@ -1546,6 +1546,10 @@ test('prepareReport: in a folder of repositories a bare line runs in the one rep
     assert.deepEqual(inApp.unverified, [])
     assert.equal(inApp.failure, null)
 
+    const absolute = gateFor(`${dir}/app/src/users.js, ${dir}/app/test`)
+    assert.deepEqual(absolute.verified, ['npm test'], 'absolute CC_TIERS_FILES find the repo too')
+    assert.deepEqual(absolute.unverified, [])
+
     for (const files of ['app/src/users.js, web/src/page.js', 'app/src/users.js, README.md']) {
       const apart = gateFor(files)
       assert.deepEqual(apart.verified, [], files)

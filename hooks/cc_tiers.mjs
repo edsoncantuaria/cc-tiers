@@ -541,7 +541,7 @@ export function assessComplexity(text, routing, { projectDir = '' } = {}) {
   else if (steps === 1) add(1, 'two steps')
 
   const files = new Set()
-  for (const file of extractFiles(body)) files.add(file.toLowerCase())
+  for (const file of extractFiles(body, 40, projectDir)) files.add(file.toLowerCase())
   if (files.size >= 6) add(2, `${files.size} files`)
   else if (files.size >= 3) add(1, `${files.size} files`)
 
@@ -784,9 +784,9 @@ export function decideTier(text, routing, { history = null, conserve = false, ce
  */
 export function taskRisk(text, routing, { history = null, projectDir = '' } = {}) {
   const body = stripHeaders(text)
-  const declared = declaredFiles(parseHeaders(text), body)
+  const declared = declaredFiles(parseHeaders(text), body, projectDir)
   // A path in the text still counts when CC_TIERS_FILES covers it ('.', a directory or a glob).
-  const files = declared.declared ? [...declared.files, ...extractFiles(body).filter((file) => declared.files.some((entry) => overlaps(file, entry)))] : declared.files
+  const files = declared.declared ? [...declared.files, ...extractFiles(body, 40, projectDir).filter((file) => declared.files.some((entry) => overlaps(file, entry)))] : declared.files
   return assessRisk({
     text: body,
     files,
@@ -2305,7 +2305,7 @@ export function checkDelegation(state, toolInput, routing, { history = null, pro
   const spent = taskBudgetStatus(state, task, routing, now)
   if (spent.state === 'over' && !BUDGET_OVERRIDE_RE.test(headers.BUDGET || '')) return refuse(`cc-tiers: ${budgetMessage(task, spent)}`)
   for (const name of String(headers.RELEASE || '').split(',').map(slug).filter(Boolean)) releaseActive(state, name)
-  const scope = declaredFiles(headers, stripBriefs(prompt))
+  const scope = declaredFiles(headers, stripBriefs(prompt), projectDir)
   const isolated = input.isolation === 'worktree'
   const parallel = checkParallel(state, {
     task,
@@ -3705,7 +3705,7 @@ function gateReport(ctx, event, text, headers, projectDir, budgetS, peek) {
   const writing = peek?.writing || []
   const snapshot = projectDir && !writing.length ? () => workspaceSnapshot(projectDir) : null
   const preexisting = declaredPreexisting(text, projectDir)?.raw || ''
-  const files = headers.FILES ? declaredFiles(headers, '').files : []
+  const files = headers.FILES ? declaredFiles(headers, '', projectDir).files : []
   const trusted = trustedAllow(ctx, peek, projectDir)
   const options = { projectDir, allow: trusted.allow, detected: detectedChecks(projectDir), detectedIn: detectedChecks, files, timeoutS: routing.verifyTimeout, budgetS, cached, snapshot, preexisting, lock: gateLock(ctx.dataDir, projectDir) }
   if (projectDir) {
@@ -3751,8 +3751,8 @@ function inspectWorkspace(projectDir, before, event, headers, transcript = '') {
   const after = workspaceSnapshot(projectDir)
   if (!after) return null
   const changed = attemptChanges(before, after)
-  const named = new Set(extractFiles(`${stripBriefs(event.prompt || '')}\n${event.text || ''}`, 400))
-  const declared = headers.FILES ? declaredFiles(headers, '').files.filter((file) => file !== '.') : []
+  const named = new Set(extractFiles(`${stripBriefs(event.prompt || '')}\n${event.text || ''}`, 400, projectDir))
+  const declared = headers.FILES ? declaredFiles(headers, '', projectDir).files.filter((file) => file !== '.') : []
   // CC_TIERS_FILES names a file as much as the prompt text does, a file with no extension (Jenkinsfile) included; only its exact path or a listed dir, never outOfScope's test-name rule.
   const listed = (file) => named.has(file) || declared.some((item) => file === item || file.startsWith(`${item.replace(/\/$/, '')}/`))
   let sensitive = sensitiveFiles(changed).filter((item) => !listed(item.file))
