@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -112,7 +112,7 @@ test('required files are present and Python hooks are gone', () => {
 test('manifest declares the 0.5.0 knobs', () => {
   const manifest = JSON.parse(readFileSync(path.join(ROOT, '.claude-plugin/plugin.json'), 'utf8'))
   assert.equal(manifest.name, 'cc-tiers')
-  assert.equal(manifest.version, '0.13.6')
+  assert.equal(manifest.version, '0.13.8')
   assert.equal(JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version, manifest.version)
   assert.equal(/\s|@|:|\/|\\/.test(manifest.name), false)
   assert.equal(RESERVED_PREFIXES.some((prefix) => manifest.name.startsWith(prefix)), false)
@@ -716,6 +716,63 @@ test('a Bash attempt heredoc opens and closes a session task like a trailer text
   }
 })
 
+test('a SendMessage result row marks the agent it resumed as running again, and an unknown agent changes nothing', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const at = '2026-11-17T10:00:00.000Z'
+    const result = (resumedAgentId, extra = {}) => JSON.stringify({ type: 'user', uuid: `u-${resumedAgentId}`, timestamp: at, message: { role: 'user', content: [] }, toolUseResult: { success: true, message: 'Resuming agent', resumedAgentId }, ...extra })
+    const transcript = path.join(dir, 'main.jsonl')
+    writeFileSync(transcript, [result('agent-r'), result('agent-ghost'), result('agent-side', { isSidechain: true })].join('\n') + '\n')
+    const ctx = { routing: defaultRouting({ verify: 'off' }), file: path.join(dir, 's.json'), sessionId: 's', env: {}, projectDir: '', ccCost: false }
+    const before = { at: 1, stops: 1, stoppedAt: 2 }
+    writeFileSync(ctx.file, JSON.stringify({ ...tiers.emptyState('s'), background: { 'agent-side': { role: 'reviewer', ...before } }, finished: { 'agent-r': { role: 'reviewer', ...before } } }))
+    const state = tiers.withSession(ctx, { transcript_path: transcript }, (s) => s)
+    assert.equal(state.finished['agent-r'].resumedAt, Date.parse(at), 'the resume time is the row timestamp')
+    assert.equal(state.finished['agent-r'].at, 1, 'the first launch time does not move')
+    assert.deepEqual(state.background['agent-side'], { role: 'reviewer', ...before }, 'a sidechain row resumes nothing')
+    assert.equal(Object.hasOwn(state.background, 'agent-ghost') || Object.hasOwn(state.finished, 'agent-ghost'), false)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a resume row read in the same scan as the hand-back row leaves the agent running once the report is counted, unless it came first', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const base = Date.now() - 60 * 1000
+    const stamp = (second) => new Date(base + second * 1000).toISOString()
+    const report = (role) => `CC_TIERS_TASK: users-pagination\nCC_TIERS_TIER: sonnet\nCC_TIERS_ROLE: ${role}\nCC_TIERS_STATUS: pass`
+    const handback = (agent, role, second) => JSON.stringify({ type: 'user', isMeta: true, isSidechain: false, uuid: `h-${agent}`, timestamp: stamp(second), origin: { kind: 'peer', from: agent, handback: true, handbackReportText: report(role) }, message: { role: 'user', content: [] } })
+    const resume = (agent, second) => JSON.stringify({ type: 'user', uuid: `r-${agent}`, timestamp: stamp(second), message: { role: 'user', content: [] }, toolUseResult: { success: true, resumedAgentId: agent } })
+    const parkedPass = { id: 'row:p1', role: 'orchestrator', parkedAt: Date.now(), text: 'CC_TIERS_TASK: csv-export\nCC_TIERS_STATUS: pass' }
+    for (const [role, rows, running] of [
+      ['researcher', (agent) => [handback(agent, 'researcher', 10), resume(agent, 20)], true],
+      ['reviewer', (agent) => [handback(agent, 'reviewer', 10), resume(agent, 20)], true],
+      ['reviewer', (agent) => [resume(agent, 10), handback(agent, 'reviewer', 20)], false],
+    ]) {
+      const agent = `agent-${role}-${running}`
+      const transcript = path.join(dir, `${agent}.jsonl`)
+      writeFileSync(transcript, `${rows(agent).join('\n')}\n`)
+      const ctx = { routing: defaultRouting({ verify: 'off' }), file: path.join(dir, `${agent}.json`), sessionId: 's', env: {}, projectDir: '', ccCost: false }
+      writeFileSync(ctx.file, JSON.stringify({ ...tiers.emptyState('s'), background: { [agent]: { role, prompt: report(role), at: base } } }))
+      const parked = tiers.withSession(ctx, { transcript_path: transcript }, (state) => tiers.peekAwaiting(state))
+      const entry = tiers.withSession(ctx, { transcript_path: transcript }, (state) => {
+        for (const event of parked) {
+          tiers.countParked(ctx, state, event)
+          tiers.dropAwaiting(state, [event.id])
+        }
+        return { ...tiers.agentEntry(state, agent), held: tiers.holdParked(state, [parkedPass]).gate.length === 0 }
+      })
+      const label = `${role}, ${running ? 'hand-back then resume' : 'resume then hand-back'}`
+      assert.equal(entry.resumedAt, base + (running ? 20 : 10) * 1000, label)
+      assert.equal(entry.stoppedAt, base + (running ? 10 : 20) * 1000, `${label}: the stop is the hand-back row's time, not the time it was counted`)
+      if (role === 'reviewer') assert.equal(entry.held, running, label)
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('a Bash command or an Agent prompt without the attempt marker is not a trailer', () => {
   const closing = `${ATTEMPT_CLOSE}\nCC_TIERS_FILES: a.js`
   const bash = (command) => ({ type: 'tool_use', name: 'Bash', input: { command } })
@@ -959,7 +1016,7 @@ test('a project file present when the session begins is kept out of git through 
       const data = path.join(dir, `data-${session}`)
       mkdirSync(data, { recursive: true })
       const ctx = { routing, projectDir: project, dataDir: data, file: path.join(data, `session-${session}.json`), sessionId: session, env: {} }
-      return tiers.withSession(ctx, {}, (state) => state.projectFile)
+      return tiers.withSession(ctx, { hook_event_name: 'SessionStart', source: 'startup' }, (state) => state.projectFile)
     }
 
     const before = repo('before', true)
@@ -1062,7 +1119,7 @@ test('the session stamps the project file once, only with a data dir, and the pe
     writeFileSync(settings, JSON.stringify({ verifyAllow: ['echo'] }))
     const ctx = { routing, projectDir: dir, dataDir: path.join(dir, 'data'), file: path.join(dir, 'data', 'session-s.json'), sessionId: 's', env: {} }
     mkdirSync(ctx.dataDir, { recursive: true })
-    const first = tiers.withSession(ctx, {}, (state) => state.projectFile)
+    const first = tiers.withSession(ctx, { hook_event_name: 'SessionStart', source: 'startup' }, (state) => state.projectFile)
     assert.match(String(first), /^[0-9a-f]{16}$/, 'the first open stamps the file content')
     writeFileSync(settings, JSON.stringify({ verifyAllow: ['echo', 'curl'] }))
     const again = tiers.withSession(ctx, {}, (state) => ({ stamp: state.projectFile, peek: tiers.peekFor(state, {}), parked: tiers.peekParked(state, [{ id: 'r1', text: '' }]).get('r1') }))
@@ -1071,6 +1128,58 @@ test('the session stamps the project file once, only with a data dir, and the pe
     assert.equal(again.parked.projectFile, first)
     const none = tiers.withSession({ ...ctx, file: null, dataDir: '' }, {}, (state) => state.projectFile)
     assert.equal(none, undefined, 'no data dir, no stamp')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a state file gone or broken mid-session is never re-stamped: the project list waits for a new session, and a broken one is told', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const routing = tiers.mergeRouting(tiers.loadJson(path.join(ROOT, 'config/routing.default.json')), null, {})
+    const settings = path.join(dir, '.claude', 'cc-tiers.json')
+    mkdirSync(path.dirname(settings), { recursive: true })
+    writeFileSync(settings, JSON.stringify({ verifyAllow: ['echo'] }))
+    const ctx = { routing, projectDir: dir, dataDir: path.join(dir, 'data'), file: path.join(dir, 'data', 'session-s.json'), sessionId: 's', env: {} }
+    mkdirSync(ctx.dataDir, { recursive: true })
+    const transcript = path.join(dir, 't.jsonl')
+    writeFileSync(transcript, `${JSON.stringify({ type: 'user', message: { content: 'hi' } })}\n`)
+    const stop = { hook_event_name: 'Stop', transcript_path: transcript }
+    const look = (payload) => tiers.withSession(ctx, payload, (state) => ({ stamp: state.projectFile, pending: tiers.takePending(state), events: state.events.map((item) => item.type), offset: state.cursor.offset, inEffect: tiers.projectAllowInEffect(ctx, state) }))
+
+    writeFileSync(settings, JSON.stringify({ verifyAllow: ['echo', 'bash'] }))
+    const first = look(stop)
+    assert.equal(first.stamp, 'unstamped', 'a first look with no SessionStart behind it gives no fresh stamp either')
+    assert.deepEqual(first.inEffect, [])
+    assert.equal(first.pending, '', 'nothing was lost')
+    assert.match(tiers.trustedAllow(ctx, { projectFile: first.stamp }, dir).note, /no saved state for this session/)
+
+    rmSync(ctx.file)
+    appendFileSync(transcript, `${JSON.stringify({ type: 'attachment', attachment: { hookName: 'SessionStart:startup', stdout: JSON.stringify({ hookSpecificOutput: { additionalContext: 'cc-tiers routing is active.' } }) } })}\n`)
+    const gone = look(stop)
+    assert.equal(gone.stamp, 'lost', 'a state file deleted after cc-tiers started this session')
+    assert.deepEqual(gone.inEffect, [])
+    assert.match(gone.pending, /no saved state for this session: attempt counts/)
+    assert.deepEqual(gone.events, ['state.recovered'])
+    assert.equal(gone.offset, statSync(transcript).size, 'the transcript is not folded again')
+
+    writeFileSync(ctx.file, '{ not json')
+    const broken = look(stop)
+    assert.equal(broken.stamp, 'lost')
+    assert.match(broken.pending, /saved state unreadable/)
+    assert.deepEqual(broken.events, ['state.recovered'])
+    assert.equal(broken.offset, statSync(transcript).size, 'the transcript is not folded again')
+
+    rmSync(ctx.file)
+    const resumed = look({ hook_event_name: 'SessionStart', source: 'resume', transcript_path: transcript })
+    assert.equal(resumed.stamp, 'lost', 'a resume continues a session: it never stamps')
+
+    const old = tiers.emptyState('s')
+    old.tasks.paging = { tier: 'sonnet', failures: [] }
+    writeFileSync(ctx.file, JSON.stringify(old))
+    assert.match(String(look(stop).stamp), /^[0-9a-f]{16}$/, 'a state saved before the stamp existed is stamped once')
+    rmSync(ctx.file)
+    assert.match(String(look({ hook_event_name: 'SessionStart', source: 'clear' }).stamp), /^[0-9a-f]{16}$/, 'a cleared session is new')
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
@@ -1096,8 +1205,10 @@ test('the gate and the review use the project list only when trusted', async () 
     const review = { kind: 'report', id: 'r1', role: 'reviewer', prompt: 'CC_TIERS_TASK: t', text: `${finding}\nCC_TIERS_TASK: t\nCC_TIERS_ROLE: reviewer\nCC_TIERS_STATUS: fail` }
     const untrusted = tiers.prepareReport(ctx, review, {}, { peek: { projectFile: stampBefore, writing: [], cache: {} } })
     assert.equal(untrusted.judged.blocking.length, 1, 'a writer-created entry cannot discard a reviewer finding')
+    assert.match(untrusted.judged.projectAllow, /changed since/, 'the review says why the project entry was left out')
     const judged = tiers.prepareReport(ctx, review, {}, { peek: { projectFile: tiers.projectFileStamp(dir), writing: [], cache: {} } })
     assert.equal(judged.judged.discarded.length, 1)
+    assert.equal(judged.judged.projectAllow, undefined)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
@@ -1595,6 +1706,62 @@ test('a background report delivered through SubagentHandback is counted at Subag
     launch('researcher', 'agent-w', 'csv')
     stop('researcher', 'agent-w', 'CC_TIERS_TASK: csv\nCC_TIERS_ROLE: researcher\nCC_TIERS_STATUS: pass', 'brief\nCC_TIERS_STATUS: fail')
     assert.deepEqual(tiers.loadState(file, 'sess-1').researched, { 'users-pagination': true, csv: true })
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a fork carries its parent task records, never folds the rows it copied, and leaves the parent state alone', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const routing = tiers.mergeRouting(tiers.loadJson(path.join(ROOT, 'config/routing.default.json')), null, {})
+    const dataDir = path.join(dir, 'data')
+    mkdirSync(dataDir, { recursive: true })
+    const parentFile = tiers.sessionPath(dataDir, 'parent')
+    const parent = tiers.emptyState('parent')
+    parent.tasks['ci-faixa'] = { tier: 'sonnet', failures: ['sonnet/implementer: red'] }
+    parent.log['ci-migration'] = { status: 'done', tier: 'sonnet' }
+    parent.background.a1 = { role: 'implementer', at: 1 }
+    tiers.saveState(parentFile, parent)
+    const parentBytes = readFileSync(parentFile, 'utf8')
+    const copied = (id) => JSON.stringify({ type: 'assistant', session_id: 'parent', sessionId: 'fork', uuid: `u-${id}`, message: { id: `m-${id}`, model: 'claude-opus-4-5', usage: { input_tokens: 5 }, content: [{ type: 'text', text: 'CC_TIERS_TASK: ci-migration\nCC_TIERS_TIER: opus\nCC_TIERS_ROLE: orchestrator\nCC_TIERS_STATUS: fail\nCC_TIERS_REASON: old red' }] } })
+    const transcript = path.join(dir, 'fork.jsonl')
+    writeFileSync(transcript, `${copied(1)}\n${copied(2)}\n`)
+    const open = (session, payload) => {
+      const ctx = { routing, projectDir: '', dataDir, file: tiers.sessionPath(dataDir, session), sessionId: session, env: {} }
+      return tiers.withSession(ctx, { session_id: session, transcript_path: transcript, ...payload }, (state) => ({ tasks: state.tasks, log: state.log, background: state.background, pending: tiers.takePending(state) }))
+    }
+
+    const fork = open('fork', { hook_event_name: 'SessionStart', source: 'fork' })
+    assert.deepEqual(Object.keys(fork.tasks), ['ci-faixa'], 'the parent tasks, and none from the copied rows')
+    assert.equal(fork.tasks['ci-faixa'].failures.length, 1)
+    assert.equal(fork.log['ci-migration'].status, 'done', 'a task done in the parent is not reopened')
+    assert.deepEqual(fork.background, {}, 'the parent agents report to the parent')
+    assert.match(fork.pending, /carried the task records of session parent/)
+    assert.equal(readFileSync(parentFile, 'utf8'), parentBytes, 'the parent state is only read')
+    assert.deepEqual(Object.keys(open('fork', { hook_event_name: 'Stop' }).tasks), ['ci-faixa'], 'later hooks keep the copy and still skip the copied rows')
+
+    // A fork copies its parent from the last compaction, and after a /clear the rows still carry the id from before it:
+    // the parent is the sibling transcript that holds the fork's first row anywhere, not the session the hint names.
+    const early = (id) => JSON.stringify({ type: 'user', uuid: `early-${id}`, session_id: 'parent' })
+    const cleared = tiers.emptyState('cleared')
+    cleared.tasks['after-clear'] = { tier: 'sonnet', failures: [] }
+    tiers.saveState(tiers.sessionPath(dataDir, 'cleared'), cleared)
+    writeFileSync(path.join(dir, 'parent.jsonl'), `${early(1)}\n${early(2)}\n`)
+    writeFileSync(path.join(dir, 'cleared.jsonl'), `${early(3)}\n${early(4)}\n${copied(1)}\n${copied(2)}\n`)
+    writeFileSync(path.join(dir, 'other.jsonl'), `${JSON.stringify({ type: 'user', uuid: 'u-other' })}\n`)
+    assert.deepEqual(Object.keys(open('fork-3', { hook_event_name: 'SessionStart', source: 'fork' }).tasks), ['after-clear'])
+    writeFileSync(path.join(dir, 'parent.jsonl'), `${early(1)}\n${copied(1)}\n`)
+    const older = new Date(Date.now() - 3600000)
+    utimesSync(path.join(dir, 'parent.jsonl'), older, older)
+    assert.deepEqual(Object.keys(open('fork-4', { hook_event_name: 'SessionStart', source: 'fork' }).tasks), ['ci-faixa'], 'the hint wins when its transcript holds the row too, even when it is older')
+    rmSync(path.join(dir, 'cleared.jsonl'))
+    rmSync(path.join(dir, 'parent.jsonl'))
+
+    rmSync(parentFile)
+    const orphan = open('fork-2', { hook_event_name: 'SessionStart', source: 'fork' })
+    assert.deepEqual(orphan.tasks, {}, 'with the parent state gone, the copied rows are still not folded')
+    assert.match(orphan.pending, /fork of parent, whose saved state is gone/)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
@@ -2979,6 +3146,45 @@ test('only another task that writes in the tree excuses a failing parked check: 
   assert.match(written.out.reason || written.out.systemMessage, /the tree changed under other-task after this attempt/)
 })
 
+test('a writer parked later that ran in its own worktree does not excuse a failing parked check', async () => {
+  const later = { id: 'agent:agent-i', agent_id: 'agent-i', role: 'implementer', isolated: true, prompt: 'CC_TIERS_TASK: other-task', text: 'CC_TIERS_TASK: other-task\nCC_TIERS_ROLE: implementer\nCC_TIERS_STATUS: pass\nCC_TIERS_REASON: ok', parkedAt: Date.now() + 60000 }
+  const apart = await stopOnState({ awaiting: [later] })
+  assert.equal(apart.state.tasks['users-pagination'].failures.length, 1, 'an isolated writer wrote nothing in the shared tree')
+  const shared = await stopOnState({ awaiting: [{ ...later, isolated: false }] })
+  assert.equal(shared.state.tasks['users-pagination']?.failures?.length || 0, 0, 'the same report from the shared tree does excuse it')
+})
+
+test('a failing check that ran in the writer\'s own worktree is not excused by writers in the shared tree', () => {
+  const failed = { status: 'fail', verified: [], flaky: [], unverified: [], failure: { raw: 'node fail.mjs', code: 1 } }
+  const shared = tiers.excuseSharedTree({ gate: failed }, ['other-task'])
+  assert.equal(shared.gate.status, 'unverified', 'the same failure in the shared tree is excused')
+  assert.equal(shared.gate.failure, null)
+  assert.match(shared.gate.unverified[0].reason, /the tree changed under other-task after this attempt/)
+  const apart = { gate: failed, worktree: '/project/.claude/worktrees/agent-a' }
+  assert.equal(tiers.excuseSharedTree(apart, ['other-task']), apart, 'no other writer touched that worktree')
+})
+
+test('a hand-back row of a writer parked while its task is active in its own worktree is stamped isolated', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const report = 'CC_TIERS_TASK: users-pagination\nCC_TIERS_TIER: sonnet\nCC_TIERS_ROLE: implementer\nCC_TIERS_STATUS: pass'
+    const handback = (agent) => JSON.stringify({ type: 'user', isMeta: true, isSidechain: false, uuid: `h-${agent}`, timestamp: new Date().toISOString(), origin: { kind: 'peer', from: agent, handback: true, handbackReportText: report }, message: { role: 'user', content: [] } })
+    const parkedFor = (isolated) => {
+      const agent = `agent-${isolated}`
+      const transcript = path.join(dir, `${agent}.jsonl`)
+      writeFileSync(transcript, `${handback(agent)}\n`)
+      const ctx = { routing: defaultRouting({ verify: 'off' }), file: path.join(dir, `${agent}.json`), sessionId: 's', env: {}, projectDir: '', ccCost: false }
+      const launched = { role: 'implementer', prompt: report, at: Date.now() - 60000 }
+      writeFileSync(ctx.file, JSON.stringify({ ...tiers.emptyState('s'), background: { [agent]: launched }, active: { 'users-pagination': { role: 'implementer', files: ['a.js'], isolated, since: Date.now() } } }))
+      return tiers.withSession(ctx, { transcript_path: transcript }, (state) => tiers.peekAwaiting(state))
+    }
+    assert.deepEqual(parkedFor(true).map((item) => item.isolated), [true])
+    assert.deepEqual(parkedFor(false).map((item) => item.isolated), [false])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('a writer in its own worktree does not count as a write in the shared tree', () => {
   const routing = tiers.mergeRouting(tiers.loadJson(path.join(ROOT, 'config/routing.default.json')), null, { verify: 'off' })
   const ctx = { routing, projectDir: '', dataDir: '' }
@@ -3019,6 +3225,26 @@ test('a fix parked while the finishing review ran is new work: Stop gates it ins
   const held = tiers.holdParked(state, tiers.peekAwaiting(state))
   assert.deepEqual(held.gate.map((item) => item.id), ['row:a2'], 'the review launched before a2 was parked never saw it')
   assert.deepEqual(held.notes, [])
+})
+
+test('a writer that finishes its task from a parked report is seen up to when it was parked, so one parked after it is gated', () => {
+  const routing = tiers.mergeRouting(tiers.loadJson(path.join(ROOT, 'config/routing.default.json')), null, { specify: 'off', verify: 'off' })
+  const head = 'CC_TIERS_TASK: users-pagination\nCC_TIERS_TIER: opus'
+  const attempt = (id, parkedAt) => ({ id, role: 'orchestrator', parkedAt, text: `${head}\nCC_TIERS_ROLE: orchestrator\nCC_TIERS_VERIFY: none - x\nCC_TIERS_STATUS: pass\nCC_TIERS_REVIEW: skip\nCC_TIERS_REASON: ok` })
+  const count = (state, item) => tiers.applyEvent(state, tiers.prepareReport({ routing, projectDir: '' }, { kind: 'report', prompt: '', ...item }), routing)
+  const parkedAt = Date.now() - 60000
+  const state = tiers.emptyState('s')
+  assert.equal(count(state, attempt('row:a1', parkedAt)).meta.outcome, 'pass')
+  assert.equal(state.completions['users-pagination'].seenUntil, parkedAt, 'the finishing writer saw its own report, parked before its gate ran')
+  state.awaiting = [attempt('row:a2', parkedAt + 1), attempt('row:a0', parkedAt - 1)]
+  const held = tiers.holdParked(state, tiers.peekAwaiting(state))
+  assert.deepEqual(held.gate.map((item) => item.id), ['row:a2'], 'a report parked after it is new work, one parked before it is moot')
+  assert.match(held.notes.join('\n'), /users-pagination finished after this report was parked/)
+
+  const before = Date.now()
+  const foreground = tiers.emptyState('s')
+  count(foreground, attempt('row:f1', undefined))
+  assert.ok(foreground.completions['users-pagination'].seenUntil >= before, 'a report that was never parked is seen up to when it was counted')
 })
 
 test('Stop drops the parked report of a task that finished after it was parked, without running its check again', async () => {

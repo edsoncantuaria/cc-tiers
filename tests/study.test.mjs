@@ -410,6 +410,26 @@ test('a reviewer prompt that rewords the stored writer contract is still refused
   assert.equal(state.contracts['final-gate'].criteria.length, 2)
 })
 
+test('final-gate: a pass launched before the rejection was counted does not clear it', () =>
+  inTemp(async (dir) => {
+    writeFileSync(path.join(dir, 'ok.mjs'), 'process.exit(1)\n')
+    const routing = finalRouting()
+    const state = tiers.emptyState('s')
+    delegate(state, routing, 'reviewer', finalPrompt())
+    report(dir, routing, state, 'g1', 'reviewer', trailer('final-gate', 'pass'), finalPrompt())
+    assert.equal(state.tasks['final-gate'].rejected, true)
+    assert.ok(state.tasks['final-gate'].rejectedAt > 0, 'a counted rejection records when')
+    writeFileSync(path.join(dir, 'ok.mjs'), 'process.exit(0)\n')
+    const early = report(dir, routing, state, 'g2', 'reviewer', trailer('final-gate', 'pass'), finalPrompt(), { launchedAt: state.tasks['final-gate'].rejectedAt - 1000 })
+    assert.match(early, /another review of this writer attempt already rejected it/)
+    assert.doesNotMatch(early, /cc-tiers completion/)
+    assert.equal(state.tasks['final-gate'].rejected, true)
+    assert.equal(state.tasks['final-gate'].failures.length, 1)
+    const late = report(dir, routing, state, 'g3', 'reviewer', trailer('final-gate', 'pass'), finalPrompt(), { launchedAt: state.tasks['final-gate'].rejectedAt + 1000 })
+    assert.match(late, /cc-tiers completion: final-gate/)
+    assert.equal(state.tasks['final-gate'], undefined, 'a pass launched after the rejection finishes it')
+  }))
+
 test('final-gate: a passing review after a final-gate rejection finishes the task', () =>
   inTemp(async (dir) => {
     writeFileSync(path.join(dir, 'ok.mjs'), 'process.exit(0)\n')

@@ -50,17 +50,30 @@ export function renderList(memory, { all = false, now = Date.now(), projectDir =
   return `${lines.join('\n')}\n`
 }
 
+/** Another hook holds the memory file: a change written now could drop what it saves. */
+class MemoryBusy extends Error {}
+
 /** Runs one action and returns the text to print; changes are saved under the file's lock. */
-export function run(argv, { now = Date.now() } = {}) {
+export function run(argv, options = {}) {
+  try {
+    return runAction(argv, options)
+  } catch (error) {
+    if (error instanceof MemoryBusy) return { code: 1, out: 'The cc-tiers memory file is busy: another hook is saving it. Try again in a moment.\n' }
+    throw error
+  }
+}
+
+function runAction(argv, { now = Date.now(), lockWaitMs } = {}) {
   const [projectDir, action = 'list', ...rest] = argv
   if (!projectDir || !existsSync(projectDir)) return { code: 2, out: `${USAGE}\n` }
   const file = memoryPath(projectDir)
   const change = (fn) =>
-    withLock(file, () => {
+    withLock(file, (held) => {
+      if (!held) throw new MemoryBusy()
       const result = fn(loadMemory(file))
       if (result.memory) saveMemory(file, result.memory)
       return result
-    })
+    }, lockWaitMs)
   if (action === 'list') return { code: 0, out: renderList(loadMemory(file), { all: rest.includes('--all'), now, projectDir }) }
   if (action === 'add') {
     const [category, ...words] = rest

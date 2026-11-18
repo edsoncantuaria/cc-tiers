@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import os from 'node:os'
@@ -10,7 +11,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const tiers = await import(pathToFileURL(path.join(ROOT, 'hooks', 'cc_tiers.mjs')).href)
 
 // Mirror LOCK_WAIT_MS and LOCK_STALE_MS in hooks/cc_tiers.mjs, which does not export them.
-const LOCK_WAIT_MS = 3000
+const LOCK_WAIT_MS = 5000
 const LOCK_STALE_MS = 10000
 
 async function inTempDir(run) {
@@ -55,20 +56,86 @@ test('withLock takes over a stale lock and holds its own while fn runs', async (
   })
 })
 
-test('withLock runs fn after the wait limit when a live lock is never released', async () => {
+test('withLock without the lock tells fn so after the wait, and leaves the holder\'s lock alone', async () => {
   await inTempDir((dir) => {
     const file = path.join(dir, 'session-sess-1.json')
     const lock = `${file}.lock`
-    writeFileSync(lock, '')
+    writeFileSync(lock, String(process.pid))
     const heldSince = statSync(lock).mtimeMs
     const started = Date.now()
-    const result = tiers.withLock(file, () => 'ran')
-    const waited = Date.now() - started
-    assert.equal(result, 'ran')
-    assert.ok(waited >= LOCK_WAIT_MS - 50, `fn ran after only ${waited} ms`)
-    assert.ok(waited < LOCK_STALE_MS / 2, `fn waited ${waited} ms, as if for the lock to go stale`)
-    assert.equal(existsSync(lock), true, "another hook's lock is not removed")
+    const held = tiers.withLock(file, (taken) => taken, 300)
+    assert.equal(held, false)
+    assert.ok(Date.now() - started >= 250, 'it waited for the lock')
+    assert.equal(readFileSync(lock, 'utf8'), String(process.pid), "another hook's lock is not removed")
     assert.equal(statSync(lock).mtimeMs, heldSince)
+  })
+})
+
+test('a live holder keeps its lock past the old 10 s rule; a dead one, or one older than 700 s, is taken at once', async () => {
+  await inTempDir((dir) => {
+    const file = path.join(dir, 'session-sess-1.json')
+    const lock = `${file}.lock`
+    const aged = (seconds) => new Date(Date.now() - seconds * 1000)
+    writeFileSync(lock, String(process.pid))
+    utimesSync(lock, aged(30), aged(30))
+    assert.equal(tiers.withLock(file, (taken) => taken, 200), false, 'a live hook working for 30 s keeps its lock')
+
+    const dead = spawnSync(process.execPath, ['-e', '']).pid
+    writeFileSync(lock, String(dead))
+    const started = Date.now()
+    assert.equal(tiers.withLock(file, (taken) => taken, 5000), true, 'a crashed hook\'s lock is taken')
+    assert.ok(Date.now() - started < 1000, 'without waiting')
+
+    writeFileSync(lock, String(process.pid))
+    utimesSync(lock, aged(701), aged(701))
+    assert.equal(tiers.withLock(file, (taken) => taken, 200), true, 'no hook runs longer than 660 s')
+  })
+})
+
+test('a lock from another host is not judged by a local pid: it is kept until 700 s, a dead local pid on this host is taken', async () => {
+  await inTempDir((dir) => {
+    const file = path.join(dir, 'session-sess-1.json')
+    const lock = `${file}.lock`
+    const aged = (seconds) => new Date(Date.now() - seconds * 1000)
+    const dead = spawnSync(process.execPath, ['-e', '']).pid
+    writeFileSync(lock, `${dead}@another-host-${os.hostname()}`)
+    utimesSync(lock, aged(30), aged(30))
+    assert.equal(tiers.withLock(file, (taken) => taken, 200), false, 'a pid from another container may be alive there')
+    utimesSync(lock, aged(701), aged(701))
+    assert.equal(tiers.withLock(file, (taken) => taken, 200), true, 'past the longest hook it is taken')
+
+    writeFileSync(lock, `${dead}@${os.hostname()}`)
+    assert.equal(tiers.withLock(file, (taken) => taken, 5000), true, 'the same host checks the pid')
+  })
+})
+
+test('the lock names its holder, so a crash can be told from a slow hook', async () => {
+  await inTempDir((dir) => {
+    const file = path.join(dir, 'session-sess-1.json')
+    const seen = tiers.withLock(file, () => readFileSync(`${file}.lock`, 'utf8'))
+    assert.equal(seen, `${process.pid}@${os.hostname()}`)
+  })
+})
+
+test('withSession without the lock answers from the state it read, saves nothing and records a hook error', async () => {
+  await inTempDir((dir) => {
+    const routing = tiers.mergeRouting(JSON.parse(readFileSync(path.join(ROOT, 'config/routing.default.json'), 'utf8')), null, {})
+    const data = path.join(dir, 'data')
+    mkdirSync(data, { recursive: true })
+    const file = path.join(data, 'session-sess-1.json')
+    const before = { ...tiers.emptyState('sess-1'), tasks: { kept: { tier: 'sonnet', failures: ['one'] } } }
+    writeFileSync(file, JSON.stringify(before))
+    writeFileSync(`${file}.lock`, String(process.pid))
+    const ctx = { routing, projectDir: '', dataDir: data, file, sessionId: 'sess-1', env: {}, lockWaitMs: 200 }
+    const answer = tiers.withSession(ctx, {}, (state) => {
+      state.tasks.lost = { tier: 'sonnet', failures: [] }
+      return Object.keys(state.tasks).sort().join(',')
+    })
+    assert.equal(answer, 'kept,lost', 'the hook still answers from what it read')
+    assert.deepEqual(Object.keys(JSON.parse(readFileSync(file, 'utf8')).tasks), ['kept'], 'nothing is saved without the lock')
+    const errors = readFileSync(path.join(data, 'hook-errors.jsonl'), 'utf8')
+    assert.match(errors, /"hook":"lock"/)
+    assert.match(errors, /not saved/)
   })
 })
 
@@ -134,5 +201,62 @@ test('a leftover .tmp from a crashed writer does not break the next saveState or
     atTime(now, () => tiers.saveState(file, after))
     assert.deepEqual(tiers.loadState(file, 'sess-1'), after)
     assert.deepEqual(JSON.parse(readFileSync(path.join(dir, 'latest.json'), 'utf8')), after)
+  })
+})
+
+test('a report counted while another hook holds the memory file writes no memory record, and the next one does', async () => {
+  await inTempDir((dir) => {
+    const routing = tiers.mergeRouting(JSON.parse(readFileSync(path.join(ROOT, 'config/routing.default.json'), 'utf8')), null, { verify: 'off' })
+    const project = path.join(dir, 'project')
+    mkdirSync(path.join(project, '.claude'), { recursive: true })
+    const memoryFile = path.join(project, '.claude', 'cc-tiers-memory.json')
+    const ctx = { routing, projectDir: project, dataDir: '' }
+    const fail = (id) => ({ kind: 'report', id, role: 'implementer', prompt: 'CC_TIERS_TASK: t\nCC_TIERS_RESEARCH: none - x\nCC_TIERS_SPEC: none - x', text: 'CC_TIERS_TASK: t\nCC_TIERS_ROLE: implementer\nCC_TIERS_STATUS: fail\nCC_TIERS_REASON: npm test exit 1: AssertionError expected 2 to equal 3' })
+    writeFileSync(`${memoryFile}.lock`, String(process.pid))
+    tiers.processReport(ctx, tiers.emptyState('s'), fail('w1'))
+    assert.equal(existsSync(memoryFile), false, 'no write without the lock')
+    writeFileSync(`${memoryFile}.lock`, '')
+    utimesSync(`${memoryFile}.lock`, new Date(Date.now() - 60000), new Date(Date.now() - 60000))
+    tiers.processReport(ctx, tiers.emptyState('s'), fail('w2'))
+    assert.equal(existsSync(memoryFile), true, 'written once the lock is free')
+  })
+})
+
+test('a Haiku failure or a Sonnet escalation counted while another hook holds the history file writes no history, and the next one does', async () => {
+  await inTempDir((dir) => {
+    const routing = tiers.mergeRouting(JSON.parse(readFileSync(path.join(ROOT, 'config/routing.default.json'), 'utf8')), null, { verify: 'off', learn: 'on', memory: 'off', max_attempts: '2' })
+    const project = path.join(dir, 'project')
+    mkdirSync(path.join(project, '.claude'), { recursive: true })
+    const history = path.join(project, '.claude', 'cc-tiers-history.json')
+    const ctx = { routing, projectDir: project, dataDir: '' }
+    const fail = (id, role, tier) => ({
+      kind: 'report',
+      id,
+      role,
+      prompt: `CC_TIERS_TASK: t-${role}\nCC_TIERS_RESEARCH: none - x\nCC_TIERS_SPEC: none - x\nAdd pagination to GET /users`,
+      text: `CC_TIERS_TASK: t-${role}\nCC_TIERS_TIER: ${tier}\nCC_TIERS_ROLE: ${role}\nCC_TIERS_STATUS: fail\nCC_TIERS_REASON: not a trivial task`,
+    })
+    const hold = () => writeFileSync(`${history}.lock`, String(process.pid))
+    const free = () => writeFileSync(`${history}.lock`, String(spawnSync(process.execPath, ['-e', '']).pid))
+    const kinds = () => (existsSync(history) ? JSON.parse(readFileSync(history, 'utf8')).entries.map((entry) => `${entry.tier || 'haiku'}:${entry.kind}`) : [])
+
+    hold()
+    assert.doesNotMatch(tiers.processReport(ctx, tiers.emptyState('s'), fail('h1', 'worker', 'haiku')), /recorded a Haiku failure/, 'nothing written, nothing said')
+    assert.deepEqual(kinds(), [], 'a Haiku failure writes no history without the lock')
+    free()
+    assert.match(tiers.processReport(ctx, tiers.emptyState('s'), fail('h2', 'worker', 'haiku')), /recorded a Haiku failure for t-worker/)
+    assert.equal(kinds().length, 1, 'and writes it once the lock is free')
+
+    const sonnet = (state) => {
+      tiers.processReport(ctx, state, fail('s1', 'implementer', 'sonnet'))
+      return tiers.processReport(ctx, state, fail('s2', 'implementer', 'sonnet'))
+    }
+    hold()
+    const before = kinds().length
+    assert.doesNotMatch(sonnet(tiers.emptyState('s')), /recorded that t-implementer escalated past Sonnet/, 'nothing written, nothing said')
+    assert.equal(kinds().length, before, 'a Sonnet escalation writes no history without the lock')
+    free()
+    assert.match(sonnet(tiers.emptyState('s')), /recorded that t-implementer escalated past Sonnet/)
+    assert.equal(kinds().length, before + 1, 'and writes it once the lock is free')
   })
 })

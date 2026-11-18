@@ -15,16 +15,16 @@ const MAX_DEPENDS = 200
  * Files a delegation touches: the CC_TIERS_FILES header when present, else the paths named in the prompt.
  * A list too long to keep becomes the whole project ('.'), so nothing past the cap escapes the overlap check.
  */
-export function declaredFiles(headers, body) {
+export function declaredFiles(headers, body, projectDir = '') {
   const listed = String(headers?.FILES || '').trim()
   if (!listed) {
-    const named = extractFiles(body, MAX_FILES + 1)
+    const named = extractFiles(body, MAX_FILES + 1, projectDir)
     return { files: named.length > MAX_FILES ? ['.'] : named, declared: false }
   }
   const files = []
   for (const item of listed.split(',')) {
     if (!item.trim()) continue
-    const file = scopeEntry(item)
+    const file = scopeEntry(item, projectDir)
     if (!files.includes(file)) files.push(file)
   }
   return { files: files.length > MAX_FILES || files.includes('.') ? ['.'] : files, declared: true }
@@ -34,14 +34,14 @@ export function declaredFiles(headers, body) {
  * One CC_TIERS_FILES entry as a path the guard can compare: '.' is the whole project,
  * and a glob becomes the fixed directory before its first wildcard (src/*.js -> src/, **\/x -> .).
  */
-function scopeEntry(item) {
+function scopeEntry(item, projectDir) {
   const text = String(item || '').trim().replace(/\\/g, '/')
   const wild = text.search(/[*?[\]{}]/)
-  // An absolute path or one with ../ cannot be compared with project paths, so it covers everything.
-  if (wild < 0) return text === '.' || text === './' ? '.' : normalizeFile(text) || '.'
+  // An absolute path outside projectDir (or with none) or one with ../ cannot be compared with project paths, so it covers everything.
+  if (wild < 0) return text === '.' || text === './' ? '.' : normalizeFile(text, projectDir) || '.'
   const fixed = text.slice(0, wild)
   const dir = fixed.slice(0, fixed.lastIndexOf('/') + 1)
-  return dir ? normalizeFile(dir) || '.' : '.'
+  return dir ? normalizeFile(dir, projectDir) || '.' : '.'
 }
 
 /** A file and a directory entry overlap when one is the other or contains it; a glob-free prefix match. */

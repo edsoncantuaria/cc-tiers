@@ -9,10 +9,11 @@ const { FAILURE_CATEGORIES, declaresPackage, diagnoseFailure, failureResearchLin
 const fromDetail = (detail) => diagnoseFailure({ detail })
 const fromReason = (reason) => diagnoseFailure({ reason })
 
-test('exports the seventeen categories (changed: coverage was added)', () => {
-  assert.equal(FAILURE_CATEGORIES.length, 17)
+test('exports the eighteen categories (changed: defect was added)', () => {
+  assert.equal(FAILURE_CATEGORIES.length, 18)
   assert.ok(FAILURE_CATEGORIES.includes('data'))
   assert.ok(FAILURE_CATEGORIES.includes('coverage'))
+  assert.ok(FAILURE_CATEGORIES.includes('defect'))
   assert.equal(FAILURE_CATEGORIES.at(-1), 'unknown')
 })
 
@@ -206,14 +207,30 @@ test('coverage outranks the review category and the text, but only for a review'
   assert.equal(diagnoseFailure({ source: 'gate', reviewCategory: 'security', reviewEvidence: 'coverage', detail: 'FAIL a.test.mjs' }).category, 'test')
 })
 
-test('a review rejection backed by a trace or a command keeps the category mapping', () => {
-  for (const reviewEvidence of ['trace', 'command', '']) {
+test('a review rejection backed by a command or no evidence keeps the category mapping', () => {
+  for (const reviewEvidence of ['command', '']) {
     for (const [reviewCategory, category] of REVIEW_CASES) {
       const diagnosis = diagnoseFailure({ source: 'review', reviewCategory, reviewEvidence, reason: 'the reviewer disagrees' })
       assert.equal(diagnosis.category, category, `${reviewCategory} ${reviewEvidence}`)
       assert.equal(diagnosis.source, 'review')
     }
   }
+})
+
+test('a traced review finding that would be a test is a defect; the other mappings stay', () => {
+  for (const [reviewCategory, category] of REVIEW_CASES) {
+    const diagnosis = diagnoseFailure({ source: 'review', reviewCategory, reviewEvidence: 'trace', reason: 'the reviewer disagrees' })
+    assert.equal(diagnosis.category, category === 'test' ? 'defect' : category, reviewCategory)
+    assert.equal(diagnosis.source, 'review')
+  }
+  const traced = diagnoseFailure({ source: 'review', reviewCategory: 'correctness', reviewEvidence: 'trace', reason: 'correctness @ src/a.js:1: 10 / 20' })
+  assert.equal(traced.confirmed, true)
+  assert.match(traced.hypothesis, /reviewer traced a defect/)
+  assert.deepEqual(failureResearchLines(traced), [])
+  assert.equal(nextAction(traced, { tier: 'sonnet', attemptsLeft: 1 }).action, 'retry')
+  assert.match(nextAction(traced, { tier: 'sonnet', attemptsLeft: 1 }).note, /expected, observed, where.*add a test that shows it/)
+  assert.equal(diagnoseFailure({ source: 'review', reviewCategory: 'concurrency', reviewEvidence: 'trace', reason: 'a circular design' }).category, 'architecture')
+  assert.equal(diagnoseFailure({ source: 'gate', reviewCategory: 'correctness', reviewEvidence: 'trace', detail: 'FAIL a.test.mjs' }).category, 'test')
 })
 
 test('review category is ignored outside a review', () => {
@@ -301,6 +318,7 @@ test('nextAction maps each category', () => {
     scope: 'retry',
     data: 'retry',
     coverage: 'retry',
+    defect: 'retry',
     unverifiable: 'report-partial',
     unknown: 'retry',
   }

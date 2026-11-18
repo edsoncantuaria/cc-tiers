@@ -131,6 +131,19 @@ test('a risk keyword with only ordinary files named starts on Sonnet one level u
   assert.equal(tiers.keywordRisk(`${text('')}\nCC_TIERS_RISK: none - quoted`, routing), false)
 })
 
+test('an absolute path inside the project counts as an ordinary file for a keyword only in the text; one outside does not', () => {
+  const routing = routingWith({ specify: 'off' })
+  const text = (file) => `CC_TIERS_TASK: gate-env\nCC_TIERS_FILES: ${file}\nRefuse a leading env on the docker exec line, a security hole in the gate.`
+  const inside = tiers.decideTier(text(path.join(ROOT, 'hooks', 'verify.mjs')), routing, { projectDir: ROOT })
+  assert.equal(inside.tier, 'sonnet')
+  assert.ok(inside.risk.factors.includes('risk keyword, no sensitive file named'))
+  const outside = tiers.decideTier(text(path.join(os.tmpdir(), 'verify.mjs')), routing, { projectDir: ROOT })
+  assert.equal(outside.tier, 'opus')
+  assert.equal(outside.because, 'hard')
+  assert.equal(tiers.keywordRisk(text(path.join(ROOT, 'hooks', 'verify.mjs')), routing, ROOT), 'text')
+  assert.equal(tiers.keywordRisk(text(path.join(ROOT, 'hooks', 'verify.mjs')), routing), true, 'with no project dir an absolute path is unknown scope')
+})
+
 test('a task derated by path cannot skip its Opus review', () =>
   inTemp(async (dir) => {
     const routing = routingWith({ specify: 'off', review_policy: 'cheap' })

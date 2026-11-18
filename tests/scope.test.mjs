@@ -110,3 +110,13 @@ test('scope: files edited elsewhere are said apart and do not force a review', (
   assert.match(out.message, /you or another Claude session edited Jenkinsfile while tweak ran, so they are not counted against it/)
   assert.doesNotMatch(out.message, /sensitive file/)
 })
+
+test('scope: an absolute CC_TIERS_FILES inside the project is compared, so a changed file outside it is named', async () => {
+  const { base, repo, before } = await repoWithChanges(['src/a.js', 'lib/b.js'])
+  try {
+    const event = tiers.prepareReport(ctxFor(repo), writerReport('abs', path.join(repo, 'src', 'a.js')), {}, { peek: { snapshot: before } })
+    assert.deepEqual(event.workspace.outOfScope, ['lib/b.js'])
+  } finally {
+    await rm(base, { recursive: true, force: true })
+  }
+})

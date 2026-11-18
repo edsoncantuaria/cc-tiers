@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -634,6 +634,102 @@ function gateProject(dir) {
   return { project, out, env, text: trailer('implementer', 'pass', ['CC_TIERS_REVIEW: skip', `CC_TIERS_VERIFY: node probe.mjs ${out}`]) }
 }
 
+/** A project whose check fails, and an isolated writer's worktree (named in its meta file next to the session transcript) where it passes. */
+function isolatedProject(dir, agentId) {
+  const project = path.join(dir, 'project')
+  const worktree = path.join(project, '.claude', 'worktrees', agentId)
+  mkdirSync(worktree, { recursive: true })
+  writeFileSync(path.join(project, 'check.mjs'), 'process.exit(1)\n')
+  writeFileSync(path.join(worktree, 'check.mjs'), 'process.exit(0)\n')
+  const transcript = path.join(dir, 'sess-1.jsonl')
+  writeFileSync(transcript, '')
+  mkdirSync(path.join(dir, 'sess-1', 'subagents'), { recursive: true })
+  writeFileSync(path.join(dir, 'sess-1', 'subagents', `agent-${agentId}.meta.json`), JSON.stringify({ spawnedWithWorktree: true, worktreePath: worktree }))
+  const env = { ...hookEnv(dir), CLAUDE_PROJECT_DIR: project, CLAUDE_PLUGIN_OPTION_VERIFY_ALLOW: 'node check.mjs' }
+  return { project, transcript, env, text: trailer('implementer', 'pass', ['CC_TIERS_REVIEW: skip', 'CC_TIERS_VERIFY: node check.mjs']) }
+}
+
+test('a foreground isolated writer is gated in its worktree, and one that is not isolated in the project', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-status-'))
+  try {
+    const { project, transcript, env, text } = isolatedProject(dir, 'w1')
+    const foreground = (agentId, toolUseId) => {
+      const proc = run(
+        'after_agent.mjs',
+        {
+          session_id: 'sess-1',
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Agent',
+          tool_use_id: toolUseId,
+          transcript_path: transcript,
+          cwd: project,
+          tool_input: { subagent_type: 'cc-tiers:implementer', prompt: WRITER_PROMPT },
+          tool_response: { status: 'completed', agentId, content: [{ type: 'text', text }] },
+        },
+        env,
+      )
+      assert.equal(proc.status, 0, proc.stderr)
+      return JSON.parse(proc.stdout).hookSpecificOutput.additionalContext
+    }
+    assert.match(foreground('w1', 'fg-1'), /users-pagination verified: node check\.mjs/, 'the check that passes only in the worktree')
+    assert.doesNotMatch(foreground('w2', 'fg-2'), /users-pagination verified/, 'no meta: the project, where it fails')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('an isolated writer parked as a hand-back row is gated in its worktree at Stop', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-status-'))
+  try {
+    const { project, transcript, env, text } = isolatedProject(dir, 'w1')
+    writeFileSync(transcript, `${handbackRow('w1', text, 'u1')}\n`)
+    launchAgent(env, 'w1', 'implementer', WRITER_PROMPT)
+    scanMain(env, transcript, project)
+    assert.equal(sessionState(dir).awaiting.length, 1)
+
+    const end = endTurn(env, transcript, project)
+    assert.match(JSON.parse(end.stdout).reason, /cc-tiers gate: users-pagination verified: node check\.mjs/)
+    assert.deepEqual(sessionState(dir).awaiting, [])
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a failing check of an isolated writer in its worktree counts at Stop even with main-tree writers; the same report gated in the project is excused', async () => {
+  const stopWith = async (inWorktree, otherWriter) => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-status-'))
+    try {
+      const { project, transcript, env, text } = isolatedProject(dir, 'w1')
+      writeFileSync(path.join(project, '.claude', 'worktrees', 'w1', 'check.mjs'), 'process.exit(1)\n')
+      // Without its meta file and cwd the writer is gated in the project, where the check fails too.
+      if (!inWorktree) rmSync(path.join(dir, 'sess-1', 'subagents', 'agent-w1.meta.json'))
+      writeFileSync(transcript, `${handbackRow('w1', text, 'u1')}\n`)
+      launchAgent(env, 'w1', 'implementer', WRITER_PROMPT)
+      scanMain(env, transcript, project)
+      const file = tiers.sessionPath(path.join(dir, 'data'), 'sess-1')
+      const state = tiers.loadState(file, 'sess-1')
+      if (otherWriter === 'written') state.writtenAt = { 'other-task': Date.now() + 60000 }
+      if (otherWriter === 'active') {
+        state.active['other-task'] = { role: 'implementer', files: ['src/o.js'], isolated: false, since: Date.now() }
+        state.background['agent-o'] = { role: 'implementer', prompt: 'CC_TIERS_TASK: other-task\nWork.', at: Date.now() }
+      }
+      writeFileSync(file, JSON.stringify(state))
+      const end = JSON.parse(endTurn(env, transcript, project).stdout)
+      return { message: end.reason || end.systemMessage, failures: sessionState(dir).tasks['users-pagination']?.failures?.length || 0 }
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  }
+  for (const otherWriter of ['written', 'active']) {
+    const apart = await stopWith(true, otherWriter)
+    assert.equal(apart.failures, 1, `in its worktree the failure counts (${otherWriter})`)
+    assert.doesNotMatch(apart.message, /the tree changed under/, otherWriter)
+    const shared = await stopWith(false, otherWriter)
+    assert.equal(shared.failures, 0, `in the project the failure is excused (${otherWriter})`)
+    assert.match(shared.message, /the tree changed under other-task after this attempt: node check\.mjs failed/, otherWriter)
+  }
+})
+
 test('a peer hand-back row in the main transcript counts as its agent\'s report', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-status-'))
   try {
@@ -1054,6 +1150,60 @@ test('a writer that stopped with no status is idle: Stop releases its task slot'
   assert.equal(state.active['users-pagination'], undefined)
 })
 
+test('a writer resumed by SendMessage is running again until it stops once more', () => {
+  const state = tiers.emptyState('s')
+  const now = Date.now()
+  state.active = { 'users-pagination': { role: 'implementer', files: ['src/a.js'], at: now } }
+  state.background = { a1: { role: 'implementer', prompt: 'CC_TIERS_TASK: users-pagination\nWork.', at: now - 5000, stops: 1, stoppedAt: now - 4000, resumedAt: now - 1000 } }
+  tiers.releaseIdleWriters(state)
+  assert.ok(state.active['users-pagination'], 'the resumed writer keeps its slot')
+  state.background.a1.stoppedAt = now
+  tiers.releaseIdleWriters(state)
+  assert.equal(state.active['users-pagination'], undefined, 'it stopped after the resume')
+})
+
+test('a reviewer resumed by SendMessage holds the parked checks like a running one, from its resume', () => {
+  const now = Date.now()
+  const hours = (count) => count * 60 * 60 * 1000
+  const parked = [{ id: 'row:p1', role: 'orchestrator', parkedAt: now, text: 'CC_TIERS_TASK: users-pagination\nCC_TIERS_STATUS: pass' }]
+  const held = (launch, key = 'background') => tiers.holdParked({ ...tiers.emptyState('s'), [key]: { 'agent-r': { role: 'reviewer', prompt: REVIEW_PROMPT, ...launch } } }, parked)
+  const stopped = { at: now - hours(5), stops: 1, stoppedAt: now - hours(4) }
+  assert.deepEqual(held(stopped).gate.map((item) => item.id), ['row:p1'], 'a stopped reviewer holds nothing')
+  assert.deepEqual(held(stopped, 'finished').gate.map((item) => item.id), ['row:p1'])
+  for (const key of ['background', 'finished']) {
+    const resumed = held({ ...stopped, resumedAt: now - 1000 }, key)
+    assert.deepEqual(resumed.gate, [], `${key}: a resumed reviewer holds the parked pass`)
+    assert.match(resumed.notes[0], /a review \(agent-r\) is still running/)
+  }
+  assert.deepEqual(held({ ...stopped, resumedAt: now - hours(4) + 1000, stoppedAt: now - hours(3) }).gate.map((item) => item.id), ['row:p1'], 'it stopped again after the resume')
+  assert.deepEqual(held({ at: now - hours(5), stops: 1, stoppedAt: now - hours(4), resumedAt: now - hours(4) + 1 }).gate.map((item) => item.id), ['row:p1'], 'the 3 h hold counts from the resume: past it, the review is taken as lost')
+})
+
+test('a silent stop after resume keeps the ask count: at most three asks per agent', () => {
+  const routing = routingWith()
+  const state = tiers.emptyState('s')
+  state.background = { 'agent-r': { role: 'reviewer', prompt: REVIEW_PROMPT, tool_use_id: 'r1', at: Date.now(), stops: 1, task: 'users-pagination', reviews: 0 } }
+  let asked = 0
+  for (let stop = 0; stop < 6; stop += 1) {
+    asked += tiers.reviewVerdictAsks(state).asks.length
+    const event = tiers.agentReport('agent-r', state.background['agent-r'], trailer('reviewer', ''))
+    tiers.applyEvent(state, { ...tiers.prepareReport({ routing, projectDir: '' }, event), agent_id: 'agent-r' }, routing)
+  }
+  assert.equal(asked, 3)
+  assert.equal(state.background['agent-r'].asks, 4, 'the limit notice was given once')
+})
+
+test('a reviewer resumed by SendMessage is not asked for its verdict again until it stops', () => {
+  const now = Date.now()
+  const state = tiers.emptyState('s')
+  state.background = { 'agent-r': { role: 'reviewer', prompt: REVIEW_PROMPT, at: now - 5000, stops: 1, stoppedAt: now - 4000, resumedAt: now - 1000, task: 'users-pagination', reviews: 0, asks: 1 } }
+  assert.deepEqual(tiers.reviewVerdictAsks(state), { asks: [], given: [] })
+  assert.equal(state.background['agent-r'].asks, 1, 'a Stop while it runs spends no ask')
+  state.background['agent-r'].stoppedAt = now
+  assert.equal(tiers.reviewVerdictAsks(state).asks.length, 1, 'it stopped again with no verdict')
+  assert.equal(state.background['agent-r'].asks, 2)
+})
+
 test('a reviewer rejection that arrives by the hand-back row is charged to the writer tier whichever path brings it', async () => {
   const outcome = async (order) => {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-tier-'))
@@ -1188,6 +1338,51 @@ test('a review pass counted while the fix attempt is still parked waits for that
   assert.equal(state.evidence['users-pagination'], undefined)
   assert.equal(state.log['users-pagination'].status, 'done')
   assert.equal(state.log['users-pagination'].attempts, 2, 'both attempts are logged')
+})
+
+test('a rejected attempt a later review covered that fails its gate at Stop is not a second failure, and the fix it covered still finishes the task', () => {
+  const routing = routingWith({ review_policy: 'always' })
+  const state = tiers.emptyState('s')
+  state.awaiting = [parkedAttempt('row:a1', 'first', 100), parkedAttempt('row:a2', 'fixed the off by one', 300)]
+  const rejected = countReview(state, routing, 'R1', 'reject', 200)
+  assert.equal(rejected.meta.outcome, 'retry')
+  tiers.logReport(state, rejected.meta)
+  assert.equal(countReview(state, routing, 'R2', 'pass', 400).meta.outcome, 'review')
+  assert.equal(state.tasks['users-pagination'].rejected, undefined)
+  assert.deepEqual(state.tasks['users-pagination'].reviewPassed, ['row:a1', 'row:a2'])
+
+  const failed = countAttempt(state, routing, { ...state.awaiting[0], text: state.awaiting[0].text.replace('CC_TIERS_STATUS: pass', 'CC_TIERS_STATUS: fail') })
+  assert.equal(failed.meta.stillRejected, true)
+  assert.match(failed.message, /already rejected this opus attempt, so its failing gate is not a second failure/)
+  assert.equal(state.tasks['users-pagination'].failures.length, 1)
+  assert.deepEqual(state.tasks['users-pagination'].reviewPassed, ['row:a2'], 'the fix stays covered')
+  tiers.logReport(state, failed.meta)
+  assert.equal(state.log['users-pagination'].failures, 1, 'the log counts the rejection once')
+
+  const fix = countAttempt(state, routing, state.awaiting[1])
+  assert.equal(fix.meta.outcome, 'pass')
+  assert.doesNotMatch(fix.message, /Send the result to cc-tiers:reviewer/)
+  assert.equal(state.tasks['users-pagination'], undefined)
+})
+
+test('a rejected attempt a later review covered that fails its gate at Stop after the fix was counted finishes the task with one failure', () => {
+  const routing = routingWith({ review_policy: 'always' })
+  const state = tiers.emptyState('s')
+  state.awaiting = [parkedAttempt('row:a1', 'first', 100), parkedAttempt('row:a2', 'fixed the off by one', 300)]
+  const rejected = countReview(state, routing, 'R1', 'reject', 200)
+  tiers.logReport(state, rejected.meta)
+  assert.equal(countReview(state, routing, 'R2', 'pass', 400).meta.outcome, 'review')
+
+  const fix = countAttempt(state, routing, state.awaiting[1])
+  assert.equal(fix.meta.outcome, 'review')
+  assert.deepEqual(state.tasks['users-pagination'].reviewPassed, ['row:a1'])
+  const failed = countAttempt(state, routing, { ...state.awaiting[0], text: state.awaiting[0].text.replace('CC_TIERS_STATUS: pass', 'CC_TIERS_STATUS: fail') })
+  assert.equal(failed.meta.outcome, 'pass')
+  assert.doesNotMatch(failed.message, /Retry with that review/)
+  assert.equal(state.tasks['users-pagination'], undefined)
+  tiers.logReport(state, failed.meta)
+  assert.equal(state.log['users-pagination'].failures, 1, 'the log counts the rejection once')
+  assert.equal(state.log['users-pagination'].status, 'done')
 })
 
 test('a review pass counted before the session attempt it covers is gated at Stop does not reopen the task', () => {

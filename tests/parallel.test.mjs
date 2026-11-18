@@ -126,3 +126,41 @@ test('a scope longer than the cap is the whole project, never cut short', () => 
   par.registerActive(direct, { task: 'a', role: 'implementer', files: many, now: NOW })
   assert.equal(par.checkParallel(direct, { task: 'b', files: ['src/f40.js'], now: NOW }).ok, false, 'registerActive never truncates')
 })
+
+test('absolute CC_TIERS_FILES inside the project dir compare as project-relative paths', async () => {
+  const { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const base = mkdtempSync(path.join(tmpdir(), 'cc-tiers-abs-'))
+  try {
+    const real = path.join(base, 'real')
+    const link = path.join(base, 'link')
+    mkdirSync(path.join(real, 'src'), { recursive: true })
+    symlinkSync(real, link)
+    const dir = realpathSync(real)
+
+    const a = par.declaredFiles({ FILES: `${dir}/src/a.js, ${dir}/web/` }, '', dir)
+    assert.deepEqual(a, { files: ['src/a.js', 'web'], declared: true })
+    const b = par.declaredFiles({ FILES: `${dir}/src/b.js` }, '', dir)
+    const state = {}
+    par.registerActive(state, { task: 'one', role: 'implementer', files: a.files, now: NOW })
+    assert.equal(par.checkParallel(state, { task: 'two', files: b.files, now: NOW }).ok, true, 'disjoint absolute files run together')
+    assert.equal(par.checkParallel(state, { task: 'two', files: par.declaredFiles({ FILES: `${dir}/src/a.js` }, '', dir).files, now: NOW }).ok, false)
+
+    assert.deepEqual(par.declaredFiles({ FILES: `${dir}/src/*.js, ${dir}/**/x.js` }, '', dir).files, ['.'], 'a leading wildcard still widens')
+    assert.deepEqual(par.declaredFiles({ FILES: `${dir}/src/*.js` }, '', dir).files, ['src'])
+    assert.deepEqual(par.declaredFiles({ FILES: `${dir}/` }, '', dir).files, ['.'], 'the project dir itself is the whole project')
+    assert.deepEqual(par.declaredFiles({}, `edit ${dir}/src/a.js and \`${dir}/src/c.js\` and /elsewhere/x.js`, dir).files, ['src/a.js', 'src/c.js'])
+
+    assert.deepEqual(par.declaredFiles({ FILES: `${dir}/src/a.js` }, '', link).files, ['src/a.js'], 'a symlinked project dir and its real path compare as inside')
+    assert.deepEqual(par.declaredFiles({ FILES: `${link}/src/a.js` }, '', dir).files, ['src/a.js'], 'a path through the link, project dir real')
+    assert.deepEqual(par.declaredFiles({ FILES: `${link}/src/new.js` }, '', dir).files, ['src/new.js'], 'a file not created yet still compares')
+
+    assert.deepEqual(par.declaredFiles({ FILES: `${base}/other/a.js` }, '', dir).files, ['.'], 'outside the project dir keeps widening')
+    assert.deepEqual(par.declaredFiles({ FILES: `${dir}/src/a.js` }, '').files, ['.'], 'no project dir keeps widening')
+    assert.deepEqual(par.declaredFiles({ FILES: `${dir}/../x.js` }, '', dir).files, ['.'])
+    assert.deepEqual(par.declaredFiles({}, `edit ${dir}/src/a.js`).files, [])
+    assert.deepEqual(par.declaredFiles({ FILES: 'src/a.js' }, '', dir).files, ['src/a.js'], 'relative paths are as before')
+  } finally {
+    rmSync(base, { recursive: true, force: true })
+  }
+})

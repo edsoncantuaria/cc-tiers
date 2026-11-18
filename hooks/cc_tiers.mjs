@@ -16,8 +16,10 @@ import {
   statSync,
   unlinkSync,
   writeFileSync,
+  writeSync,
 } from 'node:fs'
 import { createHash } from 'node:crypto'
+import { hostname } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { TIERS, dollars, extractFiles, slug, writeAtomic } from './base.mjs'
@@ -27,11 +29,11 @@ import { declaresPackage, diagnoseFailure, failureResearchLines, missingPackage,
 import { MEMORY_BEGIN, MEMORY_END, MEMORY_IGNORE, addRecord, formatRecall, loadMemory, memoryPath, recall, sanitize, saveMemory } from './memory.mjs'
 import { checkParallel, declaredFiles, overlaps, pruneActive, registerActive, releaseActive } from './parallel.mjs'
 import { availableChecks, parseProfile, profileSettings, reviewRequired, selectChecks } from './policy.mjs'
-import { readHookErrors } from './integrity.mjs'
+import { readHookErrors, recordHookError, taskOf } from './integrity.mjs'
 import { clip } from './redact.mjs'
 import { KEYWORD_FACTOR, TEXT_KEYWORD_FACTOR, assessRisk, isSensitivePath, riskRank, testsAvailableIn } from './risk.mjs'
 import { parseTelemetry, recordEvent, telemetryPath } from './telemetry.mjs'
-import { attemptChanges, git, outOfScope, sensitiveFiles, treeFingerprint, validateState, workspaceSnapshot } from './workspace.mjs'
+import { PROJECT_FILE, attemptChanges, git, outOfScope, sensitiveFiles, treeFingerprint, validateState, workspaceSnapshot } from './workspace.mjs'
 import { findingsNote, fold, gateFailure, gateMessage, isBlocking, judgeFindings, parseFindings, parseVerify, reviewMessage, runGate } from './verify.mjs'
 
 export { TIERS, dollars, extractFiles, fold, writeAtomic }
@@ -104,8 +106,13 @@ const MAX_AUDIT = 40
 const MAX_EVENTS = 60
 const MAX_CACHE = 40
 const SCAN_FIRST_CAP = 32 * 1024 * 1024
-const LOCK_WAIT_MS = 3000
+/** Leaves a 15 s hook (PreToolUse blocks the delegation when it times out) 10 s for its own work. */
+const LOCK_WAIT_MS = 5000
+/** Memory and history are a convenience written while the session lock is held: they wait less and skip the write when busy. */
+const NESTED_LOCK_WAIT_MS = 2000
 const LOCK_STALE_MS = 10000
+/** No hook runs longer than its 660 s timeout, so a lock this old is a holder Claude Code killed, whatever its pid says. */
+const LOCK_MAX_HELD_MS = 700000
 /** A gate holds its lock for up to a verify budget; past the hook timeout in hooks.json its process is gone. */
 const GATE_LOCK_STALE_MS = 660000
 const HEADER_RE = /^CC_TIERS_([A-Z]+):\s*(.*?)\s*$/
@@ -476,8 +483,8 @@ export function matchesKeyword(text, keywords) {
   })
 }
 
-export function isRisky(text, routing, { waivable = true } = {}) {
-  return waivable ? keywordRisk(text, routing) === true : matchesReview(text, routing)
+export function isRisky(text, routing, { waivable = true, projectDir = '' } = {}) {
+  return waivable ? keywordRisk(text, routing, projectDir) === true : matchesReview(text, routing)
 }
 
 function matchesReview(text, routing) {
@@ -489,8 +496,8 @@ function matchesReview(text, routing) {
 const looksLikeFile = (file) => /\.[^./]+$/.test(file.slice(file.lastIndexOf('/') + 1))
 
 /** Files named one by one, none a directory or the whole tree, and none sensitive by path. */
-function namesOnlyOrdinaryFiles(text) {
-  const { files } = declaredFiles(parseHeaders(text), stripHeaders(text))
+function namesOnlyOrdinaryFiles(text, projectDir) {
+  const { files } = declaredFiles(parseHeaders(text), stripHeaders(text), projectDir)
   return files.length > 0 && files.every((file) => looksLikeFile(file) && !isSensitivePath(file) && !sensitiveFiles([file]).length)
 }
 
@@ -498,9 +505,9 @@ function namesOnlyOrdinaryFiles(text) {
  * true when a review keyword makes the task risky; 'text' when the keyword is only in the text and every named file is ordinary;
  * false without a keyword, or when CC_TIERS_RISK: none (with a reason) waives it.
  */
-export function keywordRisk(text, routing) {
+export function keywordRisk(text, routing, projectDir = '') {
   if (RISK_NONE_RE.test(parseHeaders(text).RISK || '') || !matchesReview(text, routing)) return false
-  return namesOnlyOrdinaryFiles(text) ? 'text' : true
+  return namesOnlyOrdinaryFiles(text, projectDir) ? 'text' : true
 }
 
 export function isTrivial(text, routing) {
@@ -535,7 +542,7 @@ export function assessComplexity(text, routing, { projectDir = '' } = {}) {
   else if (steps === 1) add(1, 'two steps')
 
   const files = new Set()
-  for (const file of extractFiles(body)) files.add(file.toLowerCase())
+  for (const file of extractFiles(body, 40, projectDir)) files.add(file.toLowerCase())
   if (files.size >= 6) add(2, `${files.size} files`)
   else if (files.size >= 3) add(1, `${files.size} files`)
 
@@ -778,13 +785,13 @@ export function decideTier(text, routing, { history = null, conserve = false, ce
  */
 export function taskRisk(text, routing, { history = null, projectDir = '' } = {}) {
   const body = stripHeaders(text)
-  const declared = declaredFiles(parseHeaders(text), body)
+  const declared = declaredFiles(parseHeaders(text), body, projectDir)
   // A path in the text still counts when CC_TIERS_FILES covers it ('.', a directory or a glob).
-  const files = declared.declared ? [...declared.files, ...extractFiles(body).filter((file) => declared.files.some((entry) => overlaps(file, entry)))] : declared.files
+  const files = declared.declared ? [...declared.files, ...extractFiles(body, 40, projectDir).filter((file) => declared.files.some((entry) => overlaps(file, entry)))] : declared.files
   return assessRisk({
     text: body,
     files,
-    keywordRisk: keywordRisk(text, routing),
+    keywordRisk: keywordRisk(text, routing, projectDir),
     complexity: assessComplexity(text, routing, { projectDir }),
     history: { haiku: Boolean(history) && historyMatches(text, history, 'haiku'), sonnet: Boolean(history) && historyMatches(text, history, 'sonnet') },
     testsAvailable: projectDir ? testsAvailableIn(projectDir) : null,
@@ -823,7 +830,7 @@ function classify(text, routing, { history, conserve, ceiling, projectDir, risk 
     tier = 'sonnet'
     because = 'risk'
   }
-  if (routing.hardStart === 'opus' && tier === 'sonnet' && (isRisky(text, routing) || risk?.level === 'critical')) {
+  if (routing.hardStart === 'opus' && tier === 'sonnet' && (isRisky(text, routing, { projectDir }) || risk?.level === 'critical')) {
     tier = 'opus'
     because = 'hard'
   }
@@ -1148,6 +1155,12 @@ export function formatTaskSpend(task, tiers) {
   return `cc-tiers spend for ${line} (input + cache write + output; cache reads excluded, same as cc-cost).`
 }
 
+/** How far into a fork's transcript its parent's session id is looked for. */
+const FORK_HEAD_BYTES = 1024 * 1024
+/** How much of the sibling transcripts a fork reads, newest first, to find its parent: well inside the SessionStart timeout. */
+const FORK_SEARCH_BYTES = 256 * 1024 * 1024
+const SCAN_CHUNK_BYTES = 4 * 1024 * 1024
+
 function freshCursor() {
   return { file: '', offset: 0, task: '', ids: [], trailers: [], limits: {} }
 }
@@ -1187,11 +1200,16 @@ export function sessionPath(dataDir, sessionId) {
   return path.join(dataDir, `session-${safe}.json`)
 }
 
-export function loadState(file, sessionId) {
-  if (!file || !existsSync(file)) return emptyState(sessionId)
+/** onEmpty, when given, hears why an empty state came back: missing, corrupt, or no tasks. */
+export function loadState(file, sessionId, onEmpty = () => {}) {
+  const empty = (why) => {
+    onEmpty(why)
+    return emptyState(sessionId)
+  }
+  if (!file || !existsSync(file)) return empty('missing')
   try {
     const data = JSON.parse(readFileSync(file, 'utf8'))
-    if (!data || typeof data !== 'object' || !data.tasks || typeof data.tasks !== 'object') return emptyState(sessionId)
+    if (!data || typeof data !== 'object' || !data.tasks || typeof data.tasks !== 'object') return empty('no tasks')
     const base = emptyState(sessionId)
     for (const key of ['seen', 'spent', 'asked', 'pending', 'awaiting', 'events', 'audit']) if (!Array.isArray(data[key])) data[key] = base[key]
     for (const key of ['spend', 'cost', 'log', 'background', 'finished', 'researched', 'contracts', 'evidence', 'completions', 'snapshots', 'verifyCache', 'active']) {
@@ -1210,7 +1228,7 @@ export function loadState(file, sessionId) {
     }
     return data
   } catch {
-    return emptyState(sessionId)
+    return empty('corrupt')
   }
 }
 
@@ -1239,17 +1257,52 @@ function sleep(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
 }
 
-/** Creates the lock file, waiting up to waitMs; a lock older than staleMs is a crashed holder and is taken over. False when it was not taken. */
-function takeLock(lock, waitMs, staleMs) {
+/**
+ * Whether the process that wrote a lock is gone: the lock holds `pid@host`; a lock with no pid tells nothing.
+ * A pid from another host (a container sharing the data dir) cannot be checked here, so it counts as alive.
+ */
+function holderGone(lock) {
+  let pid
+  let host
+  try {
+    const [held, ...rest] = readFileSync(lock, 'utf8').split('@')
+    pid = Number.parseInt(held, 10)
+    host = rest.join('@')
+  } catch {
+    return null
+  }
+  if (!(pid > 0)) return null
+  if (host && host !== hostname()) return false
+  try {
+    process.kill(pid, 0)
+    return false
+  } catch (error) {
+    // EPERM: the process exists but belongs to someone else.
+    return error.code === 'ESRCH'
+  }
+}
+
+/**
+ * Creates the lock file with this process's pid, waiting up to waitMs. A lock whose holder is gone, or one older than maxHeldMs,
+ * is taken over; one with no pid (written before the pid was kept) is taken over once older than staleMs. False when it was not taken.
+ */
+function takeLock(lock, waitMs, staleMs, maxHeldMs = LOCK_MAX_HELD_MS) {
   const deadline = Date.now() + waitMs
   for (;;) {
     try {
-      closeSync(openSync(lock, 'wx'))
+      const fd = openSync(lock, 'wx')
+      try {
+        writeSync(fd, `${process.pid}@${hostname()}`)
+      } finally {
+        closeSync(fd)
+      }
       return true
     } catch (error) {
       if (error.code !== 'EEXIST') return false
       try {
-        if (Date.now() - statSync(lock).mtimeMs > staleMs) {
+        const age = Date.now() - statSync(lock).mtimeMs
+        const gone = holderGone(lock)
+        if (gone === true || age > maxHeldMs || (gone === null && age > staleMs)) {
           unlinkSync(lock)
           continue
         }
@@ -1271,18 +1324,17 @@ function dropLock(lock) {
 }
 
 /**
- * Run fn while holding `<file>.lock`. Parallel subagents fire hooks at the same
- * time, and without the lock their read-modify-write would drop counts.
- * A lock older than LOCK_STALE_MS is a crashed hook and is taken over.
- * After LOCK_WAIT_MS the hook runs anyway rather than miss its timeout.
+ * Run fn(held) while holding `<file>.lock`. Parallel subagents fire hooks at the same time, and without the lock their
+ * read-modify-write would drop counts. A lock whose holder is gone is taken over; a live holder keeps it. After waitMs fn still runs,
+ * so the hook answers within its timeout, but with held false: it must not write what the holder may be writing.
  */
-export function withLock(file, fn) {
-  if (!file) return fn()
+export function withLock(file, fn, waitMs = LOCK_WAIT_MS) {
+  if (!file) return fn(true)
   const lock = `${file}.lock`
   mkdirSync(path.dirname(lock), { recursive: true })
-  const held = takeLock(lock, LOCK_WAIT_MS, LOCK_STALE_MS)
+  const held = takeLock(lock, waitMs, LOCK_STALE_MS)
   try {
-    return fn()
+    return fn(held)
   } finally {
     if (held) dropLock(lock)
   }
@@ -1297,7 +1349,7 @@ export function gateLock(dataDir, projectDir) {
   const lock = path.join(dataDir, `gate-${lineId(path.resolve(projectDir))}.lock`)
   return (waitS) => {
     mkdirSync(dataDir, { recursive: true })
-    return takeLock(lock, waitS * 1000, GATE_LOCK_STALE_MS) ? () => dropLock(lock) : null
+    return takeLock(lock, waitS * 1000, GATE_LOCK_STALE_MS, GATE_LOCK_STALE_MS) ? () => dropLock(lock) : null
   }
 }
 
@@ -1407,7 +1459,9 @@ function awaitReport(state, event, task) {
   if (!event.agent_id) return
   // A silent review remembers its task and how many reviews of it were counted, so Stop can tell when another one delivered the verdict.
   const review = REVIEW_ROLES.has(event.role) ? { task, reviews: reviewsCounted(state, task) } : {}
-  registerAgent(state, event.agent_id, { role: event.role, prompt: event.prompt || '', tool_use_id: event.tool_use_id || '', at: launchTime(event), stops: (Number(event.stops) || 0) + 1, ...review })
+  // The ask count rides the event: the stop deleted the old entry, and the limit is per agent, not per stop.
+  const asked = event.asks ? { asks: event.asks } : {}
+  registerAgent(state, event.agent_id, { role: event.role, prompt: event.prompt || '', tool_use_id: event.tool_use_id || '', at: launchTime(event), stops: (Number(event.stops) || 0) + 1, stoppedAt: Date.now(), ...asked, ...review })
 }
 
 const reviewsCounted = (state, task) => own(state.log, task)?.reviews.length || 0
@@ -1597,8 +1651,8 @@ export function applyEvent(state, event, routing) {
 
   let current = own(tasks, task)
   if (!current || typeof current !== 'object') current = { tier, failures: [], carried: [] }
-  // final-gate has no writer attempt to supersede its rejection, so its next passing review is a fresh look at the diff.
-  if (current.rejected && (!REVIEW_ROLES.has(role) || (task === FINAL_GATE && status === 'pass'))) {
+  // final-gate has no writer attempt to supersede its rejection, so a passing review launched after it is a fresh look at the diff; one launched before it saw the rejected diff.
+  if (current.rejected && (!REVIEW_ROLES.has(role) || (task === FINAL_GATE && status === 'pass' && launchTime(event) > (current.rejectedAt || 0)))) {
     // The session's own pass, parked until Stop, of the attempt a review already rejected: it is that attempt, not a new one.
     if (id && (current.judged || []).includes(id)) {
       meta.tier = tier
@@ -1613,6 +1667,7 @@ export function applyEvent(state, event, routing) {
     // Any other writer report is a new attempt: a rejection of the attempt before it no longer sticks.
     current = { ...current }
     delete current.rejected
+    delete current.rejectedAt
     delete current.judged
   }
   // A writer report that a passed review covered finishes the task with it; any other writer report ends that coverage.
@@ -1691,9 +1746,9 @@ export function applyEvent(state, event, routing) {
     const launched = Number(event.launchedAt) > 0 || Number(event.durationMs) > 0 ? launchTime(event) : 0
     const attempts = parkedFor(state, task, id, launched)
     // An attempt the rejection did not judge is a new one: this review is of it, so the rejection of the attempt before no longer sticks.
+    // Its judged attempts stay: a review that covers them must not let the gate of one count a second failure.
     if (current.rejected && attempts.some((item) => !(current.judged || []).includes(item.id))) {
       delete current.rejected
-      delete current.judged
     }
     // Evidence review: a rejection with no blocking finding approves; with findings, only they reach the writer.
     // A failed gate is no reviewer finding: judging the review's own findings would turn that failure back into a pass.
@@ -1738,7 +1793,7 @@ export function applyEvent(state, event, routing) {
     // A rejection sticks to the writer attempt it judged: a pass from another review of that attempt must not clear it.
     if (['retry', 'escalate', 'stop'].includes(applied.outcome)) {
       const judged = [...new Set([...(tasks[task]?.judged || []), ...attempts.map((item) => item.id)])].slice(-MAX_JUDGED)
-      tasks[task] = { ...tasks[task], rejected: true, ...(judged.length ? { judged } : {}) }
+      tasks[task] = { ...tasks[task], rejected: true, ...(task === FINAL_GATE && !applied.stillRejected ? { rejectedAt: Date.now() } : {}), ...(judged.length ? { judged } : {}) }
     }
     if (applied.outcome === 'review' && !applied.covering) meta.floor = reviewFloor(state, task, routing, flagged)
     if (verdictless && !applied.stillRejected) applied.message = `Task ${task}: the review had no CC_TIERS_STATUS line but had blocking findings, so it counts as a failure. ${applied.message}`
@@ -1747,6 +1802,20 @@ export function applyEvent(state, event, routing) {
     meta.sonnetEscalated = applied.sonnetEscalated === true
     meta.stillRejected = applied.stillRejected === true
     meta.diagnosis = applied.diagnosis
+  } else if (status === 'fail' && reviewed && (current.judged || []).includes(id)) {
+    // The review that rejected this attempt counted its failure already: its gate failing at Stop is not a second one, and the other covered attempts stay covered.
+    const rest = covers.filter((item) => item !== id)
+    if (rest.length) {
+      tasks[task] = { ...current, reviewPassed: rest }
+      meta.outcome = stoppedAt(current, routing) ? 'stop' : 'retry'
+      meta.stillRejected = true
+      message = `Task ${task}: its review already rejected this ${tier} attempt, so its failing gate is not a second failure. The task finishes when the ${plural(rest.length, 'other attempt')} the passed review covered ${rest.length === 1 ? 'is' : 'are'} counted.`
+    } else {
+      // That review covered this attempt only together with the fix after it, so the fix was counted first and passed its gate.
+      meta.outcome = 'pass'
+      delete tasks[task]
+      message = `Task ${task} passed on ${tier}: its review already rejected this attempt, so its failing gate is not a second failure, and the fix that review covered was already counted. cc-tiers cleared its attempt counter.`
+    }
   } else if (status === 'pass' && reviewed) {
     const rest = covers.filter((item) => item !== id)
     if (rest.length) {
@@ -1801,8 +1870,8 @@ export function applyEvent(state, event, routing) {
   }
   if (meta.outcome === 'pass') {
     if (REVIEW_ROLES.has(role)) logEntry(state, task).reviewLaunched = launchTime(event)
-    // What finished the task saw the work up to here: a review, what was there when it launched; a writer, its own report.
-    const seenUntil = REVIEW_ROLES.has(role) ? launchTime(event) : Date.now()
+    // What finished the task saw the work up to here: a review, what was there when it launched; a writer, its own report (when it was parked, as its gate ran later).
+    const seenUntil = REVIEW_ROLES.has(role) ? launchTime(event) : Number(event.parkedAt) || Date.now()
     const finished = finishTask(state, task, routing, { reviewed: REVIEW_ROLES.has(role) || reviewed, tier, seenUntil })
     meta.completion = finished.result
     message = `${message}\n${finished.line}`
@@ -2272,7 +2341,7 @@ export function checkDelegation(state, toolInput, routing, { history = null, pro
   const spent = taskBudgetStatus(state, task, routing, now)
   if (spent.state === 'over' && !BUDGET_OVERRIDE_RE.test(headers.BUDGET || '')) return refuse(`cc-tiers: ${budgetMessage(task, spent)}`)
   for (const name of String(headers.RELEASE || '').split(',').map(slug).filter(Boolean)) releaseActive(state, name)
-  const scope = declaredFiles(headers, stripBriefs(prompt))
+  const scope = declaredFiles(headers, stripBriefs(prompt), projectDir)
   const isolated = input.isolation === 'worktree'
   const parallel = checkParallel(state, {
     task,
@@ -2651,8 +2720,6 @@ export function preToolOutput(deny, context, updatedInput = null) {
   return { hookSpecificOutput: output }
 }
 
-const PROJECT_FILE = '.claude/cc-tiers.json'
-
 /**
  * The project's own verifyAllow, read once: the hash of those same bytes is its stamp ('none' when absent, '' with no project dir),
  * so the list that is used is the list that was compared.
@@ -2691,6 +2758,7 @@ export function trustedAllow(ctx, peek, projectDir) {
   const { stamp, allow, note } = projectAllowFrom(projectDir)
   if (!allow.length) return { allow: base, note }
   if (!ctx.dataDir) return { allow: base, note: 'not applied: no plugin data dir keeps the stamp of .claude/cc-tiers.json' }
+  if (peek?.projectFile === 'unstamped' || peek?.projectFile === 'lost') return { allow: base, note: "not applied: cc-tiers had no saved state for this session when it first read .claude/cc-tiers.json; a new session picks it up" }
   if (!peek || peek.projectFile !== stamp) return { allow: base, note: 'not applied: .claude/cc-tiers.json changed since cc-tiers first read it in this session; a new session picks it up' }
   return { allow: [...base, ...allow], note: '' }
 }
@@ -2703,7 +2771,7 @@ export function projectAllowInEffect(ctx, state) {
 
 export function readProjectFile(projectDir) {
   if (!projectDir) return { project: null, note: 'not checked' }
-  const file = path.join(projectDir, '.claude', 'cc-tiers.json')
+  const file = path.join(projectDir, PROJECT_FILE)
   if (!existsSync(file)) return { project: null, note: 'not present' }
   try {
     return { project: loadJson(file), note: file }
@@ -3134,6 +3202,8 @@ function foldTrailer(text, owner, reportId, cursor, sink) {
 
 const HANDBACK_FRAME = 'The report follows:\n'
 
+const rowTime = (row) => Date.parse(row.timestamp) || Date.now()
+
 /**
  * The agent and report of a peer hand-back row, or null: a user row (handbackReportText, else its framed body),
  * or the queued_command attachment written when the hand-back arrives mid-turn. The frame indents each report line by two spaces.
@@ -3159,6 +3229,7 @@ function handbackOf(row) {
  * - An Agent call whose prompt carries CC_TIERS_TASK charges that one message to the task.
  * - Every other main-chain message is orchestration overhead.
  * - A peer hand-back row (a user row or a queued_command attachment) is the report of the background agent it names, pushed as a report with its agent_id.
+ * - The result row of a SendMessage that resumed an agent names it (resumedAgentId); withSession marks that agent as running again.
  * Sidechain rows are skipped: subagent usage comes from the Agent result or its own transcript.
  * Rows that repeat a message id (one row per content block) are counted once.
  */
@@ -3169,9 +3240,11 @@ function foldRow(row, line, cursor, sink, routing = null) {
   if (row.isSidechain === true) return
   const handback = handbackOf(row)
   if (handback) {
-    sink.reports.push({ id: `handback:${row.uuid || lineId(line)}`, agent_id: handback.agent, text: handback.text })
+    sink.reports.push({ id: `handback:${row.uuid || lineId(line)}`, agent_id: handback.agent, text: handback.text, at: rowTime(row) })
     return
   }
+  const resumed = row.toolUseResult?.resumedAgentId
+  if (row.type === 'user' && typeof resumed === 'string' && resumed) sink.resumed.push({ agent: resumed, at: rowTime(row) })
   if (row.type !== 'assistant') return
   const message = row.message && typeof row.message === 'object' ? row.message : {}
   const reportId = `row:${row.uuid || lineId(line)}`
@@ -3228,7 +3301,7 @@ function readRange(file, start, end) {
 export function scanTranscript(state, file, routing = null) {
   if (!state.cursor || typeof state.cursor !== 'object') state.cursor = freshCursor()
   const cursor = state.cursor
-  const sink = { spend: {}, cost: {}, reports: [] }
+  const sink = { spend: {}, cost: {}, reports: [], resumed: [] }
   if (!file || !existsSync(file)) return sink
   let size
   try {
@@ -3275,7 +3348,7 @@ export function scanTranscript(state, file, routing = null) {
 /** Spend and ceiling reports for a whole transcript text, the same way scanTranscript folds it. */
 export function attributeTranscript(text) {
   const cursor = freshCursor()
-  const sink = { spend: {}, cost: {}, reports: [] }
+  const sink = { spend: {}, cost: {}, reports: [], resumed: [] }
   for (const line of String(text || '').split(/\n/)) {
     if (!line.trim()) continue
     try {
@@ -3347,6 +3420,32 @@ export function agentHandbackReport(file) {
     }
   }
   return report
+}
+
+/** An agent's transcript file, from the session transcript `<dir>/<session id>.jsonl` and the agent id; '' when either is missing. */
+export function agentTranscriptPath(sessionFile, agentId) {
+  if (!sessionFile || !/^[\w-]+$/.test(String(agentId || ''))) return ''
+  return path.join(path.dirname(sessionFile), path.basename(sessionFile, '.jsonl'), 'subagents', `agent-${agentId}.jsonl`)
+}
+
+/**
+ * The git worktree an isolated agent ran in, as `{ path }`: its meta file says so, else the one under `<project>/.claude/worktrees/` that the cwd of its first row is in.
+ * Null when it ran in the project; path is '' when the meta says it had a worktree but not where (Claude Code drops worktreePath when it removes a clean one).
+ */
+export function agentWorktree(file, projectDir) {
+  if (!file) return null
+  try {
+    const meta = JSON.parse(readFileSync(file.replace(/\.jsonl$/, '.meta.json'), 'utf8'))
+    return meta?.spawnedWithWorktree === true ? { path: typeof meta.worktreePath === 'string' ? meta.worktreePath : '' } : null
+  } catch {
+    // No readable meta: the agent's own cwd tells where it worked.
+  }
+  const cwd = transcriptRows(file).find((row) => typeof row?.cwd === 'string' && row.cwd)?.cwd
+  if (!cwd) return null
+  const root = path.join(path.resolve(projectDir), '.claude', 'worktrees')
+  const relative = path.relative(root, path.resolve(cwd))
+  const [name] = relative.split(path.sep)
+  return name && name !== '..' && !path.isAbsolute(relative) ? { path: path.join(root, name) } : null
 }
 
 export function usageFromToolResponse(response, role, routing = null) {
@@ -3544,10 +3643,16 @@ export function openContext(payload, env = process.env) {
  * its gate or judgment runs commands, which only the Stop hook does, outside this lock.
  */
 export function withSession(ctx, payload, fn) {
-  return withLock(ctx.file, () => {
-    const state = ctx.file ? loadState(ctx.file, ctx.sessionId) : emptyState(ctx.sessionId)
+  return withLock(ctx.file, (held) => {
+    let lost = ''
+    const state = ctx.file ? loadState(ctx.file, ctx.sessionId, (why) => (lost = why)) : emptyState(ctx.sessionId)
+    const starting = payload.hook_event_name === 'SessionStart' && NEW_SESSION_SOURCES.has(payload.source || 'startup')
+    if (lost === 'missing' && starting && payload.source === 'fork') carryFork(ctx, state, payload)
+    else if (lost === 'missing' && ctx.file && !starting && !ranBefore(payload.transcript_path)) state.projectFile = 'unstamped'
+    else if (lost && ctx.file && !starting) loseState(ctx, state, lost, payload)
     absorbHookErrors(state, ctx.dataDir)
-    // The project file as this session first saw it; trustedAllow compares every later read with it. Only a saved state can keep it.
+    // The project file as this session first saw it; trustedAllow compares every later read with it. Only a saved state can keep it,
+    // and only a new session stamps it: a state file deleted mid-session must not let a changed file through. Neither marker matches a stamp.
     // Only that file is kept out of git: one created during the session stays in git status and in the attempt's diff for review.
     if (ctx.file && ctx.projectDir && state.projectFile === undefined) {
       state.projectFile = projectFileStamp(ctx.projectDir)
@@ -3560,6 +3665,10 @@ export function withSession(ctx, payload, fn) {
       }
     }
     const scan = scanTranscript(state, payload.transcript_path, ctx.routing)
+    for (const { agent, at } of scan.resumed) {
+      const entry = agentEntry(state, agent)
+      if (entry) entry.resumedAt = Math.max(Number(entry.resumedAt) || 0, at)
+    }
     const budget = budgetDecision(collectLimits({ payload, cursor: state.cursor, env: ctx.env }), ctx.routing)
     ctx.routing.conserve = budget.conserve
     for (const report of scan.reports) {
@@ -3580,10 +3689,148 @@ export function withSession(ctx, payload, fn) {
       if (message) queueMessage(state, message)
     }
     const result = fn(state, { budget })
-    flushEvents(ctx, state)
-    if (ctx.file) saveState(ctx.file, state)
+    if (held) {
+      flushEvents(ctx, state)
+      if (ctx.file) saveState(ctx.file, state)
+    } else {
+      // Another hook holds the state and will save it: writing ours over it would drop what it counted. This event is not recorded, and the next hook says so.
+      const task = taskOf(payload)
+      recordHookError(ctx.dataDir, { session: ctx.sessionId, hook: 'lock', task, error: new Error('the session state was busy past the wait; this event was not saved') })
+    }
     return result
-  })
+  }, ctx.lockWaitMs)
+}
+
+/** SessionStart sources that open a session of their own; resume and compact continue one, so they find its state. */
+const NEW_SESSION_SOURCES = new Set(['startup', 'clear', 'fork'])
+
+/** What a fork carries from its parent: the task records. Agents, parked reports and dedupe lists stay with the parent, which still runs. */
+const FORK_KEYS = ['tasks', 'log', 'contracts', 'evidence', 'researched', 'completions', 'snapshots', 'depends']
+
+/** The rows at the head of a transcript, parsed; a torn last line is skipped. */
+function headRows(file, bytes) {
+  let text
+  try {
+    text = readRange(file, 0, Math.min(statSync(file).size, bytes)).toString('utf8')
+  } catch {
+    return []
+  }
+  const rows = []
+  for (const line of text.split('\n')) {
+    try {
+      const row = JSON.parse(line)
+      if (row && typeof row === 'object') rows.push(row)
+    } catch {
+      // A line cut by the byte limit.
+    }
+  }
+  return rows
+}
+
+/**
+ * The session a fork copied its transcript from. The copy starts at the parent's last compaction and keeps each row's uuid, so the
+ * parent is the sibling transcript that holds the fork's first row. A row's session_id is only a hint, tried first: after a /clear it
+ * still names the session from before the clear. Newest siblings are read first, up to FORK_SEARCH_BYTES in all.
+ */
+function forkParent(file, sessionId) {
+  const rows = headRows(file, FORK_HEAD_BYTES)
+  const first = rows.find((row) => typeof row.uuid === 'string')?.uuid
+  const hint = rows.map((row) => row.session_id).find((id) => typeof id === 'string' && id && id !== sessionId) || ''
+  if (!first) return hint
+  const dir = path.dirname(file)
+  let names = []
+  try {
+    names = readdirSync(dir)
+  } catch {
+    return hint
+  }
+  const siblings = []
+  for (const name of names) {
+    const full = path.join(dir, name)
+    if (!name.endsWith('.jsonl') || full === file) continue
+    try {
+      const stat = statSync(full)
+      siblings.push({ id: name.slice(0, -'.jsonl'.length), full, size: stat.size, mtime: stat.mtimeMs })
+    } catch {
+      // Removed since the listing.
+    }
+  }
+  siblings.sort((a, b) => (a.id === hint ? -1 : b.id === hint ? 1 : b.mtime - a.mtime))
+  const needle = new RegExp(`"uuid":"${first.replace(/[^\w-]/g, '')}"`)
+  let budget = FORK_SEARCH_BYTES
+  for (const sibling of siblings) {
+    if (sibling.size > budget) continue
+    budget -= sibling.size
+    if (fileHas(sibling.full, needle)) return sibling.id
+  }
+  return hint
+}
+
+/**
+ * A fork starts with a copy of its parent's transcript under a new session id. Its task records come from the parent's state (read,
+ * never written: the parent may still run), and the copied rows are not folded again, or they would count the parent's attempts twice.
+ */
+function carryFork(ctx, state, payload) {
+  const file = payload.transcript_path
+  if (!skipTranscript(state, file)) return
+  const parent = forkParent(file, ctx.sessionId)
+  if (!parent) return
+  let missing = ''
+  const from = loadState(sessionPath(ctx.dataDir, parent), parent, (why) => (missing = why))
+  if (missing) {
+    queueMessage(state, `cc-tiers: this session is a fork of ${parent}, whose saved state is ${missing === 'missing' ? 'gone' : 'unreadable'}; its tasks start over here. Check the working tree before you delegate any of them again.`)
+    return
+  }
+  for (const key of FORK_KEYS) if (from[key] && typeof from[key] === 'object') state[key] = from[key]
+  const count = Object.keys(state.tasks).length + Object.keys(state.log).length
+  if (count) queueMessage(state, `cc-tiers carried the task records of session ${parent} into this fork. Agents still running there report to that session, not this one.`)
+}
+
+/** cc-tiers SessionStart text in the transcript: this session had a state, so a missing file was deleted or pruned, not never written. */
+const SESSION_START_RE = /cc-tiers routing is active|cc-tiers is enabled\. The routing summary/
+
+function ranBefore(file) {
+  return fileHas(file, SESSION_START_RE)
+}
+
+/** Whether a file holds text matching re, read in chunks that overlap by more than any needle searched, so a cut one is still found. */
+function fileHas(file, re) {
+  if (!file) return false
+  let size
+  try {
+    size = statSync(file).size
+  } catch {
+    return false
+  }
+  for (let start = 0; start < size; start += SCAN_CHUNK_BYTES - 256) {
+    try {
+      if (re.test(readRange(file, start, Math.min(size, start + SCAN_CHUNK_BYTES)).toString('utf8'))) return true
+    } catch {
+      return false
+    }
+  }
+  return false
+}
+
+/** Starts the transcript cursor at the end, so rows already counted (or copied from a parent) are not folded again. */
+function skipTranscript(state, file) {
+  try {
+    state.cursor = { ...freshCursor(), file, offset: statSync(file).size }
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * A state that came back empty in the middle of a session lost its counts and its project file stamp: it is told, never re-stamped,
+ * and the transcript is not re-read, or old passes would be parked and gated again on today's tree.
+ */
+function loseState(ctx, state, why, payload) {
+  state.projectFile = 'lost'
+  if (payload.transcript_path) skipTranscript(state, payload.transcript_path)
+  queueEvent(state, { type: 'state.recovered', because: why })
+  queueMessage(state, `cc-tiers found ${why === 'missing' ? 'no saved state for this session' : "this session's saved state unreadable"}: attempt counts, reviews and parked reports start over, and the project's verifyAllow is not applied until a new session. Check git status and the working tree before you delegate or review anything again.`)
 }
 
 /** The spec of a session attempt's opening heredoc is held like a writer delegation's: a respec that fixes the criteria the last failure named uncounts it. */
@@ -3635,7 +3882,7 @@ export function absorbHookErrors(state, dataDir) {
  * Run the verification gate of a writer pass and attach it to a copy of the event.
  * Commands can take minutes, so this runs before withSession, never under its lock.
  */
-export function prepareReport(ctx, event, payload = {}, { budgetS = ctx.routing.verifyBudget, peek = null } = {}) {
+export function prepareReport(ctx, event, payload = {}, { budgetS = ctx.routing.verifyBudget, peek = null, agentTranscript = '' } = {}) {
   const routing = ctx.routing
   if (event?.kind !== 'report') return event
   const reported = parseHeaders(event.text || '')
@@ -3643,7 +3890,7 @@ export function prepareReport(ctx, event, payload = {}, { budgetS = ctx.routing.
   const status = ((REVIEW_ROLES.has(event.role) ? reported.STATUS : headers.STATUS) || '').toLowerCase()
   const projectDir = ctx.projectDir || String(payload.cwd || '')
   if (REVIEW_ROLES.has(event.role)) {
-    const reviewed = routing.reviewEvidence ? prepareReview(routing, event, status, projectDir, budgetS, gateLock(ctx.dataDir, projectDir), trustedAllow(ctx, peek, projectDir).allow) : event
+    const reviewed = routing.reviewEvidence ? prepareReview(routing, event, status, projectDir, budgetS, gateLock(ctx.dataDir, projectDir), trustedAllow(ctx, peek, projectDir)) : event
     // final-gate has no writer report: the CC_TIERS_VERIFY lines of its own prompt are what the gate runs, never those of a prompt written for another task.
     const reportedTask = slug(reported.TASK || '')
     if (slug(parseHeaders(event.prompt || '').TASK || '') !== FINAL_GATE || (reportedTask && reportedTask !== FINAL_GATE) || status !== 'pass') return reviewed
@@ -3653,28 +3900,36 @@ export function prepareReport(ctx, event, payload = {}, { budgetS = ctx.routing.
   if (!slug(headers.TASK || '') || status !== 'pass') return event
   // Only an attempt with a snapshot from its delegation can be held to what it changed.
   if (projectDir && peek?.snapshot) event = { ...event, workspace: inspectWorkspace(projectDir, peek.snapshot, event, headers, String(payload.transcript_path || '')) }
-  return gateReport(ctx, event, event.text, headers, projectDir, budgetS, peek)
+  // An isolated writer edited its own worktree: its checks run there, never in the project tree.
+  const worktree = projectDir ? agentWorktree(agentTranscript, projectDir) : null
+  return gateReport(ctx, event, event.text, headers, projectDir, budgetS, peek, worktree)
 }
 
-/** Runs the CC_TIERS_VERIFY lines of text through the gate and attaches the result to a copy of the event. */
-function gateReport(ctx, event, text, headers, projectDir, budgetS, peek) {
+/** Runs the CC_TIERS_VERIFY lines of text through the gate and attaches the result to a copy of the event; an isolated writer's gate runs in its worktree (named on the event), with the project's stamp and lock. */
+function gateReport(ctx, event, text, headers, projectDir, budgetS, peek, worktree = null) {
   const routing = ctx.routing
   if (!routing.verify) return event
-  const tree = projectDir ? treeFingerprint(projectDir) : ''
+  if (worktree && !(worktree.path && existsSync(worktree.path))) {
+    const lines = parseVerify(text, { projectDir })
+    const reason = `the writer's worktree is gone${worktree.path ? `: ${worktree.path}` : ''}`
+    return { ...event, gate: { status: lines.length ? 'unverified' : 'missing', verified: [], flaky: [], unverified: lines.map((line) => ({ raw: line.raw, reason })), failure: null } }
+  }
+  const dir = worktree?.path || projectDir
+  const tree = dir ? treeFingerprint(dir) : ''
   const cached = tree && peek?.cache ? (raw) => peek.cache[raw] === tree : null
-  // Another writer sharing the tree may save files while the command runs; its edits are not this command's.
-  const writing = peek?.writing || []
-  const snapshot = projectDir && !writing.length ? () => workspaceSnapshot(projectDir) : null
-  const preexisting = declaredPreexisting(text, projectDir)?.raw || ''
-  const files = headers.FILES ? declaredFiles(headers, '').files : []
+  // Another writer sharing the tree may save files while the command runs; its edits are not this command's. A worktree is shared with no one.
+  const writing = worktree ? [] : peek?.writing || []
+  const snapshot = dir && !writing.length ? () => workspaceSnapshot(dir) : null
+  const preexisting = declaredPreexisting(text, dir)?.raw || ''
+  const files = headers.FILES ? declaredFiles(headers, '', dir).files : []
   const trusted = trustedAllow(ctx, peek, projectDir)
-  const options = { projectDir, allow: trusted.allow, detected: detectedChecks(projectDir), detectedIn: detectedChecks, files, timeoutS: routing.verifyTimeout, budgetS, cached, snapshot, preexisting, lock: gateLock(ctx.dataDir, projectDir) }
-  if (projectDir) {
+  const options = { projectDir: dir, allow: trusted.allow, detected: detectedChecks(dir), detectedIn: detectedChecks, files, timeoutS: routing.verifyTimeout, budgetS, cached, snapshot, preexisting, lock: gateLock(ctx.dataDir, projectDir) }
+  if (dir) {
     const treeCheck = writing.length ? { treeCheck: `skipped: ${writing.join(', ')} still writing` } : {}
     const gate = { ...runGate(text, options), tree, ...treeCheck, ...(trusted.note ? { projectAllow: trusted.note } : {}) }
-    const missing = missingFromGate(gate, projectDir)
+    const missing = missingFromGate(gate, dir)
     // applyEvent reads the declared pre-existing line again and needs the same dir to parse a cd to an absolute path.
-    return { ...event, projectDir, gate: missing ? { ...gate, missing } : gate }
+    return { ...event, projectDir: dir, ...(worktree ? { worktree: dir } : {}), gate: missing ? { ...gate, missing } : gate }
   }
   // Nothing may run without a project dir; a declaration still tells missing from not validated.
   const gate = parseVerify(text).length ? 'unverified' : 'missing'
@@ -3712,8 +3967,8 @@ function inspectWorkspace(projectDir, before, event, headers, transcript = '') {
   const after = workspaceSnapshot(projectDir)
   if (!after) return null
   const changed = attemptChanges(before, after)
-  const named = new Set(extractFiles(`${stripBriefs(event.prompt || '')}\n${event.text || ''}`, 400))
-  const declared = headers.FILES ? declaredFiles(headers, '').files.filter((file) => file !== '.') : []
+  const named = new Set(extractFiles(`${stripBriefs(event.prompt || '')}\n${event.text || ''}`, 400, projectDir))
+  const declared = headers.FILES ? declaredFiles(headers, '', projectDir).files.filter((file) => file !== '.') : []
   // CC_TIERS_FILES names a file as much as the prompt text does, a file with no extension (Jenkinsfile) included; only its exact path or a listed dir, never outOfScope's test-name rule.
   const listed = (file) => named.has(file) || declared.some((item) => file === item || file.startsWith(`${item.replace(/\/$/, '')}/`))
   let sensitive = sensitiveFiles(changed).filter((item) => !listed(item.file))
@@ -3780,19 +4035,21 @@ export function peekFor(state, event) {
 
 /** At Stop no foreground agent can still run: only background writers stay registered (an agent that stopped with no report, such as a reviewer waiting for its verdict, is not a writer). */
 export function releaseIdleWriters(state) {
-  const writers = Object.values(state.background || {}).filter((launch) => !REVIEW_ROLES.has(launch?.role) && !launch?.stops)
+  const writers = Object.values(state.background || {}).filter((launch) => !REVIEW_ROLES.has(launch?.role) && agentRuns(launch))
   const running = new Set(writers.map((launch) => slug(parseHeaders(launch?.prompt || '').TASK || '')))
   for (const task of Object.keys(state.active || {})) if (!running.has(task)) releaseActive(state, task)
 }
 
 /** A reviewer fail, or a report with no verdict, is judged finding by finding (commands run here, outside the lock); a pass only keeps its notes. */
-function prepareReview(routing, event, status, projectDir, budgetS, lock = null, allow = routing.verifyAllow) {
+function prepareReview(routing, event, status, projectDir, budgetS, lock = null, trusted = { allow: routing.verifyAllow, note: '' }) {
   let findings = parseFindings(event.text)
   if (status === 'pass') findings = findings.filter((f) => f.valid && !isBlocking(f.severity))
   if (!findings.length && status === 'pass') return event
-  const options = { allow, detected: detectedChecks(projectDir), projectDir, timeoutS: routing.verifyTimeout, budgetS, lock }
+  const options = { allow: trusted.allow, detected: detectedChecks(projectDir), projectDir, timeoutS: routing.verifyTimeout, budgetS, lock }
   // Nothing may run without a project dir: a command finding then stays blocking, unchecked.
   const judged = judgeFindings(findings, { ...options, specText: specText(event.prompt), run: projectDir ? undefined : () => ({ code: 1 }) })
+  // A command finding that stays blocking may do so only because the project's own list was left out of the allow list.
+  if (trusted.note && judged.blocking.some((finding) => finding.evidence === 'command')) judged.projectAllow = trusted.note
   return { ...event, judged }
 }
 
@@ -3833,7 +4090,7 @@ export function reviewVerdictAsks(state) {
   const given = []
   for (const [agentId, entry] of Object.entries(state.background || {})) {
     // A verdict that waits in the parked rows is already delivered, and so is one a later review of the task counted.
-    if (!REVIEW_ROLES.has(entry?.role) || !entry.stops || (state.awaiting || []).some((item) => item.agent_id === agentId) || !awaitsVerdict(state, entry)) continue
+    if (!REVIEW_ROLES.has(entry?.role) || agentRuns(entry) || (state.awaiting || []).some((item) => item.agent_id === agentId) || !awaitsVerdict(state, entry)) continue
     const line = `The review of ${entry.task} by agent ${agentId} still has no verdict. Ask it for the CC_TIERS_STATUS trailer with SendMessage to ${agentId} (run the review again if it cannot answer).`
     if ((entry.asks || 0) < MAX_VERDICT_ASKS) {
       entry.asks = (entry.asks || 0) + 1
@@ -3848,6 +4105,9 @@ export function reviewVerdictAsks(state) {
 
 export const agentEntry = (state, agentId) => own(state.background, agentId) || own(state.finished, agentId)
 
+/** An agent runs until its first stop, and again from a SendMessage resume (resumedAt) until it stops once more (stoppedAt). */
+const agentRuns = (launch) => !launch?.stops || Number(launch.resumedAt) > (Number(launch.stoppedAt) || 0)
+
 /** The report of a background agent's stop; its id changes with each stop, so an agent asked again counts again. */
 export function agentReport(agentId, entry, text) {
   return {
@@ -3858,14 +4118,15 @@ export function agentReport(agentId, entry, text) {
     role: entry.role,
     prompt: entry.prompt || '',
     launchedAt: entry.at,
+    asks: entry.asks,
     text,
     error: '',
   }
 }
 
-/** The agent's counted report is remembered, so its next stop after SendMessage is a new attempt; the token pairs the same report arriving by its other path. */
+/** The agent's counted report is remembered, so its next stop after SendMessage is a new attempt; the token pairs the same report arriving by its other path. A hand-back row stopped the agent when it was written, not when it is counted. */
 function rememberFinished(state, event, via) {
-  registerAgent(state, event.agent_id, { role: event.role, prompt: event.prompt || '', at: launchTime(event), stops: (Number(event.stops) || 0) + 1, reported: reportToken(via, event.text) }, 'finished')
+  registerAgent(state, event.agent_id, { role: event.role, prompt: event.prompt || '', at: launchTime(event), stops: (Number(event.stops) || 0) + 1, stoppedAt: Number(event.reportedAt) || Date.now(), reported: reportToken(via, event.text) }, 'finished')
 }
 
 /**
@@ -3884,10 +4145,14 @@ export function claimTwin(state, agentId, via, text) {
 
 /** Counts a background agent's report, whichever path brought it, and remembers the agent unless it still owes a report. */
 export function processAgentReport(ctx, state, event, usage = null, via = 'stop') {
+  // The entry is rebuilt, so a SendMessage resume read in the meantime is carried over: whether it is later than the stop decides if the agent runs.
+  const resumedAt = agentEntry(state, event.agent_id)?.resumedAt
   delete state.background[event.agent_id]
   delete state.finished[event.agent_id]
   const message = processReport(ctx, state, event, usage)
   if (!own(state.background, event.agent_id)) rememberFinished(state, event, via)
+  const entry = agentEntry(state, event.agent_id)
+  if (resumedAt && entry) entry.resumedAt = resumedAt
   return message
 }
 
@@ -3899,9 +4164,11 @@ function countHandback(ctx, state, row) {
   const entry = agentEntry(state, row.agent_id)
   const status = (parseHeaders(row.text).STATUS || '').toLowerCase()
   if (!entry?.role || (status !== 'pass' && status !== 'fail') || claimTwin(state, row.agent_id, 'row', row.text)) return
-  const event = agentReport(row.agent_id, entry, row.text)
+  const event = { ...agentReport(row.agent_id, entry, row.text), reportedAt: row.at }
   if (entry.role !== 'researcher') {
-    parkReport(state, event)
+    // Stamped now: the task may be released from state.active before Stop weighs this report against the others.
+    const task = slug({ ...parseHeaders(event.prompt), ...parseHeaders(event.text) }.TASK || '')
+    parkReport(state, { ...event, isolated: Boolean(own(state.active, task)?.isolated) })
     return
   }
   const message = processAgentReport(ctx, state, event, null, 'row')
@@ -3933,7 +4200,7 @@ export function prepareParked(ctx, parked, payload = {}, { now = Date.now, peeks
   const started = now()
   return parked.map((report) => {
     const budgetS = Math.max(0, ctx.routing.verifyBudget - (now() - started) / 1000)
-    return prepareReport(ctx, { kind: 'report', prompt: '', ...report }, payload, { budgetS, peek: peeks.get(report.id) })
+    return prepareReport(ctx, { kind: 'report', prompt: '', ...report }, payload, { budgetS, peek: peeks.get(report.id), agentTranscript: agentTranscriptPath(payload.transcript_path, report.agent_id) })
   })
 }
 
@@ -3956,8 +4223,9 @@ const HOLD_FOR_REVIEW_MS = 3 * 60 * 60 * 1000
 export function holdParked(state, parked) {
   // A review whose hand-back row is already parked has finished; only one with no report yet still runs, and one launched hours ago is taken as lost.
   const handedBack = new Set(parked.map((report) => report.agent_id).filter(Boolean))
-  const running = ([id, launch]) => REVIEW_ROLES.has(launch?.role) && !launch?.stops && !handedBack.has(id) && Date.now() - (Number(launch?.at) || 0) < HOLD_FOR_REVIEW_MS
-  const reviews = Object.entries(state.background || {}).filter(running).map(([id]) => id)
+  // The hold counts from the latest resume: a reviewer asked for its verdict hours after its launch still runs.
+  const running = ([id, launch]) => REVIEW_ROLES.has(launch?.role) && agentRuns(launch) && !handedBack.has(id) && Date.now() - Math.max(Number(launch?.at) || 0, Number(launch?.resumedAt) || 0) < HOLD_FOR_REVIEW_MS
+  const reviews = [...Object.entries(state.background || {}), ...Object.entries(state.finished || {})].filter(running).map(([id]) => id)
   const taskOf = (report) => slug(parseHeaders(report?.text || '').TASK || '')
   if (reviews.length && parked.length) {
     const tasks = [...new Set(parked.map(taskOf).filter(Boolean))]
@@ -3978,8 +4246,8 @@ export function holdParked(state, parked) {
     }
     gate.push(report)
     if (!at) continue
-    // Only a writer's or the session's own attempt writes in the tree; a review handed back later wrote nothing.
-    const writes = (other) => WRITER_ROLES.has(other.role) || SESSION_ROLES.has(other.role || 'orchestrator')
+    // Only a writer's or the session's own attempt writes in the tree; a review handed back later wrote nothing, nor did a writer isolated in its own worktree.
+    const writes = (other) => (WRITER_ROLES.has(other.role) && !other.isolated) || SESSION_ROLES.has(other.role || 'orchestrator')
     const later = parked.filter((other) => taskOf(other) !== task && Number(other.parkedAt) > at && writes(other)).map(taskOf)
     const wrote = Object.entries(state.writtenAt || {}).filter(([name, time]) => name !== task && Number(time) > at).map(([name]) => name)
     changed.set(report.id, [...later, ...wrote].filter(Boolean))
@@ -3987,11 +4255,11 @@ export function holdParked(state, parked) {
   return { gate, changed, notes }
 }
 
-/** A failed check after other tasks wrote in the same tree is theirs as much as this attempt's: not validated, not counted. */
+/** A failed check after other tasks wrote in the same tree is theirs as much as this attempt's: not validated, not counted. A check that ran in the writer's own worktree has no other writer. */
 export function excuseSharedTree(event, names) {
   const gate = event?.gate
   const others = [...new Set(names || [])]
-  if (!others.length || gate?.status !== 'fail' || !gate.failure) return event
+  if (event?.worktree || !others.length || gate?.status !== 'fail' || !gate.failure) return event
   const { raw, code } = gate.failure
   const reason = `the tree changed under ${others.join(', ')} after this attempt: ${raw} failed (exit ${code ?? 'none'})`
   const excused = { ...gate, failure: null, unverified: [...gate.unverified, { raw, reason, ran: true }] }
@@ -4046,20 +4314,23 @@ export function processReport(ctx, state, event, usage = null) {
   if (!applied.meta.planner && ctx.routing.memory && ctx.projectDir) rememberOutcome(ctx, state, applied.meta, task)
   if (applied.meta.haikuFailure && ctx.routing.learn && ctx.projectDir) {
     const file = historyPath(ctx.projectDir)
-    withLock(file, () => {
+    const written = withLock(file, (held) => {
+      if (!held) return false
       const history = noteHaikuFailure(loadHistory(file), {
         task,
         prompt: applied.meta.prompt,
         reason: applied.meta.reason,
       })
       saveHistory(file, history)
-    })
+      return true
+    }, NESTED_LOCK_WAIT_MS)
     ensureHistoryIgnored(ctx.projectDir)
-    message += `\ncc-tiers recorded a Haiku failure for ${task}. Similar tasks will start on Sonnet.`
+    if (written) message += `\ncc-tiers recorded a Haiku failure for ${task}. Similar tasks will start on Sonnet.`
   }
   if (applied.meta.sonnetEscalated && ctx.routing.learn && ctx.projectDir) {
     const file = historyPath(ctx.projectDir)
-    withLock(file, () => {
+    const written = withLock(file, (held) => {
+      if (!held) return false
       const history = noteFailure(loadHistory(file), {
         tier: 'sonnet',
         task,
@@ -4067,10 +4338,11 @@ export function processReport(ctx, state, event, usage = null) {
         reason: applied.meta.reason,
       })
       saveHistory(file, history)
-    })
+      return true
+    }, NESTED_LOCK_WAIT_MS)
     ensureHistoryIgnored(ctx.projectDir)
     const top = effortTop(ctx.routing, 'sonnet', { conserve: ctx.routing.conserve === true })
-    message += `\ncc-tiers recorded that ${task} escalated past Sonnet. Similar tasks will start on Sonnet${top ? ` at effort ${top}` : ''}.`
+    if (written) message += `\ncc-tiers recorded that ${task} escalated past Sonnet. Similar tasks will start on Sonnet${top ? ` at effort ${top}` : ''}.`
   }
   if (applied.meta.planner) return ''
   if (ctx.ccCost && task && own(state.spend, task)) {
@@ -4157,11 +4429,12 @@ function rememberOutcome(ctx, state, meta, task) {
   if (!records.length) return
   const file = memoryPath(ctx.projectDir)
   try {
-    withLock(file, () => {
+    withLock(file, (held) => {
+      if (!held) return
       let memory = loadMemory(file)
       for (const record of records) memory = addRecord(memory, record, { projectDir: ctx.projectDir }).memory
       saveMemory(file, memory)
-    })
+    }, NESTED_LOCK_WAIT_MS)
     ensureHistoryIgnored(ctx.projectDir, MEMORY_IGNORE, '# cc-tiers engineering memory, local to this checkout')
   } catch {
     // Memory is a convenience; a write that fails must not break the hook.

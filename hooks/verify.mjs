@@ -361,7 +361,8 @@ export function runCommand(cmd, { projectDir, timeoutS }) {
   const result = spawnSync(file, args, {
     cwd: path.resolve(projectDir, cmd.cwd || '.'),
     env: { ...process.env, ...(cmd.env || {}) },
-    timeout: timeoutS * 1000,
+    // spawnSync needs an integer and treats 0 as no limit.
+    timeout: Math.max(1, Math.ceil(timeoutS * 1000)),
     // SIGTERM can be trapped, and spawnSync would then wait forever.
     killSignal: 'SIGKILL',
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -685,6 +686,7 @@ export function reviewMessage(task, judged, { failed = false } = {}) {
   if (judged.discarded.length) lines.push(`${prefix} discarded ${judged.discarded.length} finding(s): the evidence command passed`)
   const demoted = judged.invalid.length + judged.discarded.length + judged.notes.length
   if (failed && !judged.blocking.length) lines.push(`${prefix} rejected without evidence; ${demoted} finding(s) became notes`)
+  if (judged.projectAllow) lines.push(`${prefix} project verifyAllow ${judged.projectAllow}`)
   if (judged.notes.length) {
     lines.push('Notes:')
     for (const note of judged.notes.slice(0, MAX_NOTES)) {
