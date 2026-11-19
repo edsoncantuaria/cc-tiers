@@ -1,3 +1,4 @@
 .claude-plugin/types/
 .claude/cc-tiers-history.json
 agent-tools/
+evals/results/
