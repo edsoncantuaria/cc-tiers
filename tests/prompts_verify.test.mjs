@@ -296,9 +296,10 @@ test('writers and reviewers pace their turns and keep the trailer for the end', 
 
 test('researcher covers a feature or behaviour and allows sources in any language', () => {
   const researcher = read('agents/researcher.md')
-  for (const needle of ['and for any feature or behaviour the task asks for', 'A task with no new library still gets step 4', 'how other projects and products solve the same feature', 'Sources may be in any language', 'A word for word quote keeps its original wording and is followed by a translation into the language the brief is written in', 'comes only from the repo: step 4 never supplies it']) {
+  for (const needle of ['and for any feature or behaviour the task asks for', 'A task with no new library still gets step 4', 'how other projects and products solve the same feature', 'Sources may be in any language', 'A word for word quote keeps its original wording and is followed by a translation into the language the brief is written in', 'comes only from the repo: step 4 never supplies it', 'Sources may be in any language, in every mode', 'A missing lock or missing docs is "not found", not a fail']) {
     assert.ok(researcher.includes(needle), `researcher mentions ${needle}`)
   }
+  assert.equal(researcher.includes('(no lock, no docs, no access)'), false, 'a missing lock is not a reason to fail')
 })
 
 test('session prompts split a large task before delegating and tell the writer its pacing', () => {

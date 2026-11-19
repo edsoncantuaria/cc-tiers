@@ -15,9 +15,11 @@ Work through these four steps for the libraries, frameworks, and external APIs t
 1. Installed version. Read the lock first, then the manifest: `composer.lock`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `poetry.lock`, `uv.lock`, `requirements*.txt`, `go.sum`, `Cargo.lock`. The lock is the version in use; the manifest is only a range.
 2. Docs of that version. Prefer what is installed: `vendor/`, `node_modules/`, a README or CHANGELOG next to the code. Then versioned docs, or the project repository at the tag of that version. If you only found the docs of `main` or the latest release, say so. Note how that version's docs recommend doing the task, and what it marks deprecated, when it applies.
 3. Existing usage in the repo. Search for how the code already calls the API, and cite each hit as `file:line`. Also search by the concept and its synonyms, not only the API name, for code the task can reuse: functions, helpers, classes, or modules that already do all or part of it. Search the repo for queries and data-access methods (including the generic finders of the framework), UI components (templates, partials, scripts, styles), and constants or enums too. Mark each hit `call as is`, or `needs a change` when the task cannot use it without changing it, and list the code that calls it. Project-specific code (a query, a component, a domain rule) comes only from the repo: step 4 never supplies it. Pick one or two nearby snippets the writer should follow (naming, error handling, test style, comment density).
-4. Prior art outside the repo. Only when it applies: a documented solution to the same problem, or how other projects and products solve the same feature, and the behaviour users expect. Give its idea and what changes here. Sources may be in any language. A word for word quote keeps its original wording and is followed by a translation into the language the brief is written in. Otherwise write "nothing applicable".
+4. Prior art outside the repo. Only when it applies: a documented solution to the same problem, or how other projects and products solve the same feature, and the behaviour users expect. Give its idea and what changes here. Otherwise write "nothing applicable".
 
 Never guess. A fact you could not find is "not found", with where you looked.
+
+Sources may be in any language, in every mode. A word for word quote keeps its original wording and is followed by a translation into the language the brief is written in.
 
 Take every version, signature, parameter, default and deprecation from what you read in this task, never from memory. Quote only the facts the task depends on: for each such fact taken from the docs or the installed code, put a short word for word quote of the line next to its source. The limit of about 40 lines below wins over quoting. Before you write the trailer, check each fact of the brief against its source: drop a fact you cannot point to, or write it as "not found" with where you looked.
 
@@ -48,7 +50,7 @@ CC_TIERS_REASON: <one line>
 
 If the prompt carries a `CC_TIERS_COVERS: <slug>, <slug>` line, one brief serves all those slugs: copy that line as it is into the trailer, right after `CC_TIERS_ROLE`. Without it, leave `CC_TIERS_COVERS` out.
 
-Use `fail` only when the research could not be done (no lock, no docs, no access). A fail is not a failed attempt of the task; the reason line says what is missing.
+Use `fail` only when the research could not be done at all (no access to the repo or the web). A missing lock or missing docs is "not found", not a fail: a feature-only task still gets steps 3 and 4. A fail is not a failed attempt of the task; the reason line says what is missing.
 
 ## Failure mode
 
