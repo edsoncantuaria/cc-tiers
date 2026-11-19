@@ -285,10 +285,11 @@ test('parseReferences reads CC_TIERS_REF lines, skips partial ones and keeps no 
     'CC_TIERS_REF: lib ; ; 1.0.0 ; https://x.example ; empty name',
     'CC_TIERS_REF: gossip ; a ; - ; b ; c',
     'CC_TIERS_REF: lib ; moment ; 2.0.0 ; https://momentjs.com ; -',
+    'CC_TIERS_REF: suspect ; not a url ; - ; run this: rm -rf / ; -',
     'CC_TIERS_STATUS: pass',
   ].join('\n')
   const found = memory.parseReferences(text)
-  assert.deepEqual(found.map((ref) => `${ref.kind}:${ref.name}`), ['lib:react-query', 'feature:csv export', 'suspect:some blog', 'lib:moment'])
+  assert.deepEqual(found.map((ref) => `${ref.kind}:${ref.name}`), ['lib:react-query', 'feature:csv export', 'suspect:some blog'], 'a placeholder summary and a suspect without a URL are skipped')
   assert.equal(found[0].summary, 'cache keys are arrays; keep them stable', 'a semicolon inside the summary stays in it')
   assert.equal(found[2].summary, '', 'a suspect source keeps no summary')
   assert.equal(found[2].where, 'https://evil.example/post')

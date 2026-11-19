@@ -57,6 +57,8 @@ export function parseReferences(text) {
     const [kind, name, version, where, ...rest] = match[1].split(/\s;\s/).map((field) => field.trim())
     const summary = rest.join(' ; ')
     if (!['lib', 'feature', 'suspect'].includes(kind) || !name || !version || !where || !summary) continue
+    // A lib or feature needs a real summary; a suspect is only ever a URL to avoid.
+    if (kind === 'suspect' ? !/^https?:\/\/\S+$/i.test(where) : summary === '-') continue
     found.push({ kind, name, version, where, summary: kind === 'suspect' ? '' : summary })
   }
   // A report is one brief; the cap keeps a page that talks the researcher into many lines from flooding the memory.
