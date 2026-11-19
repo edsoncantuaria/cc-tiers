@@ -4435,12 +4435,38 @@ function emitEvents(state, meta, task, ctx) {
 /** Manifests a 'command' memory is tied to: when one changes, the record goes stale. */
 const MANIFESTS = ['package.json', 'composer.json', 'pyproject.toml', 'go.mod', 'Cargo.toml', 'Gemfile']
 
-/** Lock files a library 'reference' is tied to, in the order the researcher reads them: the lock is the version in use. */
-const LOCKS = ['composer.lock', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'poetry.lock', 'uv.lock', 'Cargo.lock', 'go.sum']
+const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+/** A lock that names packages in `name = "x"` lines: compared as PEP 503 names (case and `-`, `_`, `.` runs do not count). */
+const hasPythonPackage = (text, name) => {
+  const normalize = (value) => value.toLowerCase().replace(/[-_.]+/g, '-')
+  return [...text.matchAll(/^name = "([^"]+)"/gm)].some((match) => normalize(match[1]) === normalize(name))
+}
+
+/** A lock that names packages in a line pattern, built from the regex-escaped name. */
+const hasPattern = (build) => (text, name) => new RegExp(build(escapeRegExp(name)), 'm').test(text)
+
+/**
+ * Lock files a library 'reference' is tied to, in the order the researcher reads them: the lock is the version in use.
+ * Each says how its lock names a package, so `ws` does not hit `jsdom`, `tows` or a URL.
+ */
+const LOCKS = {
+  'composer.lock': hasPattern((name) => `"name":\\s*"${name}"`),
+  // The v2/v3 key is `node_modules/<n>"`; the v1 form is `"<n>": {`, never a range string such as `"<n>": "^1"`.
+  'package-lock.json': hasPattern((name) => `node_modules/${name}"|"${name}":\\s*\\{`),
+  // v9 keys are indented (`  ws@8.18.0:`, quoted when scoped); v6 keys start with `/`.
+  'pnpm-lock.yaml': hasPattern((name) => `^[ \\t]*["']?/?${name}@`),
+  // An entry header at line start (quoted when scoped), or a later spec of the same entry (`a@^1, a@^2:`).
+  'yarn.lock': hasPattern((name) => `(?:^|,[ \\t]+)["']?${name}@`),
+  'poetry.lock': hasPythonPackage,
+  'uv.lock': hasPythonPackage,
+  'Cargo.lock': hasPattern((name) => `^name = "${name}"`),
+  'go.sum': hasPattern((name) => `^${name} v`),
+}
 
 /** The lock files present, each read once, so every library reference of a report can look for its name. */
 function readLocks(projectDir) {
-  return LOCKS.filter((file) => existsSync(path.join(projectDir, file))).map((file) => {
+  return Object.keys(LOCKS).filter((file) => existsSync(path.join(projectDir, file))).map((file) => {
     try {
       return { file, text: readFileSync(path.join(projectDir, file), 'utf8') }
     } catch {
@@ -4451,7 +4477,7 @@ function readLocks(projectDir) {
 
 /** The file a library reference goes stale with: the first lock that names the library, else the first lock, else the manifest. */
 function lockFor(locks, name, manifest) {
-  return (locks.find((lock) => lock.text.includes(name)) || locks[0])?.file || manifest
+  return (locks.find((lock) => LOCKS[lock.file](lock.text, name)) || locks[0])?.file || manifest
 }
 
 /**

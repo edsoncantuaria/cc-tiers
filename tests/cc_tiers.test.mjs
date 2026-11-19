@@ -4328,13 +4328,62 @@ test('a session respec in the opening heredoc uncounts the failure that named th
   }
 })
 
+test('a library reference is tied to the lock that names it by that lock format, not by substring', async () => {
+  // Each case: the lock files present, then the file the `lib` reference is expected to go stale with.
+  const cases = [
+    ['ws', { 'package-lock.json': '{"packages":{"node_modules/jsdom":{},"node_modules/tows":{}}}', 'yarn.lock': 'ws@^8.0.0:\n  version "8.0.0"\n' }, 'yarn.lock'],
+    ['ws', { 'package-lock.json': '{"packages":{"node_modules/ws":{},"node_modules/jsdom":{}}}', 'yarn.lock': 'jsdom@^1:\n' }, 'package-lock.json'],
+    ['ws', { 'composer.lock': '{"packages":[]}', 'package-lock.json': '{"packages":{"node_modules/a/node_modules/ws":{}}}' }, 'package-lock.json'],
+    ['@babel/runtime', { 'composer.lock': '{"packages":[]}', 'package-lock.json': '{"packages":{"node_modules/@babel/runtime":{}}}' }, 'package-lock.json'],
+    ['vendor/pkg', { 'composer.lock': '{"require":{"vendor/pkg":"^1"},"packages":[]}', 'yarn.lock': '"vendor/pkg@^1":\n' }, 'yarn.lock'],
+    ['vendor/pkg', { 'package-lock.json': '{"packages":{}}', 'composer.lock': '{"packages":[{\n    "name": "vendor/pkg",\n    "version": "1.0.0"}]}' }, 'composer.lock'],
+    ['@ungap/promise-all-settled', { 'composer.lock': '{"packages":[]}', 'yarn.lock': '# yarn lockfile v1\n\n"@ungap/promise-all-settled@1.1.2":\n  version "1.1.2"\n' }, 'yarn.lock'],
+    ['align-text', { 'composer.lock': '{"packages":[]}', 'yarn.lock': 'other@^1, align-text@^0.1.1:\n  version "0.1.3"\n' }, 'yarn.lock'],
+    ['ws', { 'composer.lock': '{"packages":[]}', 'yarn.lock': 'jsdom@^1:\n  dependencies:\n    tows@^1\n  ws "^8"\n' }, 'composer.lock'],
+    ['libc', { 'composer.lock': '{"packages":[]}', 'Cargo.lock': '[[package]]\nname = "libc"\nversion = "0.2.183"\n' }, 'Cargo.lock'],
+    ['libc', { 'composer.lock': '{"packages":[]}', 'Cargo.lock': '[[package]]\nname = "liblibc"\nversion = "1"\n' }, 'composer.lock'],
+    ['connectrpc.com/connect', { 'composer.lock': '{"packages":[]}', 'go.sum': 'connectrpc.com/connect v1.19.1 h1:abc=\n' }, 'go.sum'],
+    ['connect', { 'composer.lock': '{"packages":[]}', 'go.sum': 'connectrpc.com/connect v1.19.1 h1:abc=\n' }, 'composer.lock'],
+    ['aiohttp', { 'composer.lock': '{"packages":[]}', 'uv.lock': '[[package]]\nname = "aiohttp"\nversion = "3.12.12"\n' }, 'uv.lock'],
+    // npm v1 lists packages under "dependencies": an object value names one, a range string (`"ws": "^8"`) does not.
+    ['ws', { 'composer.lock': '{"packages":[]}', 'package-lock.json': '{"lockfileVersion":1,"dependencies":{"jsdom":{"version":"1.0.0","requires":{"ws":"^8"}},"ws":{"version":"8.0.0"}}}' }, 'package-lock.json'],
+    ['ws', { 'package-lock.json': '{"lockfileVersion":1,"dependencies":{"jsdom":{"version":"1.0.0","requires":{"ws":"^8"}}}}', 'yarn.lock': 'ws@^8:\n  version "8.0.0"\n' }, 'yarn.lock'],
+    // pnpm v9 keys are indented, quoted when scoped; v6 keys start with `/`.
+    ['ws', { 'composer.lock': '{"packages":[]}', 'pnpm-lock.yaml': "lockfileVersion: '9.0'\n\npackages:\n\n  ws@8.18.0:\n    resolution: {integrity: sha512-abc}\n" }, 'pnpm-lock.yaml'],
+    ['@babel/code-frame', { 'composer.lock': '{"packages":[]}', 'pnpm-lock.yaml': "lockfileVersion: '9.0'\n\npackages:\n\n  '@babel/code-frame@7.29.0':\n    resolution: {integrity: sha512-abc}\n" }, 'pnpm-lock.yaml'],
+    ['ws', { 'composer.lock': '{"packages":[]}', 'pnpm-lock.yaml': "lockfileVersion: '6.0'\n\npackages:\n\n  /ws@8.18.0:\n    resolution: {integrity: sha512-abc}\n" }, 'pnpm-lock.yaml'],
+    ['ws', { 'pnpm-lock.yaml': "packages:\n  tows@1.0.0:\n  jsdom@1.0.0:\n    dependencies:\n      ws: 8.0.0\n", 'yarn.lock': 'ws@^8:\n' }, 'yarn.lock'],
+    // Python locks store normalized names; a name written another way still finds them.
+    ['pyyaml', { 'composer.lock': '{"packages":[]}', 'poetry.lock': '[[package]]\nname = "PyYAML"\nversion = "6.0"\n' }, 'poetry.lock'],
+    ['pydantic-core', { 'composer.lock': '{"packages":[]}', 'poetry.lock': '[[package]]\nname = "pydantic_core"\nversion = "2.0"\n' }, 'poetry.lock'],
+    ['pydantic_core', { 'composer.lock': '{"packages":[]}', 'uv.lock': '[[package]]\nname = "pydantic-core"\nversion = "2.0"\n' }, 'uv.lock'],
+    ['PyYAML', { 'composer.lock': '{"packages":[]}', 'uv.lock': '[[package]]\nname = "pyyaml"\nversion = "6.0"\n' }, 'uv.lock'],
+    ['pydantic', { 'composer.lock': '{"packages":[]}', 'uv.lock': '[[package]]\nname = "pydantic-core"\nversion = "2.0"\n' }, 'composer.lock'],
+  ]
+  for (const [name, locks, expected] of cases) {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-lock-'))
+    try {
+      writeFileSync(path.join(dir, 'package.json'), '{}')
+      for (const [file, text] of Object.entries(locks)) writeFileSync(path.join(dir, file), text)
+      const ctx = { routing: riskyRouting(), ccCost: false, projectDir: dir }
+      const prompt = 'CC_TIERS_TASK: lock\nResearch it.'
+      const report = `brief\nCC_TIERS_REF: lib ; ${name} ; 1.0.0 ; docs ; summary\nCC_TIERS_STATUS: pass`
+      tiers.processReport(ctx, tiers.emptyState('s'), tiers.normalizeEvent(event('r1', 'researcher', report, prompt)))
+      const record = memory.loadMemory(memory.memoryPath(dir)).records.find((item) => item.category === 'reference')
+      assert.equal(record.validWhile.file, expected, `${name} in ${Object.keys(locks).join(', ')}`)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  }
+})
+
 test('a researcher report saves its references, and the next researcher gets them, until the lock changes', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-ref-'))
   try {
     writeFileSync(path.join(dir, 'package.json'), '{}')
     // composer.lock comes first in the list but does not name the library, so the npm lock that does is the one it is tied to.
     writeFileSync(path.join(dir, 'composer.lock'), '{"packages":[]}')
-    writeFileSync(path.join(dir, 'package-lock.json'), '{"lock":1,"react-query":"5.0.0"}')
+    writeFileSync(path.join(dir, 'package-lock.json'), '{"lockfileVersion":3,"packages":{"node_modules/react-query":{"version":"5.0.0"}}}')
     const routing = riskyRouting()
     const ctx = { routing, ccCost: false, projectDir: dir }
     const file = memory.memoryPath(dir)
@@ -4381,7 +4430,7 @@ test('a researcher report saves its references, and the next researcher gets the
     assert.match(writer.input.prompt, /\[warning, hypothesis, low\] react query cache keys must stay stable/)
     assert.doesNotMatch(writer.input.prompt, /\[reference,/)
 
-    writeFileSync(path.join(dir, 'package-lock.json'), '{"lock":2,"react-query":"5.0.1"}')
+    writeFileSync(path.join(dir, 'package-lock.json'), '{"lockfileVersion":3,"packages":{"node_modules/react-query":{"version":"5.0.1"}}}')
     assert.equal(researcher('Research react query cache keys for the orders list.').input, null, 'a changed lock makes the library reference stale')
     assert.match(tiers.policyLines(routing).join('\n'), /the researcher gets matching reference notes/)
   } finally {
