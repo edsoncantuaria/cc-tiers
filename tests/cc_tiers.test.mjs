@@ -774,6 +774,84 @@ test('a resume row read in the same scan as the hand-back row leaves the agent r
   }
 })
 
+test('a resumed session stops the background agents of the earlier process, a compacted one keeps them, and a SendMessage resume runs one again', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const now = Date.now()
+    const reviewPrompt = 'CC_TIERS_TASK: users-pagination\nCC_TIERS_ROLE: reviewer\nReview it.'
+    const writerPrompt = 'CC_TIERS_TASK: billing\nCC_TIERS_ROLE: implementer\nWork.'
+    const parked = [{ id: 'row:p1', role: 'orchestrator', parkedAt: now, text: 'CC_TIERS_TASK: csv-export\nCC_TIERS_STATUS: pass' }]
+    const resumedReviewer = { role: 'reviewer', prompt: reviewPrompt, at: now - 5000, stops: 1, stoppedAt: now - 4000, resumedAt: now - 1000, task: 'users-pagination', reviews: 0 }
+    const seed = {
+      ...tiers.emptyState('s'),
+      active: { billing: { role: 'implementer', files: ['src/a.js'], at: now } },
+      background: { 'agent-r': resumedReviewer, 'agent-w': { role: 'implementer', prompt: writerPrompt, at: now - 5000 } },
+      finished: { 'agent-f': { ...resumedReviewer, task: undefined, reviews: undefined } },
+    }
+    const ctxFor = (name) => ({ routing: defaultRouting({ verify: 'off' }), file: path.join(dir, `${name}.json`), sessionId: 's', env: {}, projectDir: '', ccCost: false })
+    const start = (ctx, payload) =>
+      tiers.withSession(ctx, { hook_event_name: 'SessionStart', ...payload }, (state) => {
+        tiers.releaseIdleWriters(state)
+        return { held: tiers.holdParked(state, parked).gate.length === 0, asks: tiers.reviewVerdictAsks(state).asks, slot: Boolean(state.active.billing), counted: [state.tasks, state.log, state.seen, state.awaiting].map((item) => Object.keys(item).length) }
+      })
+    const compactCtx = ctxFor('compact')
+    writeFileSync(compactCtx.file, JSON.stringify(seed))
+    const kept = start(compactCtx, { source: 'compact' })
+    assert.deepEqual({ held: kept.held, asks: kept.asks, slot: kept.slot }, { held: true, asks: [], slot: true }, 'compaction keeps the process, so its agents still run')
+
+    const ctx = ctxFor('resume')
+    writeFileSync(ctx.file, JSON.stringify(seed))
+    const resumed = start(ctx, { source: 'resume' })
+    assert.equal(resumed.held, false, 'a review of the earlier process no longer holds the parked checks')
+    assert.equal(resumed.slot, false, 'a dead background writer no longer keeps its slot')
+    assert.equal(resumed.asks.length, 1)
+    assert.match(resumed.asks[0], /review of users-pagination by agent agent-r still has no verdict/)
+    assert.deepEqual(resumed.counted, [0, 0, 0, 0], 'no report or attempt was counted')
+
+    // The agent is asked with SendMessage after the resume: it runs again until it stops.
+    const transcript = path.join(dir, 'main.jsonl')
+    const row = (agent, at) => JSON.stringify({ type: 'user', uuid: `r-${agent}`, timestamp: new Date(at).toISOString(), message: { role: 'user', content: [] }, toolUseResult: { success: true, resumedAgentId: agent } })
+    writeFileSync(transcript, `${row('agent-r', Date.now() + 1000)}\n${row('agent-f', Date.now() + 1000)}\n`)
+    const again = tiers.withSession(ctx, { hook_event_name: 'UserPromptSubmit', transcript_path: transcript }, (state) => tiers.holdParked(state, parked))
+    assert.deepEqual(again.gate, [], 'the resumed reviewer holds the parked pass again')
+    assert.match(again.notes[0], /a review \(agent-r, agent-f\) is still running/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a review resumed after a new attempt was parked: its hand-back row carries the resume and the attempt written before it is parked by then', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const base = Date.now() - 60 * 1000
+    const stamp = (second) => new Date(base + second * 1000).toISOString()
+    const reviewPrompt = 'CC_TIERS_TASK: users-pagination\nCC_TIERS_ROLE: reviewer\nReview it.'
+    const verdict = 'CC_TIERS_TASK: users-pagination\nCC_TIERS_TIER: opus\nCC_TIERS_ROLE: reviewer\nCC_TIERS_STATUS: pass\nCC_TIERS_REASON: fixed'
+    const handback = JSON.stringify({ type: 'user', isMeta: true, isSidechain: false, uuid: 'h-r', timestamp: stamp(30), origin: { kind: 'peer', from: 'agent-r', handback: true, handbackReportText: verdict }, message: { role: 'user', content: [] } })
+    const resume = JSON.stringify({ type: 'user', uuid: 'r-r', timestamp: stamp(20), message: { role: 'user', content: [] }, toolUseResult: { success: true, resumedAgentId: 'agent-r' } })
+    const transcript = path.join(dir, 'main.jsonl')
+    // The orchestrator closed a new attempt, then asked the reviewer again: no hook ran in between, so one scan reads all three rows.
+    const rows = [assistantRow('claude-opus-4-5', { input_tokens: 1 }, [attempt(ATTEMPT_CLOSE)], { id: 'm-a2', uuid: 'u-a2' }), resume, handback]
+    writeFileSync(transcript, `${rows.join('\n')}\n`)
+    const ctx = { routing: defaultRouting({}), file: path.join(dir, 's.json'), sessionId: 's', env: {}, projectDir: '', ccCost: false }
+    const rejected = { tier: 'opus', failures: ['opus/reviewer: x'], carried: [], rejected: true, judged: ['row:u-old'] }
+    writeFileSync(ctx.file, JSON.stringify({ ...tiers.emptyState('s'), tasks: { 'users-pagination': rejected }, finished: { 'agent-r': { role: 'reviewer', prompt: reviewPrompt, at: base, stops: 1, stoppedAt: base + 5000 } } }))
+    const parked = tiers.withSession(ctx, { transcript_path: transcript }, (state) => tiers.peekAwaiting(state))
+    assert.deepEqual(parked.map((item) => item.id), ['row:u-a2', 'agent:agent-r:1'])
+    assert.equal(parked[0].parkedAt, base + 20 * 1000, 'the attempt precedes the resume row, so it was parked by then')
+    assert.equal(parked[1].resumedAt, base + 20 * 1000)
+
+    // The review is counted before the attempt: it judges the new attempt, so its pass does not meet the old rejection.
+    const message = tiers.withSession(ctx, { transcript_path: transcript }, (state) => tiers.countParked(ctx, state, tiers.prepareParked(ctx, parked, {})[1]))
+    assert.doesNotMatch(message, /already rejected/)
+    const task = tiers.loadState(ctx.file, 's').tasks['users-pagination']
+    assert.equal(task.rejected, undefined, 'the new attempt it judged clears the rejection')
+    assert.deepEqual(task.reviewPassed, ['row:u-a2'])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('a Bash command or an Agent prompt without the attempt marker is not a trailer', () => {
   const closing = `${ATTEMPT_CLOSE}\nCC_TIERS_FILES: a.js`
   const bash = (command) => ({ type: 'tool_use', name: 'Bash', input: { command } })

@@ -430,6 +430,24 @@ test('final-gate: a pass launched before the rejection was counted does not clea
     assert.equal(state.tasks['final-gate'], undefined, 'a pass launched after the rejection finishes it')
   }))
 
+test('final-gate: a reviewer launched before the rejection but resumed after it is a fresh look, so its pass finishes the task', () =>
+  inTemp(async (dir) => {
+    writeFileSync(path.join(dir, 'ok.mjs'), 'process.exit(1)\n')
+    const routing = finalRouting()
+    const state = tiers.emptyState('s')
+    delegate(state, routing, 'reviewer', finalPrompt())
+    report(dir, routing, state, 'g1', 'reviewer', trailer('final-gate', 'pass'), finalPrompt())
+    const { rejectedAt } = state.tasks['final-gate']
+    writeFileSync(path.join(dir, 'ok.mjs'), 'process.exit(0)\n')
+    const ctx = { routing, ccCost: false, projectDir: dir }
+    const stop = (entry) => tiers.processReport(ctx, state, tiers.prepareReport(ctx, tiers.agentReport('agent-g', entry, trailer('final-gate', 'pass'))))
+    const launched = { role: 'reviewer', prompt: finalPrompt(), at: rejectedAt - 1000, stops: 1, stoppedAt: rejectedAt - 500 }
+    assert.match(stop(launched), /another review of this writer attempt already rejected it/, 'never resumed: it saw the rejected diff')
+    assert.equal(state.tasks['final-gate'].rejected, true)
+    assert.match(stop({ ...launched, stops: 2, resumedAt: rejectedAt + 1000 }), /cc-tiers completion: final-gate/)
+    assert.equal(state.tasks['final-gate'], undefined)
+  }))
+
 test('final-gate: a passing review after a final-gate rejection finishes the task', () =>
   inTemp(async (dir) => {
     writeFileSync(path.join(dir, 'ok.mjs'), 'process.exit(0)\n')

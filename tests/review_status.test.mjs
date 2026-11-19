@@ -260,6 +260,64 @@ function backgroundReview(dir, { prompt, handback, last = '', stopActive = false
 
 const REVIEW_PROMPT = 'CC_TIERS_TASK: users-pagination\nCC_TIERS_TIER: sonnet\nCC_TIERS_ROLE: reviewer\nReview the diff.'
 
+test('a reviewer resumed by SendMessage after a new attempt, passing at its SubagentStop, judges that attempt and the task finishes', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-status-'))
+  try {
+    const env = { ...hookEnv(dir), CLAUDE_PLUGIN_OPTION_REVIEW_POLICY: 'always' }
+    const transcript = path.join(dir, 'main.jsonl')
+    writeFileSync(transcript, '')
+    recordWriter(dir)
+    launchAgent(env, 'agent-v', 'reviewer', REVIEW_PROMPT)
+    const rejected = stopAgent(dir, env, 'agent-v', 'reviewer', 'v1', { handback: `${finding()}\n${trailer('reviewer', 'fail')}` })
+    assert.equal(rejected.tasks['users-pagination'].rejected, true)
+    // The orchestrator closes a new attempt and asks the reviewer again; no hook runs between, so the stop scans both rows.
+    const attemptText = 'CC_TIERS_TASK: users-pagination\nCC_TIERS_TIER: opus\nCC_TIERS_ROLE: orchestrator\nCC_TIERS_VERIFY: none - x\nCC_TIERS_STATUS: pass\nCC_TIERS_REASON: fixed the finding'
+    const resume = JSON.stringify({ type: 'user', uuid: 'r-v', timestamp: new Date().toISOString(), message: { role: 'user', content: [] }, toolUseResult: { success: true, resumedAgentId: 'agent-v' } })
+    const heredoc = { type: 'tool_use', name: 'Bash', input: { command: `cat <<'CC_TIERS_ATTEMPT'\n${attemptText}\nCC_TIERS_ATTEMPT` } }
+    appendRows(transcript, assistantRow([heredoc], 'm-a2'), resume)
+    const file = path.join(dir, 'v2.jsonl')
+    writeFileSync(file, [assistantRow([HANDBACK(trailer('reviewer', 'pass'))], 'm-v2'), HANDBACK_RESULT].join('\n'))
+    const stop = run('subagent_stop.mjs', { ...stopPayload('agent-v', file), agent_type: 'cc-tiers:reviewer', transcript_path: transcript }, env)
+    assert.equal(stop.status, 0, stop.stderr)
+    const reviewed = sessionState(dir)
+    assert.equal(reviewed.tasks['users-pagination'].rejected, undefined, 'the pass judged the new attempt, so the old rejection no longer sticks')
+    assert.equal(reviewed.tasks['users-pagination'].failures.length, 1, 'no second failure')
+    assert.doesNotMatch(reviewed.pending.join('\n'), /already rejected/)
+    assert.equal(reviewed.awaiting.length, 1, 'the new attempt waits for its gate at Stop')
+    endTurn(env, transcript)
+    const finished = sessionState(dir)
+    assert.equal(finished.tasks['users-pagination'], undefined)
+    assert.equal(finished.log['users-pagination'].status, 'done')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a session resumed with the earlier process dead stops its background agents, and a compacted one keeps them', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-status-'))
+  try {
+    const env = hookEnv(dir)
+    const transcript = path.join(dir, 'main.jsonl')
+    writeFileSync(transcript, '')
+    recordWriter(dir)
+    launchAgent(env, 'agent-v', 'reviewer', REVIEW_PROMPT)
+    const parked = [{ id: 'row:p1', role: 'orchestrator', parkedAt: Date.now(), text: 'CC_TIERS_TASK: csv-export\nCC_TIERS_STATUS: pass' }]
+    const held = () => tiers.holdParked(sessionState(dir), parked).gate.length === 0
+    const start = (source) => {
+      const proc = run('session_start.mjs', { session_id: 'sess-1', hook_event_name: 'SessionStart', source, transcript_path: transcript }, env)
+      assert.equal(proc.status, 0, proc.stderr)
+    }
+    assert.equal(held(), true, 'the launched reviewer runs')
+    start('compact')
+    assert.equal(held(), true, 'compaction keeps the process and its agents')
+    start('resume')
+    assert.equal(held(), false, 'the reviewer died with the earlier process')
+    assert.equal(sessionState(dir).tasks['users-pagination'], undefined, 'nothing was counted for it')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('a background reviewer rejection delivered through SubagentHandback is counted', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-status-'))
   try {
@@ -1444,6 +1502,35 @@ test('a pass from another review of the judged attempt still does not clear its 
   assert.deepEqual(state.tasks['users-pagination'].judged, ['row:a1'])
   assert.equal(state.tasks['users-pagination'].reviewPassed, undefined)
   assert.equal(state.awaiting.length, 2)
+})
+
+test('a review resumed after a new attempt was parked judges it, so its pass clears the rejection of the attempt before', () => {
+  const routing = routingWith({ review_policy: 'always' })
+  const state = tiers.emptyState('s')
+  state.awaiting = [parkedAttempt('row:a1', 'first', 100), parkedAttempt('row:a2', 'fixed after the rejection', 300)]
+  countReview(state, routing, 'R1', 'reject', 200)
+  assert.deepEqual(state.tasks['users-pagination'].judged, ['row:a1'])
+  // Resumed before the new attempt was parked, it did not see it; resumed after, it did.
+  const early = countReview(state, routing, 'R1', 'pass', 200, { id: 'agent:R1:1', resumedAt: 250 })
+  assert.match(early.message, /another review of this writer attempt already rejected it/)
+  assert.equal(state.tasks['users-pagination'].rejected, true)
+  const late = countReview(state, routing, 'R1', 'pass', 200, { id: 'agent:R1:2', resumedAt: 400 })
+  assert.doesNotMatch(late.message, /already rejected/)
+  assert.equal(state.tasks['users-pagination'].rejected, undefined)
+  assert.ok(state.tasks['users-pagination'].reviewPassed.includes('row:a2'), 'the new attempt is judged: Stop counts it on its own gate')
+})
+
+test('a review resumed with no new attempt in between still does not clear the rejection it made', () => {
+  const routing = routingWith({ review_policy: 'always' })
+  const state = tiers.emptyState('s')
+  state.awaiting = [parkedAttempt('row:a1', 'first', 100)]
+  countReview(state, routing, 'R1', 'reject', 200)
+  const resumed = countReview(state, routing, 'R1', 'pass', 200, { id: 'agent:R1:1', resumedAt: 400 })
+  assert.equal(resumed.meta.outcome, 'retry')
+  assert.equal(resumed.meta.stillRejected, true)
+  assert.match(resumed.message, /another review of this writer attempt already rejected it/)
+  assert.equal(state.tasks['users-pagination'].rejected, true)
+  assert.equal(state.tasks['users-pagination'].failures.length, 1)
 })
 
 test('a review with no launch time judges every parked attempt of the task', () => {

@@ -1080,6 +1080,9 @@ function launchTime(event) {
   return Number(event.launchedAt) || Date.now() - (Number(event.durationMs) || 0)
 }
 
+/** When a review began judging what it reports on: its launch, or its last SendMessage resume when later; the agent's own launch time (`at`) stays the first. */
+const reviewTime = (event) => Math.max(launchTime(event), Number(event.resumedAt) || 0)
+
 /**
  * A background writer's pass that arrives after the task finished on a review launched after this writer:
  * that review already saw the work, so the late report must not reopen it.
@@ -1661,7 +1664,7 @@ export function applyEvent(state, event, routing) {
   let current = own(tasks, task)
   if (!current || typeof current !== 'object') current = { tier, failures: [], carried: [] }
   // final-gate has no writer attempt to supersede its rejection, so a passing review launched after it is a fresh look at the diff; one launched before it saw the rejected diff.
-  if (current.rejected && (!REVIEW_ROLES.has(role) || (task === FINAL_GATE && status === 'pass' && launchTime(event) > (current.rejectedAt || 0)))) {
+  if (current.rejected && (!REVIEW_ROLES.has(role) || (task === FINAL_GATE && status === 'pass' && reviewTime(event) > (current.rejectedAt || 0)))) {
     // The session's own pass, parked until Stop, of the attempt a review already rejected: it is that attempt, not a new one.
     if (id && (current.judged || []).includes(id)) {
       meta.tier = tier
@@ -1752,7 +1755,7 @@ export function applyEvent(state, event, routing) {
   let message
   if (REVIEW_ROLES.has(role)) {
     // The writer attempts parked before this review started are the ones it saw; with no launch time, every parked one counts.
-    const launched = Number(event.launchedAt) > 0 || Number(event.durationMs) > 0 ? launchTime(event) : 0
+    const launched = Number(event.launchedAt) > 0 || Number(event.durationMs) > 0 ? reviewTime(event) : 0
     const attempts = parkedFor(state, task, id, launched)
     // An attempt the rejection did not judge is a new one: this review is of it, so the rejection of the attempt before no longer sticks.
     // Its judged attempts stay: a review that covers them must not let the gate of one count a second failure.
@@ -3264,7 +3267,7 @@ function foldRow(row, line, cursor, sink, routing = null) {
     return
   }
   const resumed = row.toolUseResult?.resumedAgentId
-  if (row.type === 'user' && typeof resumed === 'string' && resumed) sink.resumed.push({ agent: resumed, at: rowTime(row) })
+  if (row.type === 'user' && typeof resumed === 'string' && resumed) sink.resumed.push({ agent: resumed, at: rowTime(row), after: sink.reports.length })
   if (row.type !== 'assistant') return
   const message = row.message && typeof row.message === 'object' ? row.message : {}
   const reportId = `row:${row.uuid || lineId(line)}`
@@ -3691,7 +3694,7 @@ export function withSession(ctx, payload, fn) {
     }
     const budget = budgetDecision(collectLimits({ payload, cursor: state.cursor, env: ctx.env }), ctx.routing)
     ctx.routing.conserve = budget.conserve
-    for (const report of scan.reports) {
+    for (const [index, report] of scan.reports.entries()) {
       if (report.opening) {
         holdOpening(ctx, state, report)
         continue
@@ -3702,12 +3705,13 @@ export function withSession(ctx, payload, fn) {
       }
       const role = report.role || 'orchestrator'
       if (ctx.routing.verify && (parseHeaders(report.text).STATUS || '').toLowerCase() === 'pass') {
-        parkReport(state, { id: report.id, role, text: report.text })
+        parkReport(state, { id: report.id, role, text: report.text }, parkedBeforeResume(scan.resumed, index))
         continue
       }
       const message = processReport(ctx, state, { kind: 'report', id: report.id, role, prompt: '', text: report.text })
       if (message) queueMessage(state, message)
     }
+    if (payload.hook_event_name === 'SessionStart' && payload.source === 'resume') stopOrphanedAgents(state)
     const result = fn(state, { budget })
     if (held) {
       flushEvents(ctx, state)
@@ -4073,11 +4077,14 @@ function prepareReview(routing, event, status, projectDir, budgetS, lock = null,
   return { ...event, judged }
 }
 
-function parkReport(state, report) {
+function parkReport(state, report, parkedAt = Date.now()) {
   const awaiting = state.awaiting || []
   if (awaiting.some((item) => item.id === report.id) || (state.seen || []).includes(report.id)) return
-  state.awaiting = [...awaiting, { ...report, parkedAt: Date.now() }].slice(-MAX_PENDING)
+  state.awaiting = [...awaiting, { ...report, parkedAt }].slice(-MAX_PENDING)
 }
+
+/** A report that precedes a SendMessage resume row of the same scan was parked by then, though the hook reads both only now: the resumed review saw it. */
+const parkedBeforeResume = (resumed, index) => Math.min(Date.now(), ...resumed.filter((row) => row.after > index).map((row) => row.at))
 
 const reportToken = (via, text) => `${via}:${lineId(String(text).replace(/\s+/g, ' ').trim())}`
 
@@ -4138,9 +4145,20 @@ export function agentReport(agentId, entry, text) {
     role: entry.role,
     prompt: entry.prompt || '',
     launchedAt: entry.at,
+    resumedAt: entry.resumedAt,
     asks: entry.asks,
     text,
     error: '',
+  }
+}
+
+/** The agents of the process a resumed session replaces died with it, with no SubagentStop: they stop now, with no report or attempt counted. A later SendMessage resume runs them again. */
+export function stopOrphanedAgents(state) {
+  const now = Date.now()
+  for (const launch of [...Object.values(state.background || {}), ...Object.values(state.finished || {})]) {
+    if (!agentRuns(launch)) continue
+    launch.stops = Math.max(1, Number(launch.stops) || 0)
+    launch.stoppedAt = now
   }
 }
 
@@ -4184,7 +4202,8 @@ function countHandback(ctx, state, row) {
   const entry = agentEntry(state, row.agent_id)
   const status = (parseHeaders(row.text).STATUS || '').toLowerCase()
   if (!entry?.role || (status !== 'pass' && status !== 'fail') || claimTwin(state, row.agent_id, 'row', row.text)) return
-  const event = { ...agentReport(row.agent_id, entry, row.text), reportedAt: row.at }
+  // A resume the scan read after this row is of the run that follows it, not of this report's.
+  const event = { ...agentReport(row.agent_id, entry, row.text), reportedAt: row.at, resumedAt: Number(entry.resumedAt) <= row.at ? entry.resumedAt : undefined }
   if (entry.role !== 'researcher') {
     // Stamped now: the task may be released from state.active before Stop weighs this report against the others.
     const task = slug({ ...parseHeaders(event.prompt), ...parseHeaders(event.text) }.TASK || '')
