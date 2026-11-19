@@ -2031,6 +2031,62 @@ test('the effort ladder can be turned off or replaced by the project', () => {
   assert.ok(text.includes('Classifier: haiku'))
 })
 
+test('review roles and the planner follow the first rung of their ladder', () => {
+  const project = (effort, user = {}) =>
+    tiers.mergeRouting(tiers.loadJson(path.join(ROOT, 'config/routing.default.json')), { effort }, user)
+  const call = (routing, agent, extra = {}) =>
+    tiers.checkDelegation(tiers.emptyState('s'), { subagent_type: `cc-tiers:${agent}`, prompt: `${HEADER('users-pagination', 'opus', agent)}Review the diff.`, ...extra }, routing)
+
+  const lowered = project({ opus: ['medium', 'xhigh'], sonnet: ['low', 'high'] })
+  for (const agent of ['reviewer', 'planner']) {
+    const run = call(lowered, agent)
+    assert.equal(run.deny, '')
+    assert.equal(run.input.effort, 'medium')
+    assert.ok(run.context.includes(`cc-tiers set effort medium for cc-tiers:${agent}`))
+  }
+  assert.equal(call(lowered, 'checker').input.effort, 'low')
+  assert.ok(call(lowered, 'reviewer').input.prompt.includes('Review the diff.'))
+
+  const raised = project({ opus: ['xhigh', 'max'] })
+  assert.equal(call(raised, 'reviewer').input.effort, 'xhigh')
+  assert.equal(call(raised, 'checker').input, null)
+
+  // No project ladder leaves every review role at its file's effort.
+  const shipped = project({})
+  for (const agent of ['reviewer', 'planner', 'checker']) assert.equal(call(shipped, agent).input, null)
+  assert.equal(call(shipped, 'reviewer', { effort: 'max' }).input, null)
+  assert.deepEqual(shipped.effort.projectLadders, [])
+  assert.deepEqual(project({ sonnet: ['low', 'high'], opus: ['bogus'] }).effort.projectLadders, ['sonnet'])
+
+  // A project ladder equal to the shipped one still sets the role: the checker's file says medium, the ladder says high.
+  const matching = project({ sonnet: ['high', 'xhigh'] })
+  assert.equal(call(matching, 'checker').input.effort, 'high')
+  assert.equal(call(project({ sonnet: ['high', 'max'] }), 'checker').input.effort, 'high')
+  assert.equal(call(matching, 'reviewer').input, null)
+
+  // A project first rung equal to the agent file's effort changes nothing: the reviewer and planner files say high, the checker's medium.
+  const same = project({ opus: ['high', 'xhigh'], sonnet: ['medium', 'high'] })
+  for (const agent of ['reviewer', 'planner', 'checker']) assert.equal(call(same, agent).input, null)
+
+  // A higher level the call asks for is kept, up to the top of the ladder; a lower one is raised.
+  assert.equal(call(lowered, 'reviewer', { effort: 'high' }).input, null)
+  assert.equal(call(lowered, 'reviewer', { effort: 'low' }).input.effort, 'medium')
+  assert.equal(call(lowered, 'reviewer', { effort: 'max' }).input.effort, 'xhigh')
+
+  // Conserve mode caps at conserveCap, but never below the first rung.
+  const conserving = project({ opus: ['medium', 'xhigh'], conserveCap: 'medium' })
+  conserving.conserve = true
+  assert.equal(call(conserving, 'reviewer').input.effort, 'medium')
+  assert.equal(call(conserving, 'reviewer', { effort: 'xhigh' }).input.effort, 'medium')
+
+  const off = project({ opus: ['medium', 'xhigh'], sonnet: ['low', 'high'] }, { effort_ladder: 'off' })
+  for (const agent of ['reviewer', 'planner', 'checker']) assert.equal(call(off, agent).input, null)
+
+  const refused = call(lowered, 'reviewer', { model: 'opus' })
+  assert.ok(refused.deny.includes('do not pass model'))
+  assert.equal(refused.input, null)
+})
+
 test('the complexity score keeps multi-step work off Haiku', () => {
   const routing = defaultRouting()
   assert.deepEqual(tiers.assessComplexity('Rename fetchUser to loadUser in api.ts', routing).score, 0)

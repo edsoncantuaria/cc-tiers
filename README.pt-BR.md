@@ -293,7 +293,7 @@ Cada nível também tem uma escada de effort. Uma nova tentativa no mesmo nível
 
 O hook PreToolUse define o `effort` na chamada Agent (o `effort` por chamada do Claude Code, 2.1.292+), então o orquestrador não tem como esquecer. Ele pode pedir um nível mais alto, nunca um mais baixo, e nunca acima do topo da escada. Uma tarefa arriscada, que bate numa palavra-chave de revisão, começa um nível acima: no Sonnet (`hard_start: sonnet`, economizando, ou quando a palavra-chave é só texto e todo arquivo citado é comum) em `xhigh`, e no `cc-tiers:architect` também em `xhigh`. Enquanto o orçamento está economizando, o effort para em `high`. Quando o orquestrador Opus implementa o teto ele mesmo, ele mantém o effort da própria sessão. `CLAUDE_CODE_EFFORT_LEVEL`, quando definido, ganha de tudo isso.
 
-`effort_ladder: off` deixa cada agente no effort que o arquivo dele fixa. Um projeto pode trocar uma escada em `.claude/cc-tiers.json` com `effort.haiku`, `effort.sonnet`, `effort.opus` e `effort.conserveCap`.
+`effort_ladder: off` deixa cada agente no effort que o arquivo dele fixa. Um projeto pode trocar uma escada em `.claude/cc-tiers.json` com `effort.haiku`, `effort.sonnet`, `effort.opus` e `effort.conserveCap`. O revisor e o planner rodam no primeiro degrau da escada do opus, e o checker no primeiro da escada do sonnet, só quando uma escada do projeto (`.claude/cc-tiers.json`) define aquele modelo; sem ela mantêm o effort que o arquivo do agente fixa (revisor e planner `high`, checker `medium`).
 
 ---
 

@@ -357,12 +357,16 @@ export function mergeRouting(defaults, project = null, user = null) {
   const effortIn = defaults.effort && typeof defaults.effort === 'object' ? defaults.effort : {}
   const effortProject = source.effort && typeof source.effort === 'object' && !Array.isArray(source.effort) ? source.effort : {}
   const ladders = {}
+  const projectLadders = []
   for (const tier of TIERS) {
     ladders[tier] = ladderList(effortIn[tier]) || [...DEFAULT_LADDERS[tier]]
     if (tier in effortProject) {
       const replaced = ladderList(effortProject[tier])
       if (replaced == null) notes.push(`Ignored effort.${tier} in the project file; it must list ${EFFORTS.join(', ')} levels that never go down.`)
-      else ladders[tier] = replaced
+      else {
+        ladders[tier] = replaced
+        projectLadders.push(tier)
+      }
     }
   }
   const conserveCap = parseEffort(effortProject.conserveCap) || parseEffort(effortIn.conserveCap) || 'high'
@@ -425,7 +429,7 @@ export function mergeRouting(defaults, project = null, user = null) {
     budget5h,
     budget7d,
     escalation: [...TIERS],
-    effort: { on: effortOn, ladders, conserveCap },
+    effort: { on: effortOn, ladders, conserveCap, projectLadders },
     classifier,
     light,
     hardStart,
@@ -2292,7 +2296,7 @@ export function checkDelegation(state, toolInput, routing, { history = null, pro
         'Call it again without the model argument.',
     )
   }
-  if (role === 'planner') return pass
+  if (role === 'planner') return withReviewEffort(pass, input, reviewEffort(routing, role, input.effort))
   const prompt = String(input.prompt || '')
   const headers = parseHeaders(prompt)
   const task = slug(headers.TASK || '')
@@ -2312,7 +2316,9 @@ export function checkDelegation(state, toolInput, routing, { history = null, pro
   if (role === 'checker' && own(state.evidence, task)?.preexisting) {
     return refuse(`cc-tiers: ${task} has a failure declared pre-existing; only cc-tiers:reviewer (Opus) can confirm it. Delegate the review to cc-tiers:reviewer.`)
   }
-  if (REVIEW_ROLES.has(role)) return checkReview(state, input, routing, { task, prompt, headers, scoped, projectDir })
+  if (REVIEW_ROLES.has(role)) {
+    return withReviewEffort(checkReview(state, input, routing, { task, prompt, headers, scoped, projectDir }), input, reviewEffort(routing, role, input.effort))
+  }
   const writer = role === 'implementer' || role === 'architect'
   const specMissing = routing.specify && writer && !specCriteria(stripResearch(prompt)).length && !SPEC_NONE_RE.test(headers.SPEC || '')
   if (routing.research && writer) {
@@ -2695,8 +2701,12 @@ function attemptEffort(routing, role, tier, current, prompt, history, asked, ris
     boost = EFFORTS.length
     why = 'a similar task escalated past Sonnet before'
   }
-  const target = effortFor(routing, tier, rung, { conserve, boost })
-  const top = effortTop(routing, tier, { conserve })
+  return settleEffort(routing, role, tier, effortFor(routing, tier, rung, { conserve, boost }), asked, why)
+}
+
+/** A level the call asked for is kept when higher than the target, up to the top of the ladder; level is null when the call already says what it needs. */
+function settleEffort(routing, role, tier, target, asked, why) {
+  const top = effortTop(routing, tier, { conserve: routing.conserve === true })
   const given = parseEffort(asked)
   let level = target
   if (given && effortRank(given) > effortRank(target)) {
@@ -2706,6 +2716,24 @@ function attemptEffort(routing, role, tier, current, prompt, history, asked, ris
   if (level === (given || AGENT_EFFORT[role])) return { level: null, note: '' }
   const reason = why ? ` because ${why}` : ''
   return { level, note: `cc-tiers set effort ${level} for ${SCOPED[role]}${reason}.` }
+}
+
+/**
+ * The effort a review role (reviewer, checker) or the planner runs at: the first rung of its model's ladder.
+ * Only a ladder the project file set counts, so without one every agent keeps the effort its file pins.
+ */
+function reviewEffort(routing, role, asked) {
+  const tier = ROLES[role]
+  if (!routing.effort?.on || !routing.effort.projectLadders?.includes(tier)) return { level: null, note: '' }
+  const target = effortFor(routing, tier, 0, { conserve: routing.conserve === true })
+  return settleEffort(routing, role, tier, target, asked, `the ${tier} ladder starts at ${target}`)
+}
+
+/** Adds the review effort to a checkDelegation result without touching what it decided. */
+function withReviewEffort(result, input, effort) {
+  if (result.deny || !effort.level) return result
+  const context = [result.context, effort.note].filter(Boolean).join('\n')
+  return { ...result, context, input: { ...(result.input || input), effort: effort.level } }
 }
 
 export function hookOutput(eventName, text, sessionTitle = '') {

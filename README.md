@@ -293,7 +293,7 @@ Each tier also has an effort ladder. A retry at the same tier runs one effort le
 
 The PreToolUse hook sets `effort` on the Agent call (Claude Code's per-call `effort`, 2.1.292+), so the orchestrator cannot forget it. It may ask for a higher level, never a lower one, and never above the top of the ladder. A risky task, one that matches a review keyword, starts one level up: on Sonnet (`hard_start: sonnet`, while conserving, or when the keyword is only text and every named file is ordinary) at `xhigh`, and on `cc-tiers:architect` at `xhigh` too. While budget routing is conserving, effort stops at `high`. When the Opus orchestrator implements the ceiling itself, it keeps its own session effort. `CLAUDE_CODE_EFFORT_LEVEL`, when set, wins over all of this.
 
-`effort_ladder: off` leaves each agent at the effort its file pins. A project can replace a ladder in `.claude/cc-tiers.json` with `effort.haiku`, `effort.sonnet`, `effort.opus`, and `effort.conserveCap`.
+`effort_ladder: off` leaves each agent at the effort its file pins. A project can replace a ladder in `.claude/cc-tiers.json` with `effort.haiku`, `effort.sonnet`, `effort.opus`, and `effort.conserveCap`. The reviewer and the planner run at the first rung of the opus ladder, and the checker at the first rung of the sonnet ladder, only when a project ladder (`.claude/cc-tiers.json`) sets that tier; otherwise they keep the effort their agent file pins (reviewer and planner `high`, checker `medium`).
 
 ---
 
