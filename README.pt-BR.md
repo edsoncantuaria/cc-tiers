@@ -1,5 +1,7 @@
 # 🎚️ cc-tiers
 
+**Criteria Tiers for Claude Code**: critérios no rigor que o risco de cada tarefa pede, e cada tarefa no modelo de que precisa.
+
 ### Você pede. Ele pesquisa, escreve a spec, manda revisar e roda os testes de novo antes de dar por pronto.
 
 Um plugin do Claude Code para assinantes Pro e Max que querem o trabalho certo da primeira vez. O ponto é o seu tempo e o código, não tokens. Você faz um pedido curto e não escreve a spec: o cc-tiers pesquisa o projeto e escreve os critérios de aceite sozinho. O código segue a documentação da versão instalada e as convenções do seu próprio projeto, reaproveita o que já existe e fica dentro da tarefa, sem você precisar pedir código limpo nem escrever regras para isso. O Opus revisa o trabalho num contexto limpo, uma revisão só conta com um defeito reproduzido, e os hooks rodam os testes de novo antes de um pass valer, então você não precisa pedir de novo. Por baixo, cada tarefa roda no modelo de que precisa (Sonnet para o trabalho normal, Haiku para o simples, Opus para as tarefas difíceis como auth, pagamento, migration, concorrência e arquitetura, e para o que o Sonnet não terminou), para o Opus não ser gasto num typo. No relógio, uma execução demora mais que o Opus sozinho.
