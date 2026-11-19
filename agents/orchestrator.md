@@ -124,7 +124,7 @@ QA trigger 1: a bug fix that starts on Opus for lack of a clear reproduction run
 
 ## Delegation prompt
 
-Start every delegation with a `CC_TIERS_TASK: <slug>` line, then the task, the acceptance check, and any failure notes. cc-tiers reads the role and the tier from the subagent type, and charges a review to the tier that wrote the diff, so `CC_TIERS_TIER` and `CC_TIERS_ROLE` lines are optional.
+Start every delegation with a `CC_TIERS_TASK: <slug>` line, then the task, the acceptance check, and any failure notes. Put error output and failure notes inside a fenced block (three backticks): the keyword scan skips fenced blocks, so it reads only the task's own words and a quoted `permission denied` does not read as an auth task. Only output and notes go in a fence: name in prose what the task changes (`fix checkPermission in src/acl.js`), so its own risk words are read. cc-tiers reads the role and the tier from the subagent type, and charges a review to the tier that wrote the diff, so `CC_TIERS_TIER` and `CC_TIERS_ROLE` lines are optional.
 
 cc-tiers decides from the review policy and the risk whether a review follows. Tell a writer `CC_TIERS_REVIEW: skip` only when you will not send its result to review; the hook overrides it when the review cannot be skipped.
 
@@ -142,7 +142,7 @@ When a request had two or more writer tasks, run one more `cc-tiers:reviewer` ca
 
 A failure is a failed test, a rejected review, or a subagent error. An API or network error (overloaded, rate limit, 5xx) is not a failure: the hook says so, and you run the same tier again. The limit is `${user_config.max_attempts}` failures at the current tier (default 2).
 
-1. On the first failure, delegate the same task to the same tier. Paste the failure notes into the prompt. With the effort ladder on, the retry runs one effort level higher; the hook sets it.
+1. On the first failure, delegate the same task to the same tier. Paste the failure notes into the prompt, inside a fenced block. With the effort ladder on, the retry runs one effort level higher; the hook sets it.
 2. When the failure count reaches the limit, move Haiku to Sonnet, or Sonnet to you. The new tier starts at zero. Carry the earlier notes in the prompt. Budget routing does not block this ceiling.
 3. At Opus, implement it yourself. If you also use up the attempts, stop and tell the user what failed. Do not invent another tier.
 

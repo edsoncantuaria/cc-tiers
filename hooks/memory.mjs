@@ -15,16 +15,18 @@ export const MEMORY_BASENAME = 'cc-tiers-memory.json'
 export const MEMORY_IGNORE = `.claude/${MEMORY_BASENAME}`
 export const MEMORY_BEGIN = 'CC_TIERS_MEMORY_BEGIN'
 export const MEMORY_END = 'CC_TIERS_MEMORY_END'
-export const MEMORY_CATEGORIES = ['convention', 'command', 'failure', 'fix', 'dead-end', 'version', 'warning']
+export const MEMORY_CATEGORIES = ['convention', 'command', 'failure', 'fix', 'dead-end', 'version', 'warning', 'reference']
 export const MEMORY_CONFIDENCE = ['low', 'medium', 'high']
 export const MAX_RECORDS = 200
 const MAX_CONTENT = 300
 const MAX_FIELD = 160
 const DAY_MS = 24 * 60 * 60 * 1000
 /** Days a record stays valid by default; 0 means until invalidated. */
-const TTL_DAYS = { convention: 0, command: 30, failure: 60, fix: 90, 'dead-end': 60, version: 30, warning: 0 }
+const TTL_DAYS = { convention: 0, command: 30, failure: 60, fix: 90, 'dead-end': 60, version: 30, warning: 0, reference: 60 }
 const STOP = new Set('the and for with from this that into are was were has have not but you your uma para com sem que nao dos das por the'.split(' '))
 const ID_RE = /^m-[a-z0-9]{6,16}$/
+const REF_RE = /^CC_TIERS_REF:\s*(.*)$/
+const MAX_REFERENCES = 10
 
 export function emptyMemory() {
   return { version: 1, records: [] }
@@ -41,6 +43,26 @@ export function sanitize(text, max = MAX_CONTENT) {
     .filter((line) => !/^\s*CC_TIERS_[A-Z_]+/.test(line))
     .join(' ')
   return clip(kept, max)
+}
+
+/**
+ * The CC_TIERS_REF lines of a research report: `<lib|feature|suspect> ; <name> ; <version or -> ; <where> ; <summary>`.
+ * A line with an unknown kind or an empty field is skipped, and a suspect line keeps no summary.
+ */
+export function parseReferences(text) {
+  const found = []
+  for (const line of String(text ?? '').split(/\r\n|[\n\r\v\f\u0085\u2028\u2029]/)) {
+    const match = REF_RE.exec(line.trim())
+    if (!match) continue
+    const [kind, name, version, where, ...rest] = match[1].split(/\s;\s/).map((field) => field.trim())
+    const summary = rest.join(' ; ')
+    if (!['lib', 'feature', 'suspect'].includes(kind) || !name || !version || !where || !summary) continue
+    // A lib or feature needs a real summary; a suspect is only ever a URL to avoid.
+    if (kind === 'suspect' ? !/^https?:\/\/\S+$/i.test(where) : summary === '-') continue
+    found.push({ kind, name, version, where, summary: kind === 'suspect' ? '' : summary })
+  }
+  // A report is one brief; the cap keeps a page that talks the researcher into many lines from flooding the memory.
+  return found.slice(0, MAX_REFERENCES)
 }
 
 function tokens(text) {

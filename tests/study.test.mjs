@@ -333,6 +333,17 @@ const FINAL_SPEC = 'CC_TIERS_SPEC_BEGIN\nCriteria:\n- the totals match (request)
 const finalPrompt = (verify = 'CC_TIERS_VERIFY: node ok.mjs') => `CC_TIERS_TASK: final-gate\n${FINAL_SPEC}\n${verify}\nReview the integrated diff.`
 const finalRouting = () => tiers.mergeRouting(DEFAULTS, null, { verify_allow: 'node ok.mjs', hard_start: 'opus' })
 
+test('final-gate: a later batch replaces the stored criteria with CC_TIERS_RESPEC, and is refused without it', () => {
+  const routing = finalRouting()
+  const state = tiers.emptyState('s')
+  assert.equal(delegate(state, routing, 'reviewer', finalPrompt()).deny, '')
+  const next = 'CC_TIERS_SPEC_BEGIN\nCriteria:\n- the second batch works (request)\nCC_TIERS_SPEC_END'
+  assert.match(delegate(state, routing, 'reviewer', `CC_TIERS_TASK: final-gate\n${next}\nReview.`).deny, /must carry the same CC_TIERS_SPEC block/)
+  assert.deepEqual(state.contracts['final-gate'].criteria.map((item) => item.text), ['the totals match', '`node ok.mjs` passes'])
+  assert.equal(delegate(state, routing, 'reviewer', `CC_TIERS_TASK: final-gate\nCC_TIERS_RESPEC: a new batch of work on the branch\n${next}\nReview.`).deny, '')
+  assert.deepEqual(state.contracts['final-gate'].criteria.map((item) => item.text), ['the second batch works'])
+})
+
 test('final-gate: the spec of its prompt is its contract and its CC_TIERS_VERIFY lines are the gate evidence of the completion', () =>
   inTemp(async (dir) => {
     writeFileSync(path.join(dir, 'ok.mjs'), 'process.exit(0)\n')
@@ -428,6 +439,24 @@ test('final-gate: a pass launched before the rejection was counted does not clea
     const late = report(dir, routing, state, 'g3', 'reviewer', trailer('final-gate', 'pass'), finalPrompt(), { launchedAt: state.tasks['final-gate'].rejectedAt + 1000 })
     assert.match(late, /cc-tiers completion: final-gate/)
     assert.equal(state.tasks['final-gate'], undefined, 'a pass launched after the rejection finishes it')
+  }))
+
+test('final-gate: a reviewer launched before the rejection but resumed after it is a fresh look, so its pass finishes the task', () =>
+  inTemp(async (dir) => {
+    writeFileSync(path.join(dir, 'ok.mjs'), 'process.exit(1)\n')
+    const routing = finalRouting()
+    const state = tiers.emptyState('s')
+    delegate(state, routing, 'reviewer', finalPrompt())
+    report(dir, routing, state, 'g1', 'reviewer', trailer('final-gate', 'pass'), finalPrompt())
+    const { rejectedAt } = state.tasks['final-gate']
+    writeFileSync(path.join(dir, 'ok.mjs'), 'process.exit(0)\n')
+    const ctx = { routing, ccCost: false, projectDir: dir }
+    const stop = (entry) => tiers.processReport(ctx, state, tiers.prepareReport(ctx, tiers.agentReport('agent-g', entry, trailer('final-gate', 'pass'))))
+    const launched = { role: 'reviewer', prompt: finalPrompt(), at: rejectedAt - 1000, stops: 1, stoppedAt: rejectedAt - 500 }
+    assert.match(stop(launched), /another review of this writer attempt already rejected it/, 'never resumed: it saw the rejected diff')
+    assert.equal(state.tasks['final-gate'].rejected, true)
+    assert.match(stop({ ...launched, stops: 2, resumedAt: rejectedAt + 1000 }), /cc-tiers completion: final-gate/)
+    assert.equal(state.tasks['final-gate'], undefined)
   }))
 
 test('final-gate: a passing review after a final-gate rejection finishes the task', () =>
