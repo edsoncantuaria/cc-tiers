@@ -2623,8 +2623,8 @@ function checkReview(state, input, routing, { task, prompt, headers, scoped, pro
       )
     }
   }
-  // final-gate has no writer to delegate the spec, so its own prompt sets the contract.
-  if (task === FINAL_GATE && !stored) holdContract(state, task, prompt, headers, routing).commit?.()
+  // final-gate has no writer to delegate the spec, so its own prompt sets the contract; a respec (a later batch on the branch) replaces it.
+  if (task === FINAL_GATE && (!stored || RESPEC_RE.test(headers.RESPEC || ''))) holdContract(state, task, prompt, headers, routing).commit?.()
   const context = largeDiffNote(state, task, projectDir)
   const focus = reviewFocus(body)
   const rubric = readRubric(projectDir)

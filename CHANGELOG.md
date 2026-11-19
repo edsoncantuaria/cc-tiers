@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- A second batch of work on the same branch could not replace the criteria of `final-gate`: the hook kept the first batch's, so the completion listed them as pending. A `final-gate` review prompt with `CC_TIERS_RESPEC: <reason>` now sets its new spec block as the contract; without it, a reworded spec is still refused.
 - A resumed session (SessionStart source `resume`) marks the background agents of the previous process as stopped, so they no longer hold the gate or the request for a verdict. `compact` leaves them alone, and a later `SendMessage` makes one count as running again.
 - A review's time is the later of its launch and its latest resume by `SendMessage`, in `parkedFor` and in the `final-gate` comparison, and an attempt read in the same scan as the resume sits before it. A reviewer resumed after a new attempt therefore judges that attempt. A review resumed with no new attempt still does not clear a rejection.
 - Why: the first delegation of a task was boosted by a quoted error, not by the task (#17); a researcher that could run `git diff` or `git blame` could be made to run a program from a repository's config, and a reference was tied to the wrong lock by a substring (#20); the effort ladders could not be compared for the reviewer (#18); and a resumed session counted dead agents and a resumed reviewer judged the old attempt (#19).

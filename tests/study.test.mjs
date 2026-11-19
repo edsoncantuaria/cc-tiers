@@ -333,6 +333,17 @@ const FINAL_SPEC = 'CC_TIERS_SPEC_BEGIN\nCriteria:\n- the totals match (request)
 const finalPrompt = (verify = 'CC_TIERS_VERIFY: node ok.mjs') => `CC_TIERS_TASK: final-gate\n${FINAL_SPEC}\n${verify}\nReview the integrated diff.`
 const finalRouting = () => tiers.mergeRouting(DEFAULTS, null, { verify_allow: 'node ok.mjs', hard_start: 'opus' })
 
+test('final-gate: a later batch replaces the stored criteria with CC_TIERS_RESPEC, and is refused without it', () => {
+  const routing = finalRouting()
+  const state = tiers.emptyState('s')
+  assert.equal(delegate(state, routing, 'reviewer', finalPrompt()).deny, '')
+  const next = 'CC_TIERS_SPEC_BEGIN\nCriteria:\n- the second batch works (request)\nCC_TIERS_SPEC_END'
+  assert.match(delegate(state, routing, 'reviewer', `CC_TIERS_TASK: final-gate\n${next}\nReview.`).deny, /must carry the same CC_TIERS_SPEC block/)
+  assert.deepEqual(state.contracts['final-gate'].criteria.map((item) => item.text), ['the totals match', '`node ok.mjs` passes'])
+  assert.equal(delegate(state, routing, 'reviewer', `CC_TIERS_TASK: final-gate\nCC_TIERS_RESPEC: a new batch of work on the branch\n${next}\nReview.`).deny, '')
+  assert.deepEqual(state.contracts['final-gate'].criteria.map((item) => item.text), ['the second batch works'])
+})
+
 test('final-gate: the spec of its prompt is its contract and its CC_TIERS_VERIFY lines are the gate evidence of the completion', () =>
   inTemp(async (dir) => {
     writeFileSync(path.join(dir, 'ok.mjs'), 'process.exit(0)\n')
