@@ -623,17 +623,17 @@ test('completion: a criterion inherited from the declared pre-existing check kee
 
 test('evaluateCriteria: a check without a cd is credited by the same command verified behind a cd', () => {
   const parsed = contract.parseContract('Checks:\n- `make lint` exits 0 (repo: Makefile)')
-  const out = contract.evaluateCriteria(parsed, { verified: ['cd integracao-e2e && make lint'] })
-  assert.deepEqual([out[0].state, out[0].evidenced, out[0].evidence], ['pass', true, 'cd integracao-e2e && make lint'])
-  const other = contract.evaluateCriteria(parsed, { verified: ['cd integracao-e2e && make lint-fix'] })
+  const out = contract.evaluateCriteria(parsed, { verified: ['cd e2e-suite && make lint'] })
+  assert.deepEqual([out[0].state, out[0].evidenced, out[0].evidence], ['pass', true, 'cd e2e-suite && make lint'])
+  const other = contract.evaluateCriteria(parsed, { verified: ['cd e2e-suite && make lint-fix'] })
   assert.equal(other[0].state, 'pending')
 })
 
 test('evaluateCriteria: a declared pass that names the command is evidenced when the gate verified it behind a cd', () => {
   const parsed = contract.parseContract('Criteria:\n- the lint is clean')
   const reports = [{ id: 'C1', state: 'pass', evidence: 'ran `make lint`, clean' }]
-  const out = contract.evaluateCriteria(parsed, { reports, verified: ['cd integracao-e2e && make lint'] })
-  assert.deepEqual([out[0].state, out[0].evidenced, out[0].evidence], ['pass', true, 'cd integracao-e2e && make lint'])
+  const out = contract.evaluateCriteria(parsed, { reports, verified: ['cd e2e-suite && make lint'] })
+  assert.deepEqual([out[0].state, out[0].evidenced, out[0].evidence], ['pass', true, 'cd e2e-suite && make lint'])
 })
 
 test('evaluateCriteria: a criterion with a cd needs the same dir', () => {

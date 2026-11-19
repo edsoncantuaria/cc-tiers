@@ -17,20 +17,20 @@ E o benchmark mede se isso mudou a qualidade contra o Opus sozinho.
 
 ### Por que (registros do usuário, `~/.claude/registros/`, set–out 2026)
 
-- Os defeitos reais vieram de revisão e QA com a suíte verde: flow-api #11
-  (907 testes OK, 5 defeitos de estado/ordem/idempotência achados em revisão),
-  QA caixa-preta do flow (≈1090 testes verdes, `user:pass@` na URL e 500 com
+- Os defeitos reais vieram de revisão e QA com a suíte verde: um projeto de API (#11,
+  907 testes OK, 5 defeitos de estado/ordem/idempotência achados em revisão),
+  QA caixa-preta de um serviço (≈1090 testes verdes, `user:pass@` na URL e 500 com
   descrição > 255). Por isso P1 pesa tanto quanto P0.
 - Falsos positivos de revisão eram opinião sem reprodução: phpstan num
   nullable que o nível 6 não cobre, "falso alarme" de ACL, `defaultValue` em
-  jsonb que quebraria no HomeBaked v2.15.9.
-- Um defeito com boa reprodução pode vir com correção errada (flow-api PR #65):
+  jsonb que quebraria no framework interno da versão em uso.
+- Um defeito com boa reprodução pode vir com correção errada (no mesmo projeto de API):
   o revisor aponta o defeito, quem corrige escolhe a correção.
 - Revisões que crescem: #11 teve 4 rodadas; parte dos achados era para outra
   issue.
-- Testes intermitentes existem (flow-api, Playwright); há verificações que
-  nenhum comando faz (gravar no aparelho no openbridge, conferir no Chrome no
-  qualicheck).
+- Testes intermitentes existem (API, Playwright); há verificações que
+  nenhum comando faz (gravar num aparelho de uma integração, conferir no Chrome
+  num app web).
 - Várias sessões já dividiram o mesmo checkout (commits na branch errada,
   porta serial disputada).
 
@@ -71,11 +71,11 @@ E o benchmark mede se isso mudou a qualidade contra o Opus sozinho.
   escolheu só `opus` e `cc-tiers`; o efeito de cada camada sai das métricas
   por camada dentro do `cc-tiers`.
 - Arquivo de configuração novo dentro do projeto. O usuário proíbe `.claude/`
-  em `~/Projetos/**`; a P0 e a P1 ficam em `/config`.
+  nos repositórios de trabalho; a P0 e a P1 ficam em `/config`.
 
 ## Antimetas (falha mesmo funcionando)
 
-- Gate que reprova por erro pré-existente (phpstan do flow-api parte de
+- Gate que reprova por erro pré-existente (phpstan de um projeto parte de
   948–1133 erros): o comando declarado é o focado na área, não o projeto todo.
 - Gate que roda um comando fora da lista do usuário.
 - Revisão que continua reprovando por endurecimento que o pedido não pediu.
@@ -159,8 +159,8 @@ vendor/bin/phpstan, ./vendor/bin/phpstan, vendor/bin/phpcs, ./vendor/bin/phpcs,
 pytest, python -m pytest, go test, cargo test`.
 
 `docker exec` **não** está no padrão: com ele, qualquer comando roda no
-container. O usuário acrescenta em `/config` se quiser (é o caso do flow-api
-e do qualicheck).
+container. O usuário acrescenta em `/config` se quiser (é o caso de projetos que
+rodam em container).
 
 Limitação, para o README: a lista restringe a forma do comando, não o que o
 teste executa. Um teste é código do repositório, e o agente já pode escrever
