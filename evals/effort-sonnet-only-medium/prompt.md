@@ -1,0 +1,10 @@
+---
+name: effort-sonnet-only-medium
+description: A small feature (cli.js); sonnet ladder is the single level medium, so a review-keyword boost cannot move it.
+tags: [effort, sweep]
+max_turns: 80
+timeout_seconds: 1500
+allowed_tools: [Agent, Read, Glob, Grep, Skill, TodoWrite]
+---
+
+This repo is a tiny node package. Add a command line tool to it as `cli.js`. It takes a file path and one flag, `--words` or `--lines`, parses its arguments with Node's built-in `util.parseArgs`, and prints how many whitespace-separated words or how many lines that file has. A missing file, a missing flag or both flags exit with code 1 and a message on stderr. Add a `bin` entry for it in `package.json`, and tests in `cli.test.js` that run the tool as a child process. `npm test` has to pass when you are done.
