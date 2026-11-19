@@ -339,6 +339,12 @@ test('researcher covers a feature or behaviour and allows sources in any languag
   assert.equal(researcher.includes('(no lock, no docs, no access)'), false, 'a missing lock is not a reason to fail')
 })
 
+test('researcher starts git log and show with the three flags and knows diff and blame are refused', () => {
+  const bashLine = read('agents/researcher.md').split('\n').find((line) => line.includes('Use Bash only to read'))
+  assert.ok(bashLine, 'researcher has the Bash line')
+  for (const needle of ['`git log --no-textconv --no-ext-diff --no-show-signature -S <term>`', '`git show --no-textconv --no-ext-diff --no-show-signature <rev>:<file>`', 'start with `--no-textconv --no-ext-diff --no-show-signature`, right after the subcommand', '`git diff` and `git blame` are refused']) assert.ok(bashLine.includes(needle), `Bash line mentions ${needle}`)
+})
+
 test('session prompts split a large task before delegating and tell the writer its pacing', () => {
   for (const file of ['agents/orchestrator.md', 'agents/dispatcher.md', 'skills/tiers/SKILL.md']) {
     const text = read(file)

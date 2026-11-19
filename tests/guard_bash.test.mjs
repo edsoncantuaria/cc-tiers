@@ -13,6 +13,7 @@ function run(input) {
   const result = spawnSync(process.execPath, [HOOK], { input, encoding: 'utf8' })
   return { status: result.status, stdout: result.stdout, stderr: result.stderr }
 }
+const FLAGS = '--no-textconv --no-ext-diff --no-show-signature'
 const call = (agent_type, command) => JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Bash', agent_type, tool_input: { command } })
 
 test('the allowlist accepts one read-only command', () => {
@@ -25,17 +26,16 @@ test('the allowlist accepts one read-only command', () => {
     'ls -la hooks',
     'wc -l README.md',
     'find . -name "*.mjs" -type f',
-    'git log --oneline -5',
-    'git log -S matchRole -- hooks',
-    'git show HEAD:README.md',
-    "git diff 'HEAD~1' -- hooks",
-    'git blame hooks/cc_tiers.mjs',
-    'git log --stat -- .',
-    'git log -S foo -- a',
+    `git log ${FLAGS} --oneline -5`,
+    `git log ${FLAGS} -S matchRole -- hooks`,
+    `git show ${FLAGS} HEAD:README.md`,
+    'git log --no-show-signature --no-ext-diff --no-textconv --stat -p -- .',
+    `git log ${FLAGS} -S "x --textconv" -- a`,
     "find . -name '*.md'",
     'grep -rn foo hooks',
-    'git log -- path',
-    "git show 'HEAD^:README.md'",
+    `git log ${FLAGS} -- path`,
+    `git show ${FLAGS} 'HEAD^:README.md'`,
+    `git log "--no-textconv" '--no-ext-diff' --no-show-signature`,
   ]) assert.equal(isReadOnlyCommand(command), true, command)
 })
 
@@ -72,6 +72,8 @@ test('the allowlist refuses other programs, chaining, redirection and substituti
     'git status',
     'git status --short',
     'git',
+    `git diff ${FLAGS}`,
+    `git blame ${FLAGS} hooks/cc_tiers.mjs`,
   ]) assert.equal(isReadOnlyCommand(command), false, String(command))
 })
 
@@ -79,7 +81,7 @@ test('the allowlist refuses what the shell expands after the hook looks, quoted 
   for (const command of [
     'find . -name x {-exec,rm} {} +',
     'find . -name x -{delete,print}',
-    'git log --{output=/tmp/x,stat}',
+    `git log ${FLAGS} --{output=/tmp/x,stat}`,
     'find . -${X:-delete}',
     'find . -de$\'l\'ete',
     "ls *(e:'touch pwned':)",
@@ -105,7 +107,7 @@ test('find refuses its writing and executing actions, even quoted', () => {
 })
 
 test('an unquoted * ? [ ^ # or ~ is refused, a quoted pattern or revision passes', () => {
-  for (const command of ['git log *', 'find *', 'find . -[d]elete', 'ls ?', 'cat a*', "find . -name '*.md' -[d]elete", 'find . -delete#', 'find ^keep.txt', 'find . -delete~x', 'find . -delet^x', 'git show HEAD^:README.md', 'git diff HEAD~1']) {
+  for (const command of [`git log ${FLAGS} *`, 'find *', 'find . -[d]elete', 'ls ?', 'cat a*', "find . -name '*.md' -[d]elete", 'find . -delete#', 'find ^keep.txt', 'find . -delete~x', 'find . -delet^x', `git show ${FLAGS} HEAD^:README.md`, `git log ${FLAGS} HEAD~1`]) {
     assert.equal(isReadOnlyCommand(command), false, command)
   }
   for (const command of ["find . -name '*.md'", 'grep -rn "a?b" hooks', "grep --include='*.js' -rn foo ."]) {
@@ -113,21 +115,91 @@ test('an unquoted * ? [ ^ # or ~ is refused, a quoted pattern or revision passes
   }
 })
 
-test('git refuses global options, --output, --exec-path and their abbreviations', () => {
+test('git refuses global options, --output, --exec-path, --ext-diff, --textconv and their abbreviations', () => {
   for (const command of [
-    'git -c core.pager=sh log',
-    'git -C other log',
-    'git --git-dir=x log',
-    'git log --output=out.txt',
-    'git log --output out.txt',
-    'git diff --out=out.txt',
-    'git show --o=x',
-    'git log --exec-path=/tmp',
-    'git diff --exec-path',
-    'git diff --ext-diff',
-    "git log '--output=x'",
+    `git -c core.pager=sh log ${FLAGS}`,
+    `git -C other log ${FLAGS}`,
+    `git --git-dir=x log ${FLAGS}`,
+    `git log ${FLAGS} --output=out.txt`,
+    `git log ${FLAGS} --output out.txt`,
+    `git show ${FLAGS} --out=out.txt`,
+    `git show ${FLAGS} --o=x`,
+    `git log ${FLAGS} --exec-path=/tmp`,
+    `git show ${FLAGS} --exec-path`,
+    `git log ${FLAGS} --ext-diff`,
+    `git log ${FLAGS} --ext`,
+    `git show --ext-diff ${FLAGS}`,
+    `git log ${FLAGS} --textconv`,
+    `git show --textconv ${FLAGS}`,
+    `git log ${FLAGS} "--textconv"`,
+    `git log ${FLAGS} '--output=x'`,
   ]) assert.equal(isReadOnlyCommand(command), false, command)
-  assert.equal(isReadOnlyCommand('git log --oneline -- hooks'), true)
+  assert.equal(isReadOnlyCommand(`git log ${FLAGS} --oneline -- hooks`), true)
+})
+
+test('git log and show need the three flags right after the subcommand', () => {
+  for (const subcommand of ['log', 'show']) {
+    for (const command of [
+      `git ${subcommand}`,
+      `git ${subcommand} --oneline -- hooks`,
+      `git ${subcommand} --no-textconv --no-ext-diff`,
+      `git ${subcommand} --no-textconv --no-ext-diff --oneline`,
+      `git ${subcommand} --no-textc --no-ext-d --no-show-sig`,
+      `git ${subcommand} --no-textconv=1 --no-ext-diff --no-show-signature`,
+      `git ${subcommand} -p ${FLAGS}`,
+      `git ${subcommand} -p -S ${FLAGS}`,
+      `git ${subcommand} -G ${FLAGS}`,
+      `git ${subcommand} --no-ext-diff -S "x --no-textconv" --no-show-signature`,
+      `git ${subcommand} "${FLAGS}"`,
+      `git ${subcommand} ${FLAGS} --show-signature`,
+      `git ${subcommand} ${FLAGS} --textconv`,
+      `git ${subcommand} ${FLAGS} --ext-diff`,
+      `git ${subcommand} ${FLAGS} 'unclosed`,
+    ]) assert.equal(isReadOnlyCommand(command), false, command)
+    for (const command of [
+      `git ${subcommand} ${FLAGS}`,
+      `git ${subcommand} --no-show-signature --no-ext-diff --no-textconv -p`,
+      `git ${subcommand} ${FLAGS} -p HEAD -- hooks`,
+    ]) assert.equal(isReadOnlyCommand(command), true, command)
+  }
+})
+
+test('after the flags git takes only listed options, their values, revisions that skip the index and paths after --', () => {
+  for (const subcommand of ['log', 'show']) {
+    for (const command of [
+      `git ${subcommand} ${FLAGS} --format=%GS`,
+      `git ${subcommand} ${FLAGS} --pretty=%G?`,
+      `git ${subcommand} ${FLAGS} --remerge-diff`,
+      `git ${subcommand} ${FLAGS} --cc`,
+      `git ${subcommand} ${FLAGS} -m`,
+      `git ${subcommand} ${FLAGS} --output=x`,
+      `git ${subcommand} ${FLAGS} :f.dat`,
+      `git ${subcommand} ${FLAGS} ':0:f.dat'`,
+      `git ${subcommand} ${FLAGS} -n`,
+      `git ${subcommand} ${FLAGS} -S`,
+    ]) assert.equal(isReadOnlyCommand(command), false, command)
+    for (const command of [
+      `git ${subcommand} ${FLAGS} -S --remerge-diff`,
+      `git ${subcommand} ${FLAGS} -Sfoo -G bar`,
+      `git ${subcommand} ${FLAGS} --grep=fix --author someone -n 3 -5`,
+      `git ${subcommand} ${FLAGS} --since=2026-01-01 --until 2026-02-01 --no-merges --first-parent`,
+      `git ${subcommand} ${FLAGS} --stat -p 'HEAD~1' -- hooks`,
+      `git ${subcommand} ${FLAGS} -p -- :f.dat`,
+    ]) assert.equal(isReadOnlyCommand(command), true, command)
+  }
+})
+
+test('git diff and git blame are refused, with or without the flags', () => {
+  for (const subcommand of ['diff', 'blame']) {
+    for (const command of [`git ${subcommand}`, `git ${subcommand} ${FLAGS}`, `git ${subcommand} ${FLAGS} hooks/guard_bash.mjs`, `git ${subcommand} --no-textconv HEAD`, `git ${subcommand} ${FLAGS} 'HEAD~1' -- hooks`]) {
+      assert.equal(isReadOnlyCommand(command), false, command)
+    }
+  }
+})
+
+test('DENY_REASON names the flags git log and show need and refuses diff and blame', () => {
+  assert.match(DENY_REASON, /git log\/show starting with --no-textconv --no-ext-diff --no-show-signature/)
+  assert.match(DENY_REASON, /git diff and git blame are not allowed/)
 })
 
 test('the hook denies a cc-tiers researcher command outside the allowlist, in any case', () => {
@@ -143,7 +215,7 @@ test('the hook denies a cc-tiers researcher command outside the allowlist, in an
 
 test('the hook passes a researcher read-only command with no output', () => {
   for (const agent of ['cc-tiers:researcher']) {
-    assert.deepEqual(run(call(agent, 'git log --oneline -3')), { status: 0, stdout: '', stderr: '' })
+    assert.deepEqual(run(call(agent, `git log ${FLAGS} --oneline -3`)), { status: 0, stdout: '', stderr: '' })
   }
 })
 
