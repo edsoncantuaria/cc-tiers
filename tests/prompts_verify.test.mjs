@@ -294,6 +294,13 @@ test('writers and reviewers pace their turns and keep the trailer for the end', 
   assert.equal(researcher.includes('each open point as "not found"'), false, 'researcher keeps the where-you-looked part')
 })
 
+test('researcher covers a feature or behaviour and allows sources in any language', () => {
+  const researcher = read('agents/researcher.md')
+  for (const needle of ['and for any feature or behaviour the task asks for', 'A task with no new library still gets step 4', 'how other projects and products solve the same feature', 'Sources may be in any language', 'A word for word quote keeps its original wording and is followed by a translation into the language the brief is written in', 'comes only from the repo: step 4 never supplies it']) {
+    assert.ok(researcher.includes(needle), `researcher mentions ${needle}`)
+  }
+})
+
 test('session prompts split a large task before delegating and tell the writer its pacing', () => {
   for (const file of ['agents/orchestrator.md', 'agents/dispatcher.md', 'skills/tiers/SKILL.md']) {
     const text = read(file)
