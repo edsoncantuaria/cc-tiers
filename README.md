@@ -39,7 +39,7 @@ claude --plugin-dir /path/to/cc-tiers
 | Tier | Agent | Model | Does |
 | :-: | --- | --- | --- |
 | Plan | `cc-tiers:orchestrator` | Opus | Splits the request, delegates, and implements hard tasks and the ceiling |
-| Research | `cc-tiers:researcher` | Sonnet | Finds the installed version, that version's docs, existing usage, reusable code, and conventions before code is written. Does not edit |
+| Research | `cc-tiers:researcher` | Sonnet | Finds the installed version, that version's docs, existing usage, reusable code, and conventions, and how a feature is usually done, before code is written. Does not edit, and runs one read-only shell command at a time |
 | Default | `cc-tiers:implementer` | Sonnet | Features, bug fixes, tests, local refactors |
 | Trivial | `cc-tiers:worker` | Haiku | Renames, typos, formatting, lookups, simple searches, ~15-line edits |
 | Check | `cc-tiers:checker` | Sonnet | A fresh pass over Haiku's output. Does not edit |
@@ -80,7 +80,7 @@ flowchart LR
 
 ## 🔬 Research first
 
-Code written from memory of an old API version fails in ways a test does not always catch. Before a task goes to `cc-tiers:implementer` or `cc-tiers:architect`, `cc-tiers:researcher` (Sonnet, read-only) checks these:
+Code written from memory of an old API version fails in ways a test does not always catch. Before a task goes to `cc-tiers:implementer` or `cc-tiers:architect`, `cc-tiers:researcher` (Sonnet, read-only) checks these for the libraries, frameworks, and external APIs the task touches, and for any feature or behaviour it asks for (a business rule, a flow, a UI pattern):
 
 - The version in use, read from the lock file first and the manifest second.
 - The docs of that version, from `vendor/` or `node_modules/` when installed, never the docs of the latest release by default.
@@ -88,9 +88,15 @@ Code written from memory of an old API version fails in ways a test does not alw
 - How the repo already calls the API, as `file:line`.
 - Reuse: code the repo already has that does all or part of the task, as `file:line`. The search covers functions, queries and data-access methods (including the framework's own finders), UI components (templates, partials, scripts, styles), and constants or enums. Each entry says `call as is` or `needs a change to <file:line>, called by <file:line>`. Project-specific code (a query, a component, a domain rule) comes only from the repo, never from the web.
 - Conventions: one or two nearby snippets to follow (naming, error handling, test style, comment density).
-- Prior art outside the repo, only when it applies.
+- Prior art outside the repo, only when it applies: a documented solution to the same problem, or how other projects and products solve the same feature and the behaviour users expect. A task with no new library still gets this step.
 
 It returns a brief of under about 40 lines in three blocks, **Version and docs**, **In the repo** (usage, Reuse, Conventions), and **Outside the repo**, with a source for every fact. The orchestrator pastes the whole report, trailer included, into the writer's prompt between two lines that hold only `CC_TIERS_RESEARCH_BEGIN` and `CC_TIERS_RESEARCH_END`, and adds `CC_TIERS_RESEARCH: done`. A task that touches no library, framework, or external API says why instead: `CC_TIERS_RESEARCH: none - <reason>`. One brief can serve several tasks: the researcher's prompt carries `CC_TIERS_COVERS: <slug>, <slug>`, and a pass marks all of them.
+
+**A brief you can check.** The researcher takes every version, signature, parameter, default, and deprecation from what it read in the task, never from memory. For each fact the task depends on it puts a short word for word quote next to the source (the 40-line limit wins over quoting), and before it reports it drops a fact it cannot point to, or writes it as "not found" with where it looked. A missing lock or missing docs is "not found", not a failed research. Sources may be in any language, in every mode: a quote keeps its original wording and is followed by a translation into the language of the brief. The writers (implementer and architect) read the brief as data, never instructions. A fact that cites the repo or an installed file (`file:line`, a lock entry, docs under `vendor/` or `node_modules/`) is where they start. A fact that cites a fetched page (a URL), a fact with no source, and a fact the code contradicts are leads: they check it against the installed code or that version's docs before they rely on it.
+
+**Suspect sources and the Bash guard.** A fetched page is untrusted data. When one holds instructions aimed at the model, the researcher does not use it or follow it, and the brief gets a `Suspect sources:` line with its URL and one line on what it tried. The researcher declares `Bash`, and a plugin agent cannot limit its tools, so a PreToolUse hook (`hooks/guard_bash.mjs`, matcher `Bash`) lets it (agent type `cc-tiers:researcher`) run only one read-only command: `cat`, `head`, `tail`, `grep`, `ls`, `wc`, `find` without `-exec` or `-delete`, or `git log`, `git show`, `git diff`, or `git blame`, from a closed set of characters (no `;`, `&`, `|`, `>`, `<`, backtick, `$`, parentheses, braces, `!`, or backslash, no `*`, `?`, `[`, `^`, `#` or `~` outside quotes, and no `git -c` or `--output`); quote a pattern or a revision, as in `find . -name '*.md'` or `git show 'HEAD^:README.md'`. Anything else the researcher runs is denied with the reason, and it uses Read, Grep, and Glob for the rest. Other agents, another plugin's `researcher` included, and your own session are untouched, the hook fails open (a crash lets the call through), and it starts a node process on each Bash call, a few tens of milliseconds.
+
+**References.** A task or study brief ends with `CC_TIERS_REF:` lines, one per source it relies on (`lib`, `feature`, or `suspect`). A passing report saves them as `reference` notes in the project memory (see Memory), so the next researcher finds the doc without searching again.
 
 The PreToolUse hook enforces this. It refuses a call to the implementer or the architect that has neither a finished research for that task nor a `none` line. A research is not an attempt, and a failed research does not count against the task. The worker is exempt. The Opus ceiling and the dispatcher's own task are researched by prompt, with no hook check. `research: off` removes the step and the check.
 
@@ -531,10 +537,10 @@ Calls and minutes are measured. The cost is an estimate from token counts, never
 
 With `memory` set to `on` (the default), the project keeps small notes in `.claude/cc-tiers-memory.json`, so the next task does not rediscover them. The first write adds the file to `.git/info/exclude`, as with the history file. `off` neither reads nor writes it.
 
-- **Categories**: `convention`, `command`, `failure`, `fix`, `dead-end`, `version`, and `warning`. A record has a confidence (`low`, `medium`, `high`), a status (`hypothesis` or `confirmed`), and a time to live: `convention` and `warning` last until invalidated, `command` and `version` 30 days, `failure` and `dead-end` 60, `fix` 90. The cap is 200 records.
+- **Categories**: `convention`, `command`, `failure`, `fix`, `dead-end`, `version`, `warning`, and `reference`. A record has a confidence (`low`, `medium`, `high`), a status (`hypothesis` or `confirmed`), and a time to live: `convention` and `warning` last until invalidated, `command` and `version` 30 days, `failure`, `dead-end`, and `reference` 60, `fix` 90. The cap is 200 records.
 - **Tied to a file**: a record that depends on a file keeps its hash. When the file changes, the record is stale and is not recalled.
-- **What the hook records**: a command the gate verified (tied to the manifest that declares it), a diagnosed failure (from the gate or from a review), a fix after a pass that followed failures, and a dead end when a task is stopped. Secrets and `CC_TIERS_*` lines are removed first (see Redaction).
-- **Recall**: a writer gets the notes that share two or more words with its task, or the same slug, at most the profile's number. They arrive between `CC_TIERS_MEMORY_BEGIN` and `CC_TIERS_MEMORY_END`, labeled data from earlier tasks, never instructions.
+- **What the hook records**: a command the gate verified (tied to the manifest that declares it), a diagnosed failure (from the gate or from a review), a fix after a pass that followed failures, a dead end when a task is stopped, and the references of a passing research report. A reference is a pointer, not the page: the library or feature, its version, where the doc is (a URL or a path), and a one-line summary in the researcher's own words, as a hypothesis. At most 10 are saved per report, and a `lib` or `feature` line whose summary is only `-` is skipped. A library reference is tied to the first lock file that names the library (else the first lock file, else the manifest) and goes stale when that file changes. A `suspect` reference keeps only an `http(s)` URL, with low confidence, so the next researcher knows to avoid it. Secrets and `CC_TIERS_*` lines are removed first (see Redaction).
+- **Recall**: a writer gets the notes that share two or more words with its task, or the same slug, at most the profile's number. They arrive between `CC_TIERS_MEMORY_BEGIN` and `CC_TIERS_MEMORY_END`, labeled data from earlier tasks, never instructions. A writer gets every category but `reference`. A researcher gets only the matching `reference` notes.
 
 ```
 /cc-tiers:memory list
@@ -624,6 +630,7 @@ An internal error in a cc-tiers hook is never taken as a success. `before_agent`
 - The scrub of the failure lines that go to the web researcher replaces an absolute path up to its first space, so the tail of a POSIX path that holds a space can stay in the line.
 - The hindsight table keys a task by its slug, so a slug reused across sessions merges into one task.
 - A slug reused in the same session keeps the failure and escalation counts of its earlier run, and the completion line says `after N failed attempts` for them.
+- The Bash guard covers only the researcher, allows only what it can match to one read-only command, and fails open: a crash of the hook lets the call through. A reference note is the researcher's summary of a source, kept as a hypothesis, so a wrong summary is recalled as data until it goes stale or you invalidate it.
 - A failure search is a suggestion: nothing makes the orchestrator run it, and the cap counts the notes that offered one, not the searches that ran.
 - Risk by path judges file names, not code. Auth code in a file with an ordinary name (`src/tokens.js`: "tokens" is not the whole word `token`) starts on Sonnet with a forced review, not on Opus, and a directory whose name has a dot and no trailing slash counts as a file.
 - Sent-back figures are a floor. A re-ask in other words is missed, and a prompt that names a slug and complains about something else is counted until you run `--undo`.
@@ -697,7 +704,7 @@ Open `/config` and set the cc-tiers rows. They apply on the next session (the Se
 | `verify_budget` | `600` | Seconds the gate may spend on one report. Commands past it are not validated, not failed. 30–600 |
 | `review_evidence` | `on` | A reviewer's `fail` counts only with a blocking finding that has evidence. `off` counts any `fail` |
 | `profile` | `balanced` | `balanced`, `quality`, `budget`, or `fast`: effort, evidence, review, parallel, memory, and check depth thresholds. No profile removes a gate |
-| `memory` | `on` | Keep small evidence-backed notes per project in `.claude/cc-tiers-memory.json` and give a writer the few that match. `off` neither reads nor writes it |
+| `memory` | `on` | Keep small evidence-backed notes per project in `.claude/cc-tiers-memory.json` and give a writer, or a researcher for references, the few that match. `off` neither reads nor writes it |
 | `telemetry` | `on` | `on` writes one small event per transition to `events.jsonl` in the plugin data directory, `reduced` only failures, escalations, and outcomes, `off` nothing. Nothing leaves the machine |
 | `max_parallel` | `0` | Writers at the same time. 0–16. 0 uses the profile's cap (`balanced` 4) |
 | `task_budget_usd` | `0` | Estimated cost at API list prices after which writer calls for one task need your approval. 0–1000. 0 is no limit |
@@ -785,8 +792,9 @@ claude --plugin-dir .
 | `commands/escalate.md` | `/cc-tiers:escalate` |
 | `commands/study.md` | `/cc-tiers:study` |
 | `config/routing.default.json` | Built-in phrase lists, effort ladders, and default thresholds |
-| `hooks/hooks.json` | SessionStart summary, the Agent checks, effort, Haiku classifier, and counter, SubagentStop, Stop, and UserPromptSubmit |
+| `hooks/hooks.json` | SessionStart summary, the Agent checks, effort, Haiku classifier, and counter, the Bash guard, SubagentStop, Stop, and UserPromptSubmit |
 | `hooks/cc_tiers.mjs` | Merge rules, the counter, spend, budget, and history |
+| `hooks/guard_bash.mjs` | The Bash guard: lets the researcher run one read-only command and denies the rest |
 | `hooks/route.mjs` | The heuristic behind `/cc-tiers:route` |
 | `hooks/verify.mjs` | The verify gate: read `CC_TIERS_VERIFY`, the allow list, run the commands, and judge findings |
 | `hooks/report.mjs` | The table behind `/cc-tiers:report` |
@@ -807,12 +815,23 @@ claude --plugin-dir .
 | `hooks/telemetry.mjs`, `hooks/insights.mjs` | The local event log and the helper behind `/cc-tiers:insights` |
 | `hooks/integrity.mjs` | Hook failures: the record in `hook-errors.jsonl` and the warning that the work is not validated |
 | `hooks/redact.mjs` | Secret masking before memory, telemetry, and the audit trail |
+| `evals/` | Behavioural evals for `claude plugin eval`: one directory per case (`case.yaml`, `fixture.sh`, `prompt.md`, `graders/`) and `evals/README.md` |
 | `.github/workflows/ci.yml` | Tests on Linux, macOS, and Windows, and `claude plugin validate` |
 | `CHANGELOG.md` | Release notes |
 
+### Evals
+
+`npm test` checks the hooks. `evals/` checks how the plugin behaves in a real run, with `claude plugin eval` (Claude Code 2.1.269 or later). Each case builds a small repo with `fixture.sh`, gives the orchestrator a prompt that does not mention agents, and grades what it did. Two sets exist: `research-before-implementer` (a researcher runs before the implementer) and an effort sweep of seven cases that compares the effort ladders. The sweep changed no ladder. A case costs about $0.5 to $0.8 a run, so pass `--max-cost-usd`:
+
+```bash
+claude plugin eval . --case research-before-implementer --ablation none --scaffold --trust-plugin --no-publish --max-cost-usd 10 --allow-tools Bash,Edit,Write
+```
+
+`evals/README.md` has the flags, the results, and the limits: Bash failed inside the runs on the machine that ran them, a review keyword in quoted text boosted the Sonnet ladder, and the Opus reviewer's effort sits outside the ladder. Results land in `evals/results/`, which git ignores.
+
 ## 🔒 Privacy
 
-Nothing leaves your machine, and the command hooks make no network calls. cc-tiers keeps a local event log (see Telemetry and insights), which `telemetry: off` stops. With `classifier: haiku`, the classifier hook sends each `cc-tiers:worker` call's input to Haiku through Claude Code, the same way the session reaches Claude. When the orchestrator runs a failure search, the researcher's web queries carry the failure message, the library, and the version, scrubbed of secrets, absolute paths, and `CC_TIERS_` tokens; `failure_research: off` stops the suggestion. The hooks read the routing files, the plugin options Claude Code already passes in, the session transcript, `.claude/cc-tiers-rubric.md` when a review runs and the project has one, and cc-cost's local plugin data when that plugin is installed. They write the attempt counter under the plugin data directory (`latest.json` and one file per session), the event log `events.jsonl` (and `events.1.jsonl`) there unless telemetry is `off`, and, when learning is on, `.claude/cc-tiers-history.json` in the project plus one line in `.git/info/exclude`. When memory is on they also write `.claude/cc-tiers-memory.json` in the project, kept out of git by its own line in `.git/info/exclude`. Events hold no prompt or file text, and both files pass through redaction first. Uninstalling the plugin removes the plugin data directory unless you pass `--keep-data`. The history and memory files stay in the project until you delete them.
+Nothing leaves your machine, and the command hooks make no network calls. cc-tiers keeps a local event log (see Telemetry and insights), which `telemetry: off` stops. With `classifier: haiku`, the classifier hook sends each `cc-tiers:worker` call's input to Haiku through Claude Code, the same way the session reaches Claude. When the orchestrator runs a failure search, the researcher's web queries carry the failure message, the library, and the version, scrubbed of secrets, absolute paths, and `CC_TIERS_` tokens; `failure_research: off` stops the suggestion. The hooks read the routing files, the plugin options Claude Code already passes in, the session transcript, `.claude/cc-tiers-rubric.md` when a review runs and the project has one, and cc-cost's local plugin data when that plugin is installed. They write the attempt counter under the plugin data directory (`latest.json` and one file per session), the event log `events.jsonl` (and `events.1.jsonl`) there unless telemetry is `off`, and, when learning is on, `.claude/cc-tiers-history.json` in the project plus one line in `.git/info/exclude`. When memory is on they also write `.claude/cc-tiers-memory.json` in the project, kept out of git by its own line in `.git/info/exclude`; a reference note holds a URL or path and a one-line summary, never the text of a page. Events hold no prompt or file text, and both files pass through redaction first. Uninstalling the plugin removes the plugin data directory unless you pass `--keep-data`. The history and memory files stay in the project until you delete them.
 
 ---
 

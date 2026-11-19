@@ -28,14 +28,14 @@ test('the allowlist accepts one read-only command', () => {
     'git log --oneline -5',
     'git log -S matchRole -- hooks',
     'git show HEAD:README.md',
-    'git diff HEAD~1 -- hooks',
+    "git diff 'HEAD~1' -- hooks",
     'git blame hooks/cc_tiers.mjs',
     'git log --stat -- .',
     'git log -S foo -- a',
     "find . -name '*.md'",
     'grep -rn foo hooks',
     'git log -- path',
-    'git show HEAD^:README.md',
+    "git show 'HEAD^:README.md'",
   ]) assert.equal(isReadOnlyCommand(command), true, command)
 })
 
@@ -104,6 +104,15 @@ test('find refuses its writing and executing actions, even quoted', () => {
   assert.equal(isReadOnlyCommand('find . -\\delete'), false)
 })
 
+test('an unquoted * ? [ ^ # or ~ is refused, a quoted pattern or revision passes', () => {
+  for (const command of ['git log *', 'find *', 'find . -[d]elete', 'ls ?', 'cat a*', "find . -name '*.md' -[d]elete", 'find . -delete#', 'find ^keep.txt', 'find . -delete~x', 'find . -delet^x', 'git show HEAD^:README.md', 'git diff HEAD~1']) {
+    assert.equal(isReadOnlyCommand(command), false, command)
+  }
+  for (const command of ["find . -name '*.md'", 'grep -rn "a?b" hooks', "grep --include='*.js' -rn foo ."]) {
+    assert.equal(isReadOnlyCommand(command), true, command)
+  }
+})
+
 test('git refuses global options, --output, --exec-path and their abbreviations', () => {
   for (const command of [
     'git -c core.pager=sh log',
@@ -121,8 +130,8 @@ test('git refuses global options, --output, --exec-path and their abbreviations'
   assert.equal(isReadOnlyCommand('git log --oneline -- hooks'), true)
 })
 
-test('the hook denies a researcher command outside the allowlist, as cc-tiers:researcher and as researcher', () => {
-  for (const agent of ['cc-tiers:researcher', 'researcher', 'CC-Tiers:Researcher']) {
+test('the hook denies a cc-tiers researcher command outside the allowlist, in any case', () => {
+  for (const agent of ['cc-tiers:researcher', 'CC-Tiers:Researcher']) {
     const { status, stdout } = run(call(agent, 'rm -rf x'))
     assert.equal(status, 0)
     const out = JSON.parse(stdout).hookSpecificOutput
@@ -133,13 +142,13 @@ test('the hook denies a researcher command outside the allowlist, as cc-tiers:re
 })
 
 test('the hook passes a researcher read-only command with no output', () => {
-  for (const agent of ['cc-tiers:researcher', 'researcher']) {
+  for (const agent of ['cc-tiers:researcher']) {
     assert.deepEqual(run(call(agent, 'git log --oneline -3')), { status: 0, stdout: '', stderr: '' })
   }
 })
 
-test('any other agent, and the main session, pass untouched with no output', () => {
-  for (const agent of ['cc-tiers:implementer', 'implementer', 'Explore', 'cc-tiers:researcher-x', '', undefined]) {
+test('any other agent, another plugin researcher included, and the main session pass untouched with no output', () => {
+  for (const agent of ['cc-tiers:implementer', 'implementer', 'Explore', 'cc-tiers:researcher-x', 'researcher', 'acme:researcher', '', undefined]) {
     assert.deepEqual(run(call(agent, 'rm -rf x; cat a | sh')), { status: 0, stdout: '', stderr: '' }, String(agent))
   }
   const main = JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'rm -rf x' } })
@@ -153,7 +162,7 @@ test('malformed or empty hook input exits 0 with no output', () => {
 })
 
 test('a researcher call with no command is denied', () => {
-  const { stdout } = run(JSON.stringify({ tool_name: 'Bash', agent_type: 'researcher', tool_input: {} }))
+  const { stdout } = run(JSON.stringify({ tool_name: 'Bash', agent_type: 'cc-tiers:researcher', tool_input: {} }))
   assert.equal(JSON.parse(stdout).hookSpecificOutput.permissionDecision, 'deny')
 })
 

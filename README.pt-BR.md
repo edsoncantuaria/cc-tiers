@@ -39,7 +39,7 @@ claude --plugin-dir /caminho/para/cc-tiers
 | Nível | Agente | Modelo | Faz |
 | :-: | --- | --- | --- |
 | Plano | `cc-tiers:orchestrator` | Opus | Divide o pedido, delega e implementa as tarefas difíceis e o teto |
-| Pesquisa | `cc-tiers:researcher` | Sonnet | Acha a versão instalada, a documentação dessa versão, o uso existente, o código reaproveitável e as convenções antes de o código ser escrito. Não edita |
+| Pesquisa | `cc-tiers:researcher` | Sonnet | Acha a versão instalada, a documentação dessa versão, o uso existente, o código reaproveitável, as convenções e como uma funcionalidade costuma ser feita, antes de o código ser escrito. Não edita, e roda um comando de leitura por vez no shell |
 | Padrão | `cc-tiers:implementer` | Sonnet | Features, bugs, testes, refactors locais |
 | Miúdo | `cc-tiers:worker` | Haiku | Renomear, typos, formatação, buscas simples, edições de ~15 linhas |
 | Checagem | `cc-tiers:checker` | Sonnet | Uma passada nova sobre a saída do Haiku. Não edita |
@@ -80,7 +80,7 @@ flowchart LR
 
 ## 🔬 Pesquisa primeiro
 
-Código escrito de memória, com uma versão antiga da API em mente, falha de jeitos que o teste nem sempre pega. Antes de uma tarefa ir para o `cc-tiers:implementer` ou o `cc-tiers:architect`, o `cc-tiers:researcher` (Sonnet, só leitura) confere estas coisas:
+Código escrito de memória, com uma versão antiga da API em mente, falha de jeitos que o teste nem sempre pega. Antes de uma tarefa ir para o `cc-tiers:implementer` ou o `cc-tiers:architect`, o `cc-tiers:researcher` (Sonnet, só leitura) confere estas coisas para as bibliotecas, os frameworks e as APIs externas que a tarefa toca, e para qualquer funcionalidade ou comportamento que ela pede (uma regra de negócio, um fluxo, um padrão de UI):
 
 - A versão em uso, lida primeiro no arquivo de lock e depois no manifesto.
 - A documentação dessa versão, vinda de `vendor/` ou `node_modules/` quando instalada, nunca a da última release por padrão.
@@ -88,9 +88,15 @@ Código escrito de memória, com uma versão antiga da API em mente, falha de je
 - Como o repositório já chama a API, como `arquivo:linha`.
 - Reuso: código que o repositório já tem e que faz tudo ou parte da tarefa, como `arquivo:linha`. A busca cobre funções, queries e métodos de acesso a dados (incluindo os finders do próprio framework), componentes de UI (templates, partials, scripts, estilos) e constantes ou enums. Cada item diz `call as is` ou `needs a change to <arquivo:linha>, called by <arquivo:linha>`. Código específico do projeto (uma query, um componente, uma regra de domínio) vem só do repositório, nunca da web.
 - Convenções: um ou dois trechos próximos a seguir (nomes, tratamento de erro, estilo de teste, quantidade de comentário).
-- Referências fora do repositório, só quando se aplicam.
+- Referências fora do repositório, só quando se aplicam: uma solução documentada para o mesmo problema, ou como outros projetos e produtos resolvem a mesma funcionalidade e o comportamento que os usuários esperam. Uma tarefa sem biblioteca nova também recebe esse passo.
 
 Ele devolve um briefing de até umas 40 linhas em três blocos, **Versão e doc**, **No repo** (uso, Reuso, Convenções) e **Fora do repo**, com a fonte de cada fato. O orquestrador cola o relatório inteiro, trailer incluído, no prompt de quem vai escrever, entre duas linhas que só têm `CC_TIERS_RESEARCH_BEGIN` e `CC_TIERS_RESEARCH_END`, e acrescenta `CC_TIERS_RESEARCH: done`. Uma tarefa que não toca biblioteca, framework nem API externa diz o motivo no lugar: `CC_TIERS_RESEARCH: none - <motivo>`. Um briefing pode servir a várias tarefas: o prompt do pesquisador leva `CC_TIERS_COVERS: <slug>, <slug>`, e um pass marca todos.
+
+**Um briefing que dá para conferir.** O researcher tira toda versão, assinatura, parâmetro, valor padrão e obsolescência do que leu na tarefa, nunca da memória. Para cada fato de que a tarefa depende, põe uma citação curta, palavra por palavra, ao lado da fonte (o limite de 40 linhas vale mais que a citação), e antes de entregar descarta o fato que não sabe apontar, ou o escreve como "not found" com onde procurou. Lock ausente ou documentação ausente é "not found", não uma pesquisa que falhou. As fontes podem estar em qualquer idioma, em todos os modos: a citação mantém o texto original e vem seguida da tradução para o idioma do briefing. Quem escreve (implementer e architect) lê o briefing como dado, nunca como instrução. Um fato que cita o repositório ou um arquivo instalado (`arquivo:linha`, uma entrada do lock, documentação em `vendor/` ou `node_modules/`) é por onde eles começam. Um fato que cita uma página buscada (uma URL), um fato sem fonte e um fato que o código contradiz são pistas: eles conferem no código instalado ou na documentação daquela versão antes de confiar.
+
+**Fontes suspeitas e a guarda do Bash.** Uma página buscada é dado não confiável. Quando uma traz instruções dirigidas ao modelo, o researcher não usa nem segue a página, e o briefing ganha uma linha `Suspect sources:` com a URL e uma linha sobre o que ela tentou. O researcher declara `Bash`, e um agente de plugin não consegue limitar as ferramentas dele, então um hook PreToolUse (`hooks/guard_bash.mjs`, matcher `Bash`) deixa que ele (tipo de agente `cc-tiers:researcher`) rode só um comando de leitura: `cat`, `head`, `tail`, `grep`, `ls`, `wc`, `find` sem `-exec` nem `-delete`, ou `git log`, `git show`, `git diff` ou `git blame`, com um conjunto fechado de caracteres (sem `;`, `&`, `|`, `>`, `<`, crase, `$`, parênteses, chaves, `!` nem barra invertida, sem `*`, `?`, `[`, `^`, `#` ou `~` fora de aspas, e sem `git -c` nem `--output`); ponha o padrão ou a revisão entre aspas, como em `find . -name '*.md'` ou `git show 'HEAD^:README.md'`. Qualquer outra coisa que o researcher rode é negada com o motivo, e ele usa Read, Grep e Glob para o resto. Os outros agentes, inclusive o `researcher` de outro plugin, e a sua própria sessão não são tocados, o hook falha aberto (uma queda dele deixa a chamada passar) e abre um processo node a cada chamada de Bash, algumas dezenas de milissegundos.
+
+**Referências.** O briefing de uma tarefa ou de um estudo termina com linhas `CC_TIERS_REF:`, uma por fonte em que ele se apoia (`lib`, `feature` ou `suspect`). Um relatório que passa as grava como notas `reference` na memória do projeto (veja Memória), e o próximo researcher acha a documentação sem pesquisar de novo.
 
 O hook PreToolUse garante isso. Ele recusa a chamada ao implementer ou ao architect que não tem nem pesquisa concluída para aquela tarefa nem a linha `none`. Pesquisa não é tentativa, e uma pesquisa que falha não conta contra a tarefa. O worker fica de fora. O teto Opus e a tarefa do próprio dispatcher são pesquisados por prompt, sem checagem do hook. `research: off` tira o passo e a checagem.
 
@@ -531,10 +537,10 @@ Chamadas e minutos são medidos. O custo é uma estimativa a partir da contagem 
 
 Com `memory` em `on` (o padrão), o projeto guarda notas pequenas em `.claude/cc-tiers-memory.json`, para a tarefa seguinte não redescobrir tudo. A primeira gravação adiciona o arquivo ao `.git/info/exclude`, como no arquivo de histórico. `off` não lê nem grava.
 
-- **Categorias**: `convention`, `command`, `failure`, `fix`, `dead-end`, `version` e `warning`. Um registro tem uma confiança (`low`, `medium`, `high`), um status (`hypothesis` ou `confirmed`) e um prazo de validade: `convention` e `warning` valem até serem invalidados, `command` e `version` 30 dias, `failure` e `dead-end` 60, `fix` 90. O limite é 200 registros.
+- **Categorias**: `convention`, `command`, `failure`, `fix`, `dead-end`, `version`, `warning` e `reference`. Um registro tem uma confiança (`low`, `medium`, `high`), um status (`hypothesis` ou `confirmed`) e um prazo de validade: `convention` e `warning` valem até serem invalidados, `command` e `version` 30 dias, `failure`, `dead-end` e `reference` 60, `fix` 90. O limite é 200 registros.
 - **Preso a um arquivo**: um registro que depende de um arquivo guarda o hash dele. Quando o arquivo muda, o registro fica vencido e não é lembrado.
-- **O que o hook grava**: um comando que o gate verificou (preso ao manifesto que o declara), uma falha diagnosticada (do gate ou de uma revisão), uma correção depois de um pass que veio após falhas, e um beco sem saída quando uma tarefa é parada. Segredos e linhas `CC_TIERS_*` saem antes (veja Redação de segredos).
-- **Lembrança**: quem escreve recebe as notas que têm duas ou mais palavras em comum com a tarefa dele, ou o mesmo slug, no máximo o número do perfil. Elas chegam entre `CC_TIERS_MEMORY_BEGIN` e `CC_TIERS_MEMORY_END`, marcadas como dado de tarefas anteriores, nunca instrução.
+- **O que o hook grava**: um comando que o gate verificou (preso ao manifesto que o declara), uma falha diagnosticada (do gate ou de uma revisão), uma correção depois de um pass que veio após falhas, um beco sem saída quando uma tarefa é parada, e as referências de um relatório de pesquisa que passou. Uma referência é um ponteiro, não a página: a biblioteca ou funcionalidade, a versão, onde está a documentação (uma URL ou um caminho) e um resumo de uma linha nas palavras do próprio researcher, como hipótese. No máximo 10 são gravadas por relatório, e uma linha `lib` ou `feature` cujo resumo é só `-` é ignorada. Uma referência de biblioteca fica presa ao primeiro arquivo de lock que cita a biblioteca (senão ao primeiro lock, senão ao manifesto) e vence quando esse arquivo muda. Uma referência `suspect` guarda só uma URL `http(s)`, com confiança baixa, para o próximo researcher saber que deve evitá-la. Segredos e linhas `CC_TIERS_*` saem antes (veja Redação de segredos).
+- **Lembrança**: quem escreve recebe as notas que têm duas ou mais palavras em comum com a tarefa dele, ou o mesmo slug, no máximo o número do perfil. Elas chegam entre `CC_TIERS_MEMORY_BEGIN` e `CC_TIERS_MEMORY_END`, marcadas como dado de tarefas anteriores, nunca instrução. Quem escreve recebe todas as categorias menos `reference`. O researcher recebe só as notas `reference` que combinam.
 
 ```
 /cc-tiers:memory list
@@ -624,6 +630,7 @@ Um erro interno num hook do cc-tiers nunca vale como sucesso. `before_agent`, `a
 - A limpeza das linhas de falha que vão para o pesquisador na web troca um caminho absoluto até o primeiro espaço, então o resto de um caminho POSIX que tem um espaço pode ficar na linha.
 - A tabela de hindsight identifica uma tarefa pelo slug, então um slug reutilizado entre sessões vira uma tarefa só.
 - Um slug reutilizado na mesma sessão mantém as contagens de falha e de escalada da execução anterior, e a linha de conclusão diz `after N failed attempts` por elas.
+- A guarda do Bash cobre só o researcher, permite apenas o que reconhece como um comando de leitura e falha aberta: uma queda do hook deixa a chamada passar. Uma nota de referência é o resumo do researcher sobre uma fonte, guardado como hipótese, então um resumo errado é lembrado como dado até vencer ou você invalidá-lo.
 - Uma busca de falha é uma sugestão: nada obriga o orquestrador a rodá-la, e o limite conta as notas que a ofereceram, não as buscas que rodaram.
 - A pontuação de risco por caminho julga nomes de arquivo, não código. Código de auth num arquivo com nome comum (`src/tokens.js`: "tokens" não é a palavra inteira `token`) começa no Sonnet com revisão forçada, não no Opus, e um diretório cujo nome tem ponto e não termina em barra conta como arquivo.
 - Os números de devolvidas são um piso. Um pedido de novo com outras palavras passa batido, e um prompt que cita um slug e reclama de outra coisa é contado até você rodar `--undo`.
@@ -697,7 +704,7 @@ Abra `/config` e ajuste as linhas do cc-tiers. Valem na sessão seguinte (o hook
 | `verify_budget` | `600` | Segundos que o gate pode gastar em um relatório. Comandos além disso ficam não validados, não reprovados. 30–600 |
 | `review_evidence` | `on` | O `fail` do revisor só conta com um achado bloqueante que tenha evidência. `off` conta qualquer `fail` |
 | `profile` | `balanced` | `balanced`, `quality`, `budget` ou `fast`. Move juntos effort, evidência, revisão, escritores em paralelo, memória e checagens. Veja Perfis |
-| `memory` | `on` | Guarda notas do projeto em `.claude/cc-tiers-memory.json` e entrega as que servem a quem escreve. `off` não lê nem grava |
+| `memory` | `on` | Guarda notas do projeto em `.claude/cc-tiers-memory.json` e entrega as que servem a quem escreve, ou ao researcher, no caso das referências. `off` não lê nem grava |
 | `telemetry` | `on` | `on` grava eventos locais, `reduced` só os que importam para falha e escalada, `off` não grava nada |
 | `max_parallel` | `0` | Escritores ao mesmo tempo. 0–16, 0 usa o teto do perfil |
 | `task_budget_usd` | `0` | Custo estimado, a preços de tabela da API, a partir do qual as chamadas de escrita da tarefa pedem sua aprovação. 0–1000, 0 é sem limite |
@@ -785,8 +792,9 @@ claude --plugin-dir .
 | `commands/escalate.md` | `/cc-tiers:escalate` |
 | `commands/study.md` | `/cc-tiers:study` |
 | `config/routing.default.json` | Listas de frases embutidas, escadas de effort e limiares padrão |
-| `hooks/hooks.json` | Resumo no SessionStart, as checagens, o effort, o classificador Haiku e o contador do Agent, SubagentStop, Stop e UserPromptSubmit |
+| `hooks/hooks.json` | Resumo no SessionStart, as checagens, o effort, o classificador Haiku e o contador do Agent, a guarda do Bash, SubagentStop, Stop e UserPromptSubmit |
 | `hooks/cc_tiers.mjs` | Regras de merge, o contador, gasto, orçamento e histórico |
+| `hooks/guard_bash.mjs` | A guarda do Bash: deixa o researcher rodar um comando de leitura e nega o resto |
 | `hooks/route.mjs` | A heurística por trás do `/cc-tiers:route` |
 | `hooks/verify.mjs` | O gate de verificação: ler `CC_TIERS_VERIFY`, a lista de prefixos, rodar os comandos e julgar os achados |
 | `hooks/report.mjs` | A tabela por trás do `/cc-tiers:report` |
@@ -807,12 +815,23 @@ claude --plugin-dir .
 | `hooks/telemetry.mjs`, `hooks/insights.mjs` | O log local de eventos e o auxiliar por trás do `/cc-tiers:insights` |
 | `hooks/integrity.mjs` | Falhas dos hooks: o registro em `hook-errors.jsonl` e o aviso de que o trabalho não está validado |
 | `hooks/redact.mjs` | A máscara de segredos antes da memória, da telemetria e da trilha de auditoria |
+| `evals/` | Evals de comportamento para o `claude plugin eval`: um diretório por caso (`case.yaml`, `fixture.sh`, `prompt.md`, `graders/`) e o `evals/README.md` |
 | `.github/workflows/ci.yml` | Testes no Linux, macOS e Windows, e `claude plugin validate` |
 | `CHANGELOG.md` | Notas da versão |
 
+### Evals
+
+O `npm test` confere os hooks. O `evals/` confere como o plugin se comporta numa execução de verdade, com o `claude plugin eval` (Claude Code 2.1.269 ou mais novo). Cada caso monta um repositório pequeno com o `fixture.sh`, dá ao orquestrador um prompt que não fala de agentes e avalia o que ele fez. Há dois conjuntos: `research-before-implementer` (um researcher roda antes do implementer) e uma varredura de effort com sete casos que compara as escadas de effort. A varredura não mudou nenhuma escada. Um caso custa uns US$ 0,5 a 0,8 por execução, então passe `--max-cost-usd`:
+
+```bash
+claude plugin eval . --case research-before-implementer --ablation none --scaffold --trust-plugin --no-publish --max-cost-usd 10 --allow-tools Bash,Edit,Write
+```
+
+O `evals/README.md` tem as flags, os resultados e os limites: o Bash falhou dentro das execuções na máquina que as rodou, uma palavra de revisão num texto citado subiu a escada do Sonnet, e o effort do revisor Opus fica fora da escada. Os resultados vão para `evals/results/`, que o git ignora.
+
 ## 🔒 Privacidade
 
-Nada sai da sua máquina, e os hooks de comando não fazem chamadas de rede. O cc-tiers guarda um log local de eventos (veja Telemetria e insights), que `telemetry: off` desliga. Com `classifier: haiku`, o hook classificador manda o input de cada chamada a `cc-tiers:worker` para o Haiku pelo Claude Code, do mesmo jeito que a sessão fala com o Claude. Quando o orquestrador roda uma busca de falha, as consultas web do pesquisador levam a mensagem de falha, a biblioteca e a versão, limpas de segredos, caminhos absolutos e tokens `CC_TIERS_`; `failure_research: off` tira a sugestão. Os hooks leem os arquivos de roteamento, as opções de plugin que o Claude Code já passa, o transcript da sessão, `.claude/cc-tiers-rubric.md` quando uma revisão roda e o projeto tem um, e os dados locais do cc-cost quando esse plugin está instalado. Gravam o contador de tentativas no diretório de dados do plugin (`latest.json` e um arquivo por sessão), o log de eventos `events.jsonl` (e `events.1.jsonl`) ali, a menos que a telemetria esteja `off`, e, com o aprendizado ligado, `.claude/cc-tiers-history.json` no projeto mais uma linha em `.git/info/exclude`. Com a memória ligada, gravam também `.claude/cc-tiers-memory.json` no projeto, mantido fora do git por uma linha própria em `.git/info/exclude`. Os eventos não guardam texto de prompt nem de arquivo, e os dois arquivos passam antes pela redação de segredos. Desinstalar o plugin remove o diretório de dados, a menos que você passe `--keep-data`. Os arquivos de histórico e de memória ficam no projeto até você apagá-los.
+Nada sai da sua máquina, e os hooks de comando não fazem chamadas de rede. O cc-tiers guarda um log local de eventos (veja Telemetria e insights), que `telemetry: off` desliga. Com `classifier: haiku`, o hook classificador manda o input de cada chamada a `cc-tiers:worker` para o Haiku pelo Claude Code, do mesmo jeito que a sessão fala com o Claude. Quando o orquestrador roda uma busca de falha, as consultas web do pesquisador levam a mensagem de falha, a biblioteca e a versão, limpas de segredos, caminhos absolutos e tokens `CC_TIERS_`; `failure_research: off` tira a sugestão. Os hooks leem os arquivos de roteamento, as opções de plugin que o Claude Code já passa, o transcript da sessão, `.claude/cc-tiers-rubric.md` quando uma revisão roda e o projeto tem um, e os dados locais do cc-cost quando esse plugin está instalado. Gravam o contador de tentativas no diretório de dados do plugin (`latest.json` e um arquivo por sessão), o log de eventos `events.jsonl` (e `events.1.jsonl`) ali, a menos que a telemetria esteja `off`, e, com o aprendizado ligado, `.claude/cc-tiers-history.json` no projeto mais uma linha em `.git/info/exclude`. Com a memória ligada, gravam também `.claude/cc-tiers-memory.json` no projeto, mantido fora do git por uma linha própria em `.git/info/exclude`; uma nota de referência guarda uma URL ou um caminho e um resumo de uma linha, nunca o texto de uma página. Os eventos não guardam texto de prompt nem de arquivo, e os dois arquivos passam antes pela redação de segredos. Desinstalar o plugin remove o diretório de dados, a menos que você passe `--keep-data`. Os arquivos de histórico e de memória ficam no projeto até você apagá-los.
 
 ---
 

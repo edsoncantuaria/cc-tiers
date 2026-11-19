@@ -2,11 +2,15 @@
 /**
  * PreToolUse hook for Bash calls. The researcher declares Bash in its tools, and a plugin agent
  * cannot limit it, so this denies any researcher command that is not one read-only command.
- * Any other agent, and the main session, pass untouched with no output.
+ * Any other agent, another plugin's researcher included, and the main session pass untouched with no output.
  */
 
 import { pathToFileURL } from 'node:url'
 import { readPayload } from './integrity.mjs'
+
+// Claude Code names a plugin agent <plugin>:<agent>; only cc-tiers's own researcher is held to the list.
+const RESEARCHER = 'cc-tiers:researcher'
+const GLOB_CHARACTERS = new Set(['*', '?', '[', '^', '#', '~'])
 
 const READ_ONLY = new Set(['cat', 'head', 'tail', 'grep', 'ls', 'wc', 'find', 'git'])
 const GIT_READ_ONLY = new Set(['log', 'show', 'diff', 'blame'])
@@ -18,16 +22,28 @@ const SAFE_CHARACTERS = /^[A-Za-z0-9 _.,/:=@+%*?[\]^#~'"-]+$/
 
 export const DENY_REASON =
   'cc-tiers: the researcher may run one read-only command: cat, head, tail, grep, ls, wc, find without -exec/-delete, or git log/show/diff/blame. ' +
-  'No shell syntax such as ; & | > < ` $ ( ) { } ! or a backslash, and no git -c or --output. Use Read, Grep and Glob for the rest.'
+  'No shell syntax such as ; & | > < ` $ ( ) { } ! or a backslash, no unquoted * ? [ ^ # ~ (quote a pattern or a revision such as "HEAD^:file"), and no git -c or --output. Use Read, Grep and Glob for the rest.'
 
 /** The words of a command with quotes removed, so a quoted option is checked as git would read it. */
 function words(command) {
   return command.replace(/['"]/g, '').split(/\s+/).filter(Boolean)
 }
 
+/** True when a glob character stands outside quotes: the shell would expand it to file names (a planted `-delete`) after this check; zsh's extendedglob adds ^ # ~. */
+function unquotedGlob(command) {
+  let quote = ''
+  for (const char of command) {
+    if (quote) {
+      if (char === quote) quote = ''
+    } else if (char === "'" || char === '"') quote = char
+    else if (GLOB_CHARACTERS.has(char)) return true
+  }
+  return false
+}
+
 /** True when the command is one read-only command from the researcher's allowlist. */
 export function isReadOnlyCommand(command) {
-  if (typeof command !== 'string' || !SAFE_CHARACTERS.test(command)) return false
+  if (typeof command !== 'string' || !SAFE_CHARACTERS.test(command) || unquotedGlob(command)) return false
   const [program, ...args] = words(command)
   if (!READ_ONLY.has(program)) return false
   if (program === 'find') return !args.some((arg) => FIND_WRITES.has(arg))
@@ -40,9 +56,7 @@ export function isReadOnlyCommand(command) {
 }
 
 async function main(payload) {
-  if (!payload.agent_type) return
-  const { matchRole } = await import('./cc_tiers.mjs')
-  if (matchRole(payload.agent_type) !== 'researcher') return
+  if (String(payload.agent_type || '').toLowerCase() !== RESEARCHER) return
   if (isReadOnlyCommand(payload.tool_input?.command)) return
   const output = { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: DENY_REASON }
   process.stdout.write(`${JSON.stringify({ hookSpecificOutput: output })}\n`)

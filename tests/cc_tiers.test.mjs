@@ -113,7 +113,7 @@ test('required files are present and Python hooks are gone', () => {
 test('manifest declares the 0.5.0 knobs', () => {
   const manifest = JSON.parse(readFileSync(path.join(ROOT, '.claude-plugin/plugin.json'), 'utf8'))
   assert.equal(manifest.name, 'cc-tiers')
-  assert.equal(manifest.version, '0.13.8')
+  assert.equal(manifest.version, '0.13.9')
   assert.equal(JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version, manifest.version)
   assert.equal(/\s|@|:|\/|\\/.test(manifest.name), false)
   assert.equal(RESERVED_PREFIXES.some((prefix) => manifest.name.startsWith(prefix)), false)
@@ -4209,7 +4209,9 @@ test('a researcher report saves its references, and the next researcher gets the
   const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-ref-'))
   try {
     writeFileSync(path.join(dir, 'package.json'), '{}')
-    writeFileSync(path.join(dir, 'package-lock.json'), '{"lock":1}')
+    // composer.lock comes first in the list but does not name the library, so the npm lock that does is the one it is tied to.
+    writeFileSync(path.join(dir, 'composer.lock'), '{"packages":[]}')
+    writeFileSync(path.join(dir, 'package-lock.json'), '{"lock":1,"react-query":"5.0.0"}')
     const routing = riskyRouting()
     const ctx = { routing, ccCost: false, projectDir: dir }
     const file = memory.memoryPath(dir)
@@ -4256,8 +4258,9 @@ test('a researcher report saves its references, and the next researcher gets the
     assert.match(writer.input.prompt, /\[warning, hypothesis, low\] react query cache keys must stay stable/)
     assert.doesNotMatch(writer.input.prompt, /\[reference,/)
 
-    writeFileSync(path.join(dir, 'package-lock.json'), '{"lock":2}')
+    writeFileSync(path.join(dir, 'package-lock.json'), '{"lock":2,"react-query":"5.0.1"}')
     assert.equal(researcher('Research react query cache keys for the orders list.').input, null, 'a changed lock makes the library reference stale')
+    assert.match(tiers.policyLines(routing).join('\n'), /the researcher gets matching reference notes/)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
