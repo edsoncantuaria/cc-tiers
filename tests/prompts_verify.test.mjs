@@ -68,6 +68,17 @@ test('prompts ground research facts in their sources', () => {
   for (const needle of ['never from memory', 'word for word', 'drop a fact you cannot point to']) assert.ok(researcher.includes(needle), `researcher mentions ${needle}`)
 })
 
+test('prompts treat a fact from a fetched page as a lead and quote only what the task depends on', () => {
+  for (const file of ['agents/implementer.md', 'agents/architect.md']) {
+    const text = read(file)
+    for (const needle of ['whose source is a fetched page (a URL) is a lead: check it against the installed code or the docs of that version before you rely on it', 'Start from a fact whose source is the repo or an installed file']) {
+      assert.ok(text.includes(needle), `${file} mentions ${needle}`)
+    }
+  }
+  const researcher = read('agents/researcher.md')
+  for (const needle of ['Quote only the facts the task depends on', 'The limit of about 40 lines below wins over quoting']) assert.ok(researcher.includes(needle), `researcher mentions ${needle}`)
+})
+
 test('prompts keep code other code calls unchanged and search the repo for queries and components', () => {
   const researcher = read('agents/researcher.md')
   for (const needle of ['queries and data-access methods', 'generic finders of the framework', 'UI components', 'constants or enums', '`call as is`', 'needs a change to <file:line>, called by <file:line>', 'only from the repo', 'step 4 never supplies it']) {
