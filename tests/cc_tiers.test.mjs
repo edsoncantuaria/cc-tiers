@@ -1457,6 +1457,51 @@ test('CC_TIERS_RISK: none with a reason waives a keyword that is only text, and 
   assert.ok(apply(tiers.emptyState('s'), cheap, 't3', 'implementer', echoed, waived).message.includes('cc-tiers:reviewer (Opus)'))
 })
 
+test('the keyword scan of a delegation prompt skips fenced blocks, and the report scan does not', () => {
+  const routing = defaultRouting({ verify: 'off', research: 'off', specify: 'off' })
+  const header = 'CC_TIERS_TASK: users-pagination\nCC_TIERS_TIER: sonnet\nCC_TIERS_ROLE: implementer\n'
+  const fence = '```\nbash: permission denied\n```'
+  const first = (task) => tiers.checkDelegation(tiers.emptyState('s'), { subagent_type: 'cc-tiers:implementer', prompt: `${header}${task}` }, routing)
+
+  // An error quoted inside a fence is not the task: no keyword factor, no boost.
+  const quoted = `Add pagination to GET /users. The sandbox said:\n${fence}\nRetry it.`
+  assert.equal(tiers.keywordRisk(`${header}${quoted}`, routing), false)
+  assert.equal(tiers.isRisky(`${header}${quoted}`, routing), false)
+  const decided = tiers.decideTier(`${header}${quoted}`, routing)
+  assert.deepEqual([decided.tier, decided.because, decided.effort, decided.risk.level], ['sonnet', 'default', 'high', 'low'])
+  assert.equal(decided.risk.factors.some((factor) => factor.startsWith('risk keyword')), false)
+  const call = first(quoted)
+  assert.equal(call.input, null)
+  assert.equal(call.context.includes('review keyword'), false)
+  assert.equal(tiers.keywordRisk(`${header}Add pagination.\n\`\`\`sh\nsudo chmod 600 secret.key\n\`\`\`\n  \`\`\`\npassword\n  \`\`\``, routing), false)
+
+  // The same words in the prose still count, before or after the fence.
+  const prose = `Fix the login handler. It fails with:\n${fence}`
+  assert.equal(tiers.keywordRisk(`${header}${prose}`, routing), true)
+  const hard = tiers.decideTier(`${header}${prose}`, routing)
+  assert.equal(hard.risk.level, 'high')
+  assert.ok(hard.risk.factors.includes('risk keyword'))
+  assert.equal(first(prose).input.effort, 'xhigh')
+  assert.ok(first(prose).context.includes('review keyword'))
+  assert.equal(tiers.keywordRisk(`${header}${fence}\nFix the login handler.`, routing), true)
+  assert.equal(tiers.keywordRisk(`${header}${fence}\nRetry.\n${fence}\nCheck the permission checks.`, routing), true)
+
+  // An unclosed fence hides nothing: the text after it is prose.
+  assert.equal(tiers.keywordRisk(`${header}Add pagination.\n\`\`\`\nbash: permission denied`, routing), true)
+  assert.equal(tiers.keywordRisk(`${header}Add pagination.\n${fence}\n\`\`\`\nbash: permission denied`, routing), true)
+
+  // /cc-tiers:route and the waiver keep working.
+  assert.equal(tiers.keywordRisk(`${header}CC_TIERS_RISK: none - git command\nFix the login handler.`, routing), false)
+
+  // A writer's report is scanned whole, fences included.
+  const text = 'Changed the pagination.\n```\npassword = "x"\n```'
+  assert.equal(tiers.isRisky(text, routing, { waivable: false }), true)
+  const cheap = defaultRouting({ review_policy: 'cheap', verify: 'off' })
+  const done = report('implementer', 'sonnet', 'pass', 'pending', 'done')
+  assert.ok(apply(tiers.emptyState('s'), cheap, 't1', 'implementer', `${text}\n${done}`, `${header}${quoted}`).message.includes('cc-tiers:reviewer (Opus)'))
+  assert.ok(apply(tiers.emptyState('s'), cheap, 't2', 'implementer', `Changed the pagination.\n${done}`, `${header}${quoted}`).message.includes('no review is due'))
+})
+
 test('a risky Sonnet pass is sent to Opus under the cheap policy', () => {
   const routing = defaultRouting({ review_policy: 'cheap', verify: 'off' })
   const prompt = 'CC_TIERS_TASK: users-pagination\nCC_TIERS_TIER: sonnet\nCC_TIERS_ROLE: implementer\nAdd OAuth authentication to /login.'

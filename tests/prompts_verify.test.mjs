@@ -139,6 +139,14 @@ test('session prompts handle the small path note', () => {
   }
 })
 
+test('session prompts put error output and failure notes in a fenced block, which the keyword scan skips', () => {
+  for (const file of ['agents/orchestrator.md', 'agents/dispatcher.md', 'skills/tiers/SKILL.md']) {
+    const text = read(file)
+    for (const needle of ['Put error output and failure notes inside a fenced block (three backticks)', 'the keyword scan skips fenced blocks']) assert.ok(text.includes(needle), `${file} mentions ${needle}`)
+  }
+  for (const file of ['agents/orchestrator.md', 'skills/tiers/SKILL.md']) assert.ok(read(file).includes(', inside a fenced block.'), `${file} pastes retry notes in a fenced block`)
+})
+
 test('orchestrator session prompts plan in plan mode with a title line and a no-answer fallback', () => {
   for (const file of ['agents/orchestrator.md', 'skills/tiers/SKILL.md']) {
     const text = read(file)

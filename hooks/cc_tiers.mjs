@@ -487,10 +487,19 @@ export function isRisky(text, routing, { waivable = true, projectDir = '' } = {}
   return waivable ? keywordRisk(text, routing, projectDir) === true : matchesReview(text, routing)
 }
 
-function matchesReview(text, routing) {
+/**
+ * A delegation prompt quotes error output and failure notes inside fences, so its scan skips them (skipFences);
+ * a writer's report is scanned whole.
+ */
+function matchesReview(text, routing, { skipFences = false } = {}) {
   const opus = routing?.tiers?.opus
-  return matchesAny(stripHeaders(text), opus?.reviewWhen) || matchesKeyword(stripHeaders(text), opus?.reviewKeywords)
+  const body = skipFences ? stripFences(stripHeaders(text)) : stripHeaders(text)
+  return matchesAny(body, opus?.reviewWhen) || matchesKeyword(body, opus?.reviewKeywords)
 }
+
+/** Fenced code blocks (``` lines) removed; an unclosed fence strips nothing, so a stray fence never hides the task's own words. */
+const FENCED_BLOCK_RE = /^[ \t]*```[^\n]*\n(?:[\s\S]*?\n)?[ \t]*```[^\n]*$/gm
+const stripFences = (text) => text.replace(FENCED_BLOCK_RE, '')
 
 /** A name with an extension: `hooks` or `src/` may be a directory, so it says nothing about what is inside. */
 const looksLikeFile = (file) => /\.[^./]+$/.test(file.slice(file.lastIndexOf('/') + 1))
@@ -506,7 +515,7 @@ function namesOnlyOrdinaryFiles(text, projectDir) {
  * false without a keyword, or when CC_TIERS_RISK: none (with a reason) waives it.
  */
 export function keywordRisk(text, routing, projectDir = '') {
-  if (RISK_NONE_RE.test(parseHeaders(text).RISK || '') || !matchesReview(text, routing)) return false
+  if (RISK_NONE_RE.test(parseHeaders(text).RISK || '') || !matchesReview(text, routing, { skipFences: true })) return false
   return namesOnlyOrdinaryFiles(text, projectDir) ? 'text' : true
 }
 
