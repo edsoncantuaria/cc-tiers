@@ -46,7 +46,7 @@ const DETAIL_CASES = [
   ['infra', 'ENOSPC: no space left on device'],
   ['infra', 'FATAL ERROR: JavaScript heap out of memory'],
   ['infra', 'Cannot connect to the Docker daemon'],
-  ['infra', 'o e2e está em uso: outra execução tem a trava (/tmp/integracao-e2e.trava).'],
+  ['infra', 'o e2e está em uso: outra execução tem a trava (/tmp/e2e-suite.trava).'],
   ['infra', 'sqlite3.OperationalError: database is locked'],
   ['infra', 'E: Could not get lock /var/lib/dpkg/lock-frontend'],
   ['infra', 'Could not obtain lock on relation "users"'],
@@ -427,10 +427,10 @@ test('an assertion that names a lock is a test, a lock message on its own line i
     assert.equal(diagnosis.category, 'test', detail)
     assert.equal(diagnosis.confirmed, true, detail)
   }
-  const beside = fromDetail('not ok 1 - runs the suite\no e2e está em uso: outra execução tem a trava (/tmp/integracao-e2e.trava).')
+  const beside = fromDetail('not ok 1 - runs the suite\no e2e está em uso: outra execução tem a trava (/tmp/e2e-suite.trava).')
   assert.equal(beside.category, 'infra')
   assert.equal(beside.confirmed, true)
-  assert.equal(beside.symptom, 'o e2e está em uso: outra execução tem a trava (/tmp/integracao-e2e.trava).')
+  assert.equal(beside.symptom, 'o e2e está em uso: outra execução tem a trava (/tmp/e2e-suite.trava).')
   const failed = fromDetail('AssertionError [ERR_ASSERTION]: expected 1 to equal 2\ndatabase is locked')
   assert.equal(failed.category, 'test', 'a failed assertion anywhere keeps the output a code failure')
 })
@@ -830,7 +830,7 @@ test('an environment sign outranks data, and a failed assertion that quotes data
 
 test('the legacy-DB note stays out of data, and its next step does not forbid code changes', () => {
   const note =
-    'step gerarRequisicao, Site login fatal \'relação "public.acesso_" não existe\' (legacy site DB absent in e2e, qualicheck UsuarioPartAutenticacaoAction.php:519 / AcessoDAO.php:208); needs a decision on the environment, so I stopped without a green run or a commit'
+    'step gerarRequisicao, Site login fatal \'relação "public.acesso_" não existe\' (legacy site DB absent in e2e, legacy app AuthAction.php:519 / AccessDAO.php:208); needs a decision on the environment, so I stopped without a green run or a commit'
   const diagnosis = fromReason(note)
   assert.notEqual(diagnosis.category, 'data')
   assert.doesNotMatch(nextAction(diagnosis, { tier: 'sonnet', attemptsLeft: 2 }).note, /do not change code/i)

@@ -224,13 +224,13 @@ test('testsAvailableIn reads the project directory', async () => {
     assert.equal(testsAvailableIn(await make('noscript', { 'package.json': '{"name":"x"}' })), false)
     assert.equal(testsAvailableIn(await make('broken', { 'package.json': '{nope' })), false)
     assert.equal(testsAvailableIn(await make('file-named-test', { test: 'not a dir' })), false)
-    // Any letter case of a test directory counts, as does a phpunit config inside it (qualicheck: Test/phpunit.dist.xml).
+    // Any letter case of a test directory counts, as does a phpunit config inside it (e.g. Test/phpunit.dist.xml).
     for (const dir of ['Test', 'TESTS', 'Spec', '__Tests__']) assert.equal(testsAvailableIn(await make(`c-${dir}`, {}, [dir])), true, dir)
     const phpunit = await make('phpunit', {}, ['Test'])
     await writeFile(path.join(phpunit, 'Test', 'phpunit.dist.xml'), '')
     assert.equal(testsAvailableIn(phpunit), true)
     assert.equal(testsAvailableIn(await make('file-named-Test', { Test: 'not a dir' })), false)
-    // A Makefile counts only with a `test` rule (integracao-e2e); .PHONY, a longer name, an assignment or a recipe line do not.
+    // A Makefile counts only with a `test` rule (e2e-suite); .PHONY, a longer name, an assignment or a recipe line do not.
     assert.equal(testsAvailableIn(await make('make-rule', { Makefile: 'build:\n\tgo build\n\ntest:\n\t@go test ./...\n' })), true)
     assert.equal(testsAvailableIn(await make('make-rule-spaced', { Makefile: 'test : build\n\tgo test\n' })), true)
     // make also reads makefile and GNUmakefile.

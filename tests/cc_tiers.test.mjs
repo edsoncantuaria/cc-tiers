@@ -4229,8 +4229,8 @@ test('review floor: a change to a sensitive file the prompt did not name cannot 
 })
 
 const LINT_SPEC = 'Criteria:\n- the lint is clean (request)\nChecks:\n- `make lint` exits 0 (repo: Makefile)'
-const LINT_GATE = { ...GATE_BASE, status: 'pass', verified: ['cd integracao-e2e && make lint'] }
-const lintReport = `${report('implementer', 'sonnet', 'pass')}\nCC_TIERS_CRITERION: C1 pass - ran \`make lint\`\nCC_TIERS_CRITERION: C2 pass - ran it\nCC_TIERS_VERIFY: cd integracao-e2e && make lint`
+const LINT_GATE = { ...GATE_BASE, status: 'pass', verified: ['cd e2e-suite && make lint'] }
+const lintReport = `${report('implementer', 'sonnet', 'pass')}\nCC_TIERS_CRITERION: C1 pass - ran \`make lint\`\nCC_TIERS_CRITERION: C2 pass - ran it\nCC_TIERS_VERIFY: cd e2e-suite && make lint`
 const completionLine = (message) => message.split('\n').find((line) => line.startsWith('cc-tiers completion:'))
 
 test('a check run behind a cd by the gate evidences the criterion in the completion line', () => {
@@ -4240,7 +4240,7 @@ test('a check run behind a cd by the gate evidences the criterion in the complet
   assert.equal(tiers.applyEvent(state, gateEvent('a', lintReport, LINT_GATE), routing).meta.outcome, 'review')
   const reviewed = apply(state, routing, 'b', 'reviewer', report('reviewer', 'opus', 'pass'))
   assert.match(reviewed.message, /Criteria with evidence: 2\/2\./)
-  assert.match(reviewed.message, /\| C2 `make lint` exits 0 \| pass \| cd integracao-e2e && make lint \|/)
+  assert.match(reviewed.message, /\| C2 `make lint` exits 0 \| pass \| cd e2e-suite && make lint \|/)
   assert.doesNotMatch(reviewed.message, /did not run/)
 })
 
