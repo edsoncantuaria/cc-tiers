@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.13.10 - 2026-11-19
+
+### Changed
+
+- The keyword scan of a delegation (`keywordRisk`) skips fenced code blocks. A quoted error such as `permission denied` matched `permission` and raised the effort and forced a review. The orchestrator, the dispatcher and the tiers skill now paste only error output and failure notes inside a fence and say in prose what the task changes, so the task's own words are still read. An unclosed fence counts as prose, the writer's report is still read whole, and a sensitive path and `CC_TIERS_RISK` work as before.
+- The researcher's git is limited to `git log` and `git show`, each starting with `--no-textconv --no-ext-diff --no-show-signature` right after the subcommand, then a closed list of options (`-p`, `--stat`, `--name-only`, `--oneline`, `--follow`, `-S`, `-G`, `-n`, `--author`, `--grep`, `--since`, `--until` and a few more), a revision that does not start with `:`, and paths after `--`. `git diff` and `git blame` are refused, and the words are split as the shell does, with quotes. Accepted limit: the repository's own config can still make `log` or `show` run a program (`format.pretty` with `%G?` runs `gpg.program`, `diff.submodule=diff` runs a submodule's `diff.external`), because a hook that only denies cannot close that without `-c` or an environment variable.
+- A library reference is tied to a lock file by that format's own key, not by substring (`ws` matched `jsdom`): composer `"name"`, npm `node_modules/<name>` and the v1 map, yarn `<name>@` at the start of an entry, pnpm `<name>@` (v9) or `/<name>@` (v6), Cargo and `go.sum` by line, uv and poetry by the PEP 503 name. The order and the fallbacks are the same (the lock that names it, else the first lock, else the manifest). Open note: the npm v1 form also matches a `peerDependenciesMeta` key in a v2 or v3 lock, which only matters with several locks in a project.
+- With the effort ladder on, the review roles and the planner take the first rung of their model's ladder when the project's `.claude/cc-tiers.json` sets that ladder (`effort.opus` for the reviewer and the planner, `effort.sonnet` for the checker). Without a project ladder each keeps the effort its agent file pins, so the default does not change. A request above the rung is kept up to the top of the ladder, and conserve still caps it. `settleEffort` holds the rule shared with `attemptEffort`.
+- `evals/README.md` has a "Rerun attempt" section: the preview with `kernel.apparmor_restrict_unprivileged_userns=0` passed the graders ($0.87) but Bash still failed, because the AppArmor profile `bwrap-userns-restrict` strips the capabilities of bwrap's children and the eval sandbox's nested namespace is denied. The maintainer did not unload the profile. The section says the cause, how to measure on another machine and the command, and two new cases, `effort-review-opus-medium` and `effort-review-opus-high`, set the reviewer's level through the project ladder. The ladders stay as they are.
+
+### Fixed
+
+- A resumed session (SessionStart source `resume`) marks the background agents of the previous process as stopped, so they no longer hold the gate or the request for a verdict. `compact` leaves them alone, and a later `SendMessage` makes one count as running again.
+- A review's time is the later of its launch and its latest resume by `SendMessage`, in `parkedFor` and in the `final-gate` comparison, and an attempt read in the same scan as the resume sits before it. A reviewer resumed after a new attempt therefore judges that attempt. A review resumed with no new attempt still does not clear a rejection.
+- Why: the first delegation of a task was boosted by a quoted error, not by the task (#17); a researcher that could run `git diff` or `git blame` could be made to run a program from a repository's config, and a reference was tied to the wrong lock by a substring (#20); the effort ladders could not be compared for the reviewer (#18); and a resumed session counted dead agents and a resumed reviewer judged the old attempt (#19).
+
 ## 0.13.9 - 2026-11-19
 
 ### Changed
