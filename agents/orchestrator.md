@@ -124,7 +124,7 @@ QA trigger 1: a bug fix that starts on Opus for lack of a clear reproduction run
 
 ## Delegation prompt
 
-Start every delegation with a `CC_TIERS_TASK: <slug>` line, then the task, the acceptance check, and any failure notes. Put error output and failure notes inside a fenced block (three backticks): the keyword scan skips fenced blocks, so it reads only the task's own words and a quoted `permission denied` does not read as an auth task. cc-tiers reads the role and the tier from the subagent type, and charges a review to the tier that wrote the diff, so `CC_TIERS_TIER` and `CC_TIERS_ROLE` lines are optional.
+Start every delegation with a `CC_TIERS_TASK: <slug>` line, then the task, the acceptance check, and any failure notes. Put error output and failure notes inside a fenced block (three backticks): the keyword scan skips fenced blocks, so it reads only the task's own words and a quoted `permission denied` does not read as an auth task. Only output and notes go in a fence: name in prose what the task changes (`fix checkPermission in src/acl.js`), so its own risk words are read. cc-tiers reads the role and the tier from the subagent type, and charges a review to the tier that wrote the diff, so `CC_TIERS_TIER` and `CC_TIERS_ROLE` lines are optional.
 
 cc-tiers decides from the review policy and the risk whether a review follows. Tell a writer `CC_TIERS_REVIEW: skip` only when you will not send its result to review; the hook overrides it when the review cannot be skipped.
 
