@@ -105,3 +105,23 @@ The rule in the issue: change the ladder only where a level passes as often with
 | opus | `high` | keep | not measurable here: the reviewer is outside the ladder, and the review case reached the reviewer in 1 of 3 runs per level (pass rate 1/3 and `lines` defect gone 3/3 at both `medium` and `high`, re-graded) |
 
 Nothing in `config/routing.default.json`, `agents/*.md` or `hooks/` was changed. A repeat on a machine where Bash works, with more runs, is the way to get a real Sonnet and Opus reading.
+
+## Rerun attempt (issue #18)
+
+The sweep above could not tell levels apart because Bash failed inside every run. Issue #18 tried to rerun it with Bash working. It did not get that far on this machine.
+
+**Precheck.** With `kernel.apparmor_restrict_unprivileged_userns` set to `0` for the run, one run of `research-before-implementer` passed its graders (score 1.00, $0.87, `evals/results/2026-11-19T15-55-24-917Z`), but Bash still failed in it: the kept trace has `apply-seccomp: write /proc/self/setgroups (nested userns is capability-restricted; caller must provide CAP_SYS_ADMIN): Permission denied`, and the implementer reported `fail` because `npm test` could not run. The sweep was not started.
+
+**Cause.** The sysctl alone is not enough on Ubuntu with AppArmor. The `bwrap-userns-restrict` profile (`/etc/apparmor.d/bwrap-userns-restrict`) lets `bwrap` create its user namespace but strips capabilities from its children, so the nested user namespace the eval's Bash sandbox needs is denied. It reproduces without the eval: `bwrap --dev-bind / / --unshare-user -- bwrap --dev-bind / / --unshare-user -- true` fails with "No permissions to create a new namespace".
+
+**To measure.** Run the cases on a machine or CI runner without that profile (or, for the run only, with `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` and `sudo apparmor_parser -R /etc/apparmor.d/bwrap-userns-restrict`, restored afterwards with `sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict` and `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1`; the maintainer chose not to do this here). Check first that the trace of one pilot run has no `apply-seccomp` line.
+
+**Ready cases.** `effort-review-opus-medium` and `effort-review-opus-high` copy `effort-review` and set the reviewer's level through the project file (`{"effort": {"opus": ["medium", "xhigh"]}}` and `["high", "xhigh"]`), which cc-tiers now honours for review roles (`reviewEffort` in `hooks/cc_tiers.mjs`), instead of flattening every agent with `CLAUDE_CODE_EFFORT_LEVEL`. The opus ladder also sets `cc-tiers:planner` (and an Opus `cc-tiers:architect` writer), so a run that calls either has a second variable; the orchestrator itself keeps its own effort. Run them with the haiku pair and the one-level sonnet pair, 3 runs each:
+
+```
+for c in effort-haiku-low effort-haiku-medium effort-sonnet-only-medium effort-sonnet-only-high effort-review-opus-medium effort-review-opus-high; do
+  claude plugin eval . --case "$c" --ablation none --scaffold --trust-plugin --no-publish --keep-temp --runs 3 -j 3 --max-cost-usd 4 --allow-tools Bash,Edit,Write
+done
+```
+
+**Decision.** No new numbers, so the ladders stay as they are (haiku `low`, sonnet `high`, opus `high`). For haiku and sonnet the reasons are in the table above; for opus the reason is now only the missing measurement, since the reviewer does follow a project ladder (`reviewEffort`, commit 27580ec).
