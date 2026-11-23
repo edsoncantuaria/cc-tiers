@@ -229,6 +229,13 @@
       "default": "on",
       "options": ["on", "off"]
     },
+    "adaptive_review": {
+      "type": "string",
+      "title": "Adaptive review",
+      "description": "on (default): under review_policy risky or cheap, a Haiku or Sonnet pass finishes without review when its risk is low, its gate verified every command, and a verified command proves every spec criterion. Medium risk and up, an Opus writer, a criterion only declared, a flaky or unvalidated gate, or a retry after any failure still go to review. off: every pass the review policy names is reviewed.",
+      "default": "on",
+      "options": ["on", "off"]
+    },
     "contract_approval": {
       "type": "string",
       "title": "Criteria approval",
