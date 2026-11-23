@@ -2084,7 +2084,8 @@ function applyResearch(state, meta, task, headers, event) {
   const slugs = [...new Set([task, ...covers])]
   markResearched(state, slugs)
   meta.references = parseReferences(stripBriefs(event.text || ''))
-  queueEvent(state, { type: 'research.done', task })
+  // Each covered slug shares the paid research, so insights counts it as paid too.
+  for (const name of slugs) queueEvent(state, { type: 'research.done', task: name })
   return { state, meta, message: `cc-tiers marked ${slugs.join(', ')} as researched.` }
 }
 
