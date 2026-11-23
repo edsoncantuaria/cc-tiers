@@ -11,6 +11,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const tiers = await import(pathToFileURL(path.join(ROOT, 'hooks', 'cc_tiers.mjs')).href)
 const { parseContract } = await import(pathToFileURL(path.join(ROOT, 'hooks', 'contract.mjs')).href)
 const memory = await import(pathToFileURL(path.join(ROOT, 'hooks', 'memory.mjs')).href)
+const { KEYWORD_FACTOR } = await import(pathToFileURL(path.join(ROOT, 'hooks', 'risk.mjs')).href)
 
 const MODELS = new Set(['haiku', 'sonnet', 'opus'])
 const RESERVED_PREFIXES = ['claude-', 'anthropic-', 'anthropics-', 'cc-plugin-']
@@ -113,7 +114,7 @@ test('required files are present and Python hooks are gone', () => {
 test('manifest declares the 0.5.0 knobs', () => {
   const manifest = JSON.parse(readFileSync(path.join(ROOT, '.claude-plugin/plugin.json'), 'utf8'))
   assert.equal(manifest.name, 'cc-tiers')
-  assert.equal(manifest.version, '0.13.10')
+  assert.equal(manifest.version, '0.13.11')
   assert.equal(JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version, manifest.version)
   assert.equal(/\s|@|:|\/|\\/.test(manifest.name), false)
   assert.equal(RESERVED_PREFIXES.some((prefix) => manifest.name.startsWith(prefix)), false)
@@ -4489,6 +4490,385 @@ test('a researcher report saves its references, and the next researcher gets the
     writeFileSync(path.join(dir, 'package-lock.json'), '{"lockfileVersion":3,"packages":{"node_modules/react-query":{"version":"5.0.1"}}}')
     assert.equal(researcher('Research react query cache keys for the orders list.').input, null, 'a changed lock makes the library reference stale')
     assert.match(tiers.policyLines(routing).join('\n'), /the researcher gets matching reference notes/)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+const ADAPTIVE_SPEC = 'CC_TIERS_SPEC_BEGIN\nCriteria:\n- The list is paginated (request)\nChecks:\n- `npm test` passes\nCC_TIERS_SPEC_END'
+const ADAPTIVE_GATE = { status: 'pass', verified: ['npm test'], flaky: [], unverified: [], failure: null, cached: [] }
+const ADAPTIVE_PROVEN = 'CC_TIERS_CRITERION: C1 pass - the list is paginated, shown by npm test'
+
+/** One writer pass of `paging` through delegation and report; `spec` and `lines` shape what the criteria can prove. */
+function adaptivePass({ user = {}, role = 'implementer', tier = 'sonnet', spec = ADAPTIVE_SPEC, lines = [ADAPTIVE_PROVEN], gate = ADAPTIVE_GATE, workspace, prepare, apply = tiers.applyEvent } = {}) {
+  const routing = defaultRouting(user)
+  const state = tiers.emptyState('s')
+  const prompt = `CC_TIERS_TASK: paging\nCC_TIERS_TIER: ${tier}\nCC_TIERS_ROLE: ${role}\nCC_TIERS_RESEARCH: none - local change\n${spec}\nAdd pagination to src/users.js`
+  assert.equal(tiers.checkDelegation(state, { subagent_type: `cc-tiers:${role}`, prompt }, routing).deny, '')
+  prepare?.(state)
+  const text = ['CC_TIERS_TASK: paging', `CC_TIERS_TIER: ${tier}`, `CC_TIERS_ROLE: ${role}`, ...lines, 'CC_TIERS_VERIFY: npm test', 'CC_TIERS_STATUS: pass', 'CC_TIERS_REASON: done'].join('\n')
+  return apply(state, { kind: 'report', id: 'r1', tool_use_id: 'r1', session_id: 's', role, prompt, text, error: '', gate, workspace }, routing)
+}
+
+const ADAPTIVE_MESSAGE = /review skipped: low risk, gate verified and every criterion proven by a command \(adaptive_review\)/
+
+test('adaptive review: a low-risk Sonnet pass with a verified gate and every criterion proven finishes without review', () => {
+  const done = adaptivePass()
+  assert.equal(done.meta.outcome, 'pass')
+  assert.match(done.message, ADAPTIVE_MESSAGE)
+  assert.doesNotMatch(done.message, /Send the result to/)
+  assert.equal(done.state.tasks.paging, undefined, 'the attempt counter is cleared')
+  assert.deepEqual(done.meta.completion, { status: 'verified', confidence: 'high', risk: 'low' })
+  assert.match(done.message, /cc-tiers completion: paging verified on sonnet, low risk; confidence high/)
+  assert.match(done.message, /Criteria with evidence: 2\/2\./)
+  // Under cheap a low-risk Sonnet pass needs no review with or without the option.
+  const cheap = adaptivePass({ user: { review_policy: 'cheap' } })
+  assert.equal(cheap.meta.outcome, 'pass')
+  assert.match(cheap.message, /Review policy is cheap and no review is due/)
+})
+
+test('adaptive review: a Haiku pass under cheap skips the checker only when it qualifies', () => {
+  const haiku = { role: 'worker', tier: 'haiku', user: { review_policy: 'cheap' } }
+  const done = adaptivePass(haiku)
+  assert.equal(done.meta.outcome, 'pass')
+  assert.match(done.message, ADAPTIVE_MESSAGE)
+  const declared = adaptivePass({ ...haiku, spec: 'CC_TIERS_SPEC_BEGIN\nCriteria:\n- The list is paginated (request)\nCC_TIERS_SPEC_END', lines: ['CC_TIERS_CRITERION: C1 pass - looked fine'] })
+  assert.equal(declared.meta.outcome, 'review')
+  assert.match(declared.message, /Send the result to cc-tiers:checker \(Sonnet\)/)
+})
+
+test('adaptive review: what disqualifies a pass still goes to review', () => {
+  const noCriteria = 'CC_TIERS_SPEC: none - a one-line change'
+  const functionalOnly = 'CC_TIERS_SPEC_BEGIN\nCriteria:\n- The list is paginated (request)\nCC_TIERS_SPEC_END'
+  const sensitive = { changed: ['.env'], sensitive: [{ file: '.env', why: 'environment file' }], outOfScope: [] }
+  const cases = [
+    ['medium risk', { prepare: (state) => { state.log.paging.risk = 'medium' } }],
+    ['a review keyword factor', { prepare: (state) => { state.log.paging.factors = [KEYWORD_FACTOR] } }],
+    ['a flagged sensitive file', { workspace: sensitive }],
+    ['a review keyword only in the report', { lines: [ADAPTIVE_PROVEN, 'It also reads the authentication header.'] }],
+    ['an Opus writer', { role: 'architect', tier: 'opus' }],
+    ['a criterion only declared', { spec: functionalOnly, lines: ['CC_TIERS_CRITERION: C1 pass - looked fine'] }],
+    ['a criterion left unreported', { spec: functionalOnly, lines: [] }],
+    ['an unverifiable criterion', { spec: functionalOnly, lines: ['CC_TIERS_CRITERION: C1 unverifiable - needs a live service'] }],
+    ['a flaky gate', { gate: { ...ADAPTIVE_GATE, flaky: ['npm test'] } }],
+    ['an unvalidated command', { gate: { ...ADAPTIVE_GATE, unverified: [{ raw: 'npm run lint', reason: 'budget exhausted: npm run lint' }] } }],
+    ['no spec criteria', { spec: noCriteria, lines: [] }],
+    ['a hook error on the task', { prepare: (state) => { state.log.paging.hookErrors = 1 } }],
+    ['review_policy always', { user: { review_policy: 'always' } }],
+    ['adaptive_review off', { user: { adaptive_review: 'off' } }],
+  ]
+  for (const [name, options] of cases) {
+    const done = adaptivePass(options)
+    assert.equal(done.meta.outcome, 'review', name)
+    assert.match(done.message, /Send the result to cc-tiers:reviewer \(Opus\)/, name)
+    assert.doesNotMatch(done.message, ADAPTIVE_MESSAGE, name)
+  }
+})
+
+/** A first attempt that goes to review (its criterion is only declared), then `rejection` from that reviewer, then a retry that qualifies on its own. */
+function adaptiveRetry({ reviewRole, user = {}, role = 'implementer', tier = 'sonnet', rejection }) {
+  const routing = defaultRouting(user)
+  const state = tiers.emptyState('s')
+  const prompt = `CC_TIERS_TASK: paging\nCC_TIERS_TIER: ${tier}\nCC_TIERS_ROLE: ${role}\nCC_TIERS_RESEARCH: none - local change\n${ADAPTIVE_SPEC}\nAdd pagination to src/users.js`
+  const writerText = (criterion) => ['CC_TIERS_TASK: paging', `CC_TIERS_TIER: ${tier}`, `CC_TIERS_ROLE: ${role}`, criterion, 'CC_TIERS_VERIFY: npm test', 'CC_TIERS_STATUS: pass', 'CC_TIERS_REASON: done'].join('\n')
+  const report = (id, text, reportRole = role, reportPrompt = prompt, gate = ADAPTIVE_GATE) =>
+    tiers.applyEvent(state, { kind: 'report', id, tool_use_id: id, session_id: 's', role: reportRole, prompt: reportPrompt, text, error: '', gate }, routing)
+  assert.equal(tiers.checkDelegation(state, { subagent_type: `cc-tiers:${role}`, prompt }, routing).deny, '')
+  const first = report('r1', writerText('CC_TIERS_CRITERION: C1 pass - looked fine'))
+  assert.equal(first.meta.outcome, 'review')
+  const reviewText = ['CC_TIERS_TASK: paging', `CC_TIERS_TIER: ${reviewRole === 'checker' ? 'sonnet' : 'opus'}`, `CC_TIERS_ROLE: ${reviewRole}`, 'CC_TIERS_STATUS: fail', `CC_TIERS_REASON: ${rejection}`].join('\n')
+  const rejected = report('v1', reviewText, reviewRole, `CC_TIERS_TASK: paging\nCC_TIERS_ROLE: ${reviewRole}\nreview it`, undefined)
+  assert.equal(rejected.meta.outcome, 'retry')
+  assert.equal(tiers.checkDelegation(state, { subagent_type: `cc-tiers:${role}`, prompt: `${prompt}\nFix: ${rejection}` }, routing).deny, '')
+  assert.equal(state.log.paging.risk, 'low', 'a rejection adds no risk factor')
+  return report('r2', writerText(ADAPTIVE_PROVEN), role, `${prompt}\nFix: ${rejection}`)
+}
+
+test('adaptive review: a retry after an Opus rejection still goes to cc-tiers:reviewer', () => {
+  const retry = adaptiveRetry({ reviewRole: 'reviewer', rejection: 'recreates existing helper at src/util.js:10' })
+  assert.equal(retry.meta.outcome, 'review')
+  assert.match(retry.message, /Send the result to cc-tiers:reviewer \(Opus\)/)
+  assert.doesNotMatch(retry.message, ADAPTIVE_MESSAGE)
+})
+
+test('adaptive review: a Haiku retry after a checker rejection under cheap still goes to the checker', () => {
+  const retry = adaptiveRetry({ reviewRole: 'checker', role: 'worker', tier: 'haiku', user: { review_policy: 'cheap' }, rejection: 'recreates existing helper at src/util.js:10' })
+  assert.equal(retry.meta.outcome, 'review')
+  assert.match(retry.message, /Send the result to cc-tiers:checker \(Sonnet\)/)
+  assert.doesNotMatch(retry.message, ADAPTIVE_MESSAGE)
+})
+
+test('adaptive review: a retry after a failed gate, a writer fail or an escalation still gets review', () => {
+  const failedGate = { status: 'fail', verified: [], flaky: [], unverified: [], failure: { raw: 'npm test', code: 1, timedOut: false, tail: 'boom', seconds: 1 } }
+  const writerText = (role, tier, status) => ['CC_TIERS_TASK: paging', `CC_TIERS_TIER: ${tier}`, `CC_TIERS_ROLE: ${role}`, ADAPTIVE_PROVEN, 'CC_TIERS_VERIFY: npm test', `CC_TIERS_STATUS: ${status}`, 'CC_TIERS_REASON: not done'].join('\n')
+  const cases = [
+    ['a failed gate', [{ gate: failedGate }], { role: 'implementer', tier: 'sonnet' }],
+    ['a writer fail', [{ status: 'fail' }], { role: 'implementer', tier: 'sonnet' }],
+    // Haiku fails its two attempts and the task moves up: Sonnet's pass is the first on its own tier but not the task's first.
+    ['an escalation', [{ status: 'fail' }, { status: 'fail' }], { role: 'implementer', tier: 'sonnet', first: { role: 'worker', tier: 'haiku' }, outcomes: ['retry', 'escalate'] }],
+  ]
+  for (const [name, failures, { role, tier, first = { role, tier }, outcomes = failures.map(() => 'retry') }] of cases) {
+    const routing = defaultRouting()
+    const state = tiers.emptyState('s')
+    const promptFor = (target, note = '') => `CC_TIERS_TASK: paging\nCC_TIERS_TIER: ${target.tier}\nCC_TIERS_ROLE: ${target.role}\nCC_TIERS_RESEARCH: none - local change\n${ADAPTIVE_SPEC}\nAdd pagination to src/users.js${note}`
+    const apply = (id, target, text, gate = ADAPTIVE_GATE) =>
+      tiers.applyEvent(state, { kind: 'report', id, tool_use_id: id, session_id: 's', role: target.role, prompt: promptFor(target), text, error: '', gate }, routing)
+    const delegate = (target, note) => assert.equal(tiers.checkDelegation(state, { subagent_type: `cc-tiers:${target.role}`, prompt: promptFor(target, note) }, routing).deny, '', name)
+    delegate(first)
+    failures.forEach(({ status = 'pass', gate }, index) => {
+      assert.equal(apply(`f${index}`, first, writerText(first.role, first.tier, status), gate).meta.outcome, outcomes[index], name)
+      if (index < failures.length - 1) delegate(first, `\nFix: attempt ${index}`)
+    })
+    delegate({ role, tier }, '\nFix: the failure above')
+    const retry = apply('r2', { role, tier }, writerText(role, tier, 'pass'))
+    assert.equal(retry.meta.outcome, 'review', name)
+    assert.match(retry.message, /Send the result to cc-tiers:reviewer \(Opus\)/, name)
+    assert.doesNotMatch(retry.message, ADAPTIVE_MESSAGE, name)
+  }
+})
+
+test('adaptive review: a retry after an environment gate failure still gets review', () => {
+  const routing = defaultRouting()
+  const state = tiers.emptyState('s')
+  const prompt = `CC_TIERS_TASK: paging\nCC_TIERS_TIER: sonnet\nCC_TIERS_ROLE: implementer\nCC_TIERS_RESEARCH: none - local change\n${ADAPTIVE_SPEC}\nAdd pagination to src/users.js`
+  const text = ['CC_TIERS_TASK: paging', 'CC_TIERS_TIER: sonnet', 'CC_TIERS_ROLE: implementer', ADAPTIVE_PROVEN, 'CC_TIERS_VERIFY: npm test', 'CC_TIERS_STATUS: pass', 'CC_TIERS_REASON: done'].join('\n')
+  const missing = { status: 'fail', verified: [], flaky: [], unverified: [], cached: [], failure: { raw: 'npm test', code: 1, timedOut: false, seconds: 3, tail: "Error: Cannot find module 'left-pad'\n    at x" }, missing: { name: 'left-pad', uninstalled: true } }
+  const report = (id, gate, note = '') =>
+    tiers.applyEvent(state, { kind: 'report', id, tool_use_id: id, session_id: 's', role: 'implementer', prompt: prompt + note, text, error: '', gate }, routing)
+  assert.equal(tiers.checkDelegation(state, { subagent_type: 'cc-tiers:implementer', prompt }, routing).deny, '')
+  assert.equal(report('r1', missing).meta.outcome, 'infra')
+  assert.equal(state.tasks.paging.infra, 1)
+  assert.equal(tiers.checkDelegation(state, { subagent_type: 'cc-tiers:implementer', prompt: `${prompt}\nInstalled.` }, routing).deny, '')
+  const retry = report('r2', ADAPTIVE_GATE, '\nInstalled.')
+  assert.equal(retry.meta.outcome, 'review')
+  assert.match(retry.message, /Send the result to cc-tiers:reviewer \(Opus\)/)
+  assert.doesNotMatch(retry.message, ADAPTIVE_MESSAGE)
+})
+
+test('adaptive review: a retry after a failure a respec uncounted still gets review', () => {
+  const routing = defaultRouting()
+  const state = tiers.emptyState('s')
+  const promptFor = (spec, respec = '') => `CC_TIERS_TASK: paging\nCC_TIERS_TIER: sonnet\nCC_TIERS_ROLE: implementer\nCC_TIERS_RESEARCH: none - local change\n${respec ? `CC_TIERS_RESPEC: ${respec}\n` : ''}${spec}\nAdd pagination to src/users.js`
+  const textFor = (criterion, status) => ['CC_TIERS_TASK: paging', 'CC_TIERS_TIER: sonnet', 'CC_TIERS_ROLE: implementer', criterion, 'CC_TIERS_VERIFY: npm test', `CC_TIERS_STATUS: ${status}`, 'CC_TIERS_REASON: done'].join('\n')
+  const report = (id, prompt, text) => tiers.applyEvent(state, { kind: 'report', id, tool_use_id: id, session_id: 's', role: 'implementer', prompt, text, error: '', gate: ADAPTIVE_GATE }, routing)
+  const first = promptFor(ADAPTIVE_SPEC)
+  assert.equal(tiers.checkDelegation(state, { subagent_type: 'cc-tiers:implementer', prompt: first }, routing).deny, '')
+  const failed = report('r1', first, textFor('CC_TIERS_CRITERION: C1 fail - broke', 'fail'))
+  assert.equal(failed.meta.outcome, 'retry')
+  tiers.logReport(state, failed.meta)
+  const respecced = promptFor(ADAPTIVE_SPEC.replace('is paginated', 'is paginated by page'), 'the spec asked for the wrong thing')
+  assert.equal(tiers.checkDelegation(state, { subagent_type: 'cc-tiers:implementer', prompt: respecced }, routing).deny, '')
+  assert.equal(state.tasks.paging.respecUncounted, 1)
+  assert.equal(state.log.paging.failures, 0)
+  const retry = report('r2', respecced, textFor(ADAPTIVE_PROVEN, 'pass'))
+  assert.equal(retry.meta.outcome, 'review')
+  assert.match(retry.message, /Send the result to cc-tiers:reviewer \(Opus\)/)
+  assert.doesNotMatch(retry.message, ADAPTIVE_MESSAGE)
+})
+
+test('adaptive review: a retry after a declared pre-existing gate failure still gets review, also after an escalation', () => {
+  for (const [name, escalate] of [['same tier', false], ['after an escalation', true]]) {
+    const routing = defaultRouting()
+    const state = tiers.emptyState('s')
+    const first = escalate ? { role: 'worker', tier: 'haiku' } : { role: 'implementer', tier: 'sonnet' }
+    const promptFor = (target, note = '') => `CC_TIERS_TASK: paging\nCC_TIERS_TIER: ${target.tier}\nCC_TIERS_ROLE: ${target.role}\nCC_TIERS_RESEARCH: none - local change\n${ADAPTIVE_SPEC}\nAdd pagination to src/users.js${note}`
+    const textFor = (target, status, extra = []) => ['CC_TIERS_TASK: paging', `CC_TIERS_TIER: ${target.tier}`, `CC_TIERS_ROLE: ${target.role}`, ADAPTIVE_PROVEN, ...extra, 'CC_TIERS_VERIFY: npm test', `CC_TIERS_STATUS: ${status}`, 'CC_TIERS_REASON: done'].join('\n')
+    const apply = (id, target, text, gate, note = '') =>
+      tiers.applyEvent(state, { kind: 'report', id, tool_use_id: id, session_id: 's', role: target.role, prompt: promptFor(target, note), text, error: '', gate }, routing)
+    const delegate = (target, note = '') => assert.equal(tiers.checkDelegation(state, { subagent_type: `cc-tiers:${target.role}`, prompt: promptFor(target, note) }, routing).deny, '', name)
+    const preexisting = { status: 'fail', verified: [], flaky: [], unverified: [], cached: [], failure: null, preexisting: { raw: 'npm test', code: 1, timedOut: false, tail: 'AssertionError: boom', seconds: 3 } }
+    delegate(first)
+    const declared = apply('r1', first, textFor(first, 'pass', ['CC_TIERS_PREEXISTING: npm test - fails on main too']), preexisting)
+    assert.equal(declared.meta.outcome, 'review', name)
+    tiers.logReport(state, declared.meta)
+    assert.equal(state.tasks.paging.preexisting, 1, name)
+    let target = first
+    let note = '\nFixed the base failure too.'
+    if (escalate) {
+      // The orchestrator skips the review and sends the task up a tier: the declaration still travels with it.
+      delegate(first, '\nFirst retry.')
+      assert.equal(apply('r2', first, textFor(first, 'fail'), ADAPTIVE_GATE, '\nFirst retry.').meta.outcome, 'retry', name)
+      delegate(first, '\nSecond retry.')
+      assert.equal(apply('r3', first, textFor(first, 'fail'), ADAPTIVE_GATE, '\nSecond retry.').meta.outcome, 'escalate', name)
+      target = { role: 'implementer', tier: 'sonnet' }
+      note = '\nEscalated.'
+      assert.equal(state.tasks.paging.preexisting, 1, name)
+    }
+    delegate(target, note)
+    const retry = apply('r9', target, textFor(target, 'pass'), ADAPTIVE_GATE, note)
+    assert.equal(retry.meta.outcome, 'review', name)
+    assert.match(retry.message, /Send the result to cc-tiers:reviewer \(Opus\)/, name)
+    assert.doesNotMatch(retry.message, ADAPTIVE_MESSAGE, name)
+  }
+})
+
+test('adaptive review: a second writer delegation of the task keeps its review (re-ask, API error rerun, writer abandoned for a higher tier)', () => {
+  const sonnet = { role: 'implementer', tier: 'sonnet' }
+  const haiku = { role: 'worker', tier: 'haiku' }
+  const cases = [
+    // The user sends back a task the adaptive skip finished.
+    ['a re-ask', (run) => {
+      assert.equal(run.report('r0', sonnet, 'pass').meta.outcome, 'pass')
+      tiers.markRedo(run.state, 'paging', { source: 'prompt' })
+      run.delegate(sonnet, '\nThe user says the last page is still wrong.')
+    }],
+    // The writer stopped on an API error, which is not counted, and the tree may hold half its work.
+    ['an API error rerun', (run) => {
+      run.apply({ kind: 'error', id: 'e0', tool_use_id: 'e0', session_id: 's', role: 'implementer', prompt: run.promptFor(sonnet), text: '', error: 'API Error: 529 overloaded' })
+      run.delegate(sonnet)
+    }],
+    // Haiku was delegated and dropped with no report, then the task went to Sonnet: nothing was counted.
+    ['a writer abandoned for a higher tier', (run) => run.delegate(sonnet, '\nMoved up.', haiku)],
+  ]
+  for (const [name, before] of cases) {
+    const routing = defaultRouting()
+    const state = tiers.emptyState('s')
+    const promptFor = (target, note = '') => `CC_TIERS_TASK: paging\nCC_TIERS_TIER: ${target.tier}\nCC_TIERS_ROLE: ${target.role}\nCC_TIERS_RESEARCH: none - local change\n${ADAPTIVE_SPEC}\nAdd pagination to src/users.js${note}`
+    const apply = (event) => tiers.applyEvent(state, { gate: ADAPTIVE_GATE, ...event }, routing)
+    const report = (id, target, status) => {
+      const text = ['CC_TIERS_TASK: paging', `CC_TIERS_TIER: ${target.tier}`, `CC_TIERS_ROLE: ${target.role}`, ADAPTIVE_PROVEN, 'CC_TIERS_VERIFY: npm test', `CC_TIERS_STATUS: ${status}`, 'CC_TIERS_REASON: done'].join('\n')
+      const done = apply({ kind: 'report', id, tool_use_id: id, session_id: 's', role: target.role, prompt: promptFor(target), text, error: '' })
+      tiers.logReport(state, done.meta)
+      return done
+    }
+    const delegate = (target, note = '', first = null) => {
+      if (first) assert.equal(tiers.checkDelegation(state, { subagent_type: `cc-tiers:${first.role}`, prompt: promptFor(first) }, routing).deny, '', name)
+      assert.equal(tiers.checkDelegation(state, { subagent_type: `cc-tiers:${target.role}`, prompt: promptFor(target, note) }, routing).deny, '', name)
+    }
+    if (name !== 'a writer abandoned for a higher tier') delegate(sonnet)
+    before({ state, promptFor, apply, report, delegate })
+    const retry = report('r1', sonnet, 'pass')
+    assert.equal(retry.meta.outcome, 'review', name)
+    assert.match(retry.message, /Send the result to cc-tiers:reviewer \(Opus\)/, name)
+    assert.doesNotMatch(retry.message, ADAPTIVE_MESSAGE, name)
+  }
+})
+
+test('adaptive review: the first-try qualifying pass still skips review', () => {
+  const done = adaptivePass()
+  assert.equal(done.meta.outcome, 'pass')
+  assert.match(done.message, ADAPTIVE_MESSAGE)
+})
+
+test('adaptive review: a session attempt is never skipped, and review_policy never keeps its own message', () => {
+  const routing = defaultRouting()
+  const text = ['CC_TIERS_TASK: paging', 'CC_TIERS_TIER: sonnet', 'CC_TIERS_ROLE: dispatcher', ADAPTIVE_PROVEN, 'CC_TIERS_VERIFY: npm test', 'CC_TIERS_STATUS: pass', 'CC_TIERS_REASON: done'].join('\n')
+  const prompt = `CC_TIERS_TASK: paging\nCC_TIERS_TIER: sonnet\nCC_TIERS_ROLE: dispatcher\n${ADAPTIVE_SPEC}\nAdd pagination to src/users.js`
+  const state = tiers.emptyState('s')
+  tiers.checkDelegation(state, { subagent_type: 'cc-tiers:implementer', prompt: prompt.replace('dispatcher', 'implementer') }, routing)
+  const session = tiers.applyEvent(state, { kind: 'report', id: 'r1', tool_use_id: 'r1', session_id: 's', role: 'dispatcher', prompt, text, error: '', gate: ADAPTIVE_GATE }, routing)
+  assert.equal(session.meta.outcome, 'review')
+  assert.doesNotMatch(session.message, ADAPTIVE_MESSAGE)
+  const never = adaptivePass({ user: { review_policy: 'never' } })
+  assert.equal(never.meta.outcome, 'pass')
+  assert.match(never.message, /Review policy is never and no review is due/)
+})
+
+test('adaptive_review is on by default, comes from /config env, and the session summary states the rule', () => {
+  const manifest = JSON.parse(readFileSync(path.join(ROOT, '.claude-plugin/plugin.json'), 'utf8'))
+  const option = manifest.userConfig.adaptive_review
+  assert.equal(option.type, 'string')
+  assert.deepEqual(option.options, ['on', 'off'])
+  assert.equal(option.default, 'on')
+  assert.ok(option.title && option.description)
+  assert.equal(JSON.parse(readFileSync(path.join(ROOT, 'config/routing.default.json'), 'utf8')).adaptiveReview, true)
+  assert.equal(defaultRouting().adaptiveReview, true)
+  assert.equal(defaultRouting({ adaptive_review: 'off' }).adaptiveReview, false)
+  assert.equal(defaultRouting({ adaptive_review: 'nonsense' }).adaptiveReview, true)
+  assert.equal(tiers.userFromEnv({}).adaptive_review, null)
+  const env = tiers.userFromEnv({ CLAUDE_PLUGIN_OPTION_ADAPTIVE_REVIEW: 'off' })
+  assert.equal(env.adaptive_review, 'off')
+  assert.equal(tiers.mergeRouting(tiers.loadJson(path.join(ROOT, 'config/routing.default.json')), null, env).adaptiveReview, false)
+  assert.match(tiers.policyLines(defaultRouting()).join('\n'), /Adaptive review: on\. Under review_policy risky or cheap, a Haiku or Sonnet pass finishes without review when its risk is low/)
+  const off = tiers.policyLines(defaultRouting({ adaptive_review: 'off' })).join('\n')
+  assert.match(off, /Adaptive review: off\./)
+  assert.doesNotMatch(off, /finishes without review/)
+})
+
+/** adaptivePass through processReport, which queues the telemetry events; the state comes back in place of the applied result. */
+const emitting = (state, event, routing) => {
+  tiers.processReport({ routing, ccCost: false, projectDir: '', dataDir: '' }, state, event)
+  return state
+}
+const eventTypes = (state) => state.events.map((item) => item.type)
+const SKIP_HEADER = ['CC_TIERS_REVIEW: skip']
+
+test('telemetry: a pass that skipped review on its own header records review.skipped because header, and no prompt text', () => {
+  const state = adaptivePass({ user: { adaptive_review: 'off' }, lines: [ADAPTIVE_PROVEN, ...SKIP_HEADER], apply: emitting })
+  assert.equal(state.log.paging.status, 'done')
+  const skipped = state.events.filter((item) => item.type === 'review.skipped')
+  assert.deepEqual(skipped.map(({ task, tier, because }) => ({ task, tier, because })), [{ task: 'paging', tier: 'sonnet', because: 'header' }])
+  assert.ok(!eventTypes(state).includes('review.done'))
+  assert.ok(!JSON.stringify(state.events).includes('local change'), 'the free text after none - stays out of every event')
+})
+
+test('telemetry: an adaptive skip records review.skipped because adaptive', () => {
+  const state = adaptivePass({ apply: emitting })
+  assert.deepEqual(state.events.filter((item) => item.type === 'review.skipped').map((item) => item.because), ['adaptive'])
+  // Under cheap a low-risk Sonnet pass needs no review either way: that is the policy, not a skip the report or the gate earned.
+  assert.ok(!eventTypes(adaptivePass({ user: { review_policy: 'cheap' }, apply: emitting })).includes('review.skipped'))
+})
+
+test('telemetry: a skip forced back to review by the floor records no review.skipped', () => {
+  const sensitive = { changed: ['.env'], sensitive: [{ file: '.env', why: 'environment file' }], outOfScope: [] }
+  const cases = [
+    ['a critical risk under the header', { user: { adaptive_review: 'off' }, lines: [ADAPTIVE_PROVEN, ...SKIP_HEADER], prepare: (state) => { state.log.paging.risk = 'critical' } }],
+    ['a sensitive file under the header', { lines: [ADAPTIVE_PROVEN, ...SKIP_HEADER], workspace: sensitive }],
+    ['a sensitive file under adaptive', { workspace: sensitive }],
+    ['a medium risk under adaptive', { prepare: (state) => { state.log.paging.risk = 'medium' } }],
+  ]
+  for (const [name, options] of cases) {
+    const state = adaptivePass({ ...options, apply: emitting })
+    assert.ok(!eventTypes(state).includes('review.skipped'), name)
+    assert.ok(state.tasks.paging, `${name}: the task still waits for its review`)
+  }
+})
+
+test('telemetry: research.skipped comes from a CC_TIERS_RESEARCH: none delegation, once per task, with no reason', () => {
+  const routing = defaultRouting()
+  const state = tiers.emptyState('s')
+  const prompt = (research, extra = '') => `${HEADER('paging', 'sonnet', 'implementer')}CC_TIERS_RESEARCH: ${research}
+${ADAPTIVE_SPEC}
+${extra}Add pagination to src/users.js`
+  const call = (research) => tiers.checkDelegation(state, { subagent_type: 'cc-tiers:implementer', prompt: prompt(research) }, routing)
+  assert.equal(call('none - small local change, ghp_secret').deny, '')
+  assert.equal(call('none - small local change, ghp_secret').deny, '', 'a retry delegates again')
+  const skipped = state.events.filter((item) => item.type === 'research.skipped')
+  assert.equal(skipped.length, 1)
+  assert.equal(skipped[0].task, 'paging')
+  assert.ok(!JSON.stringify(skipped).includes('ghp_secret') && !JSON.stringify(skipped).includes('small local change'))
+
+  const done = tiers.emptyState('s')
+  done.researched = { paging: true }
+  tiers.checkDelegation(done, { subagent_type: 'cc-tiers:implementer', prompt: prompt('done') }, routing)
+  assert.ok(!eventTypes(done).includes('research.skipped'), 'finished research is not a skip')
+
+  const refused = tiers.emptyState('s')
+  assert.match(tiers.checkDelegation(refused, { subagent_type: 'cc-tiers:implementer', prompt: prompt('') }, routing).deny, /run cc-tiers:researcher/)
+  assert.ok(!eventTypes(refused).includes('research.skipped'), 'a refused call records nothing')
+
+  const off = tiers.emptyState('s')
+  tiers.checkDelegation(off, { subagent_type: 'cc-tiers:implementer', prompt: prompt('none - local') }, defaultRouting({ research: 'off' }))
+  assert.ok(!eventTypes(off).includes('research.skipped'), 'research off asks for no research to skip')
+})
+
+test('telemetry: pathMode names the note lightHint gave, and the UserPromptSubmit hook records path.suggested with the mode only', async () => {
+  const routing = defaultRouting()
+  assert.equal(tiers.pathMode(tiers.lightHint('fix a typo in README', routing)), 'light')
+  assert.equal(tiers.pathMode(tiers.lightHint('Add pagination to GET /users', routing)), 'small')
+  assert.equal(tiers.pathMode(tiers.lightHint('Rename the login handler', routing)), '')
+  assert.equal(tiers.pathMode(''), '')
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const env = hookEnv(dir, { CC_TIERS_CC_COST: '0' })
+    for (const prompt of ['fix a typo in README', 'Add pagination to GET /users', 'Rename the login handler']) {
+      runHook('stop.mjs', { session_id: 'sess-1', hook_event_name: 'UserPromptSubmit', prompt }, env)
+    }
+    const log = readFileSync(path.join(dir, 'data', 'events.jsonl'), 'utf8')
+    const events = log.trim().split('\n').map((line) => JSON.parse(line)).filter((item) => item.type === 'path.suggested')
+    assert.deepEqual(events.map((item) => item.mode), ['light', 'small'])
+    assert.deepEqual(Object.keys(events[0]).sort(), ['mode', 'session', 'ts', 'type'])
+    assert.ok(!log.includes('README') && !log.includes('pagination'), 'no prompt text')
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

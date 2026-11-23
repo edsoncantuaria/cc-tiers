@@ -734,3 +734,91 @@ test('studies stay out of Real use and the report table, and have their own sect
   assert.ok(renderReport(plain).startsWith('| Task | Tiers'))
   assert.ok(!renderReport([sessionState('s1', 'p-a', study, { 'study-x': cost['study-x'] })]).includes('| Task |'))
 })
+
+test('sanitizeEvent keeps the stage events with an enumerated word, never the free text of a skip', () => {
+  assert.deepEqual(sanitizeEvent({ type: 'research.skipped', task: 'a', because: 'small local change', reason: 'none - small local change', prompt: 'secret' }), { type: 'research.skipped', task: 'a' })
+  assert.deepEqual(sanitizeEvent({ type: 'review.skipped', task: 'a', tier: 'sonnet', because: 'header', reason: 'CC_TIERS_REVIEW: skip - trust me' }), { type: 'review.skipped', task: 'a', tier: 'sonnet', because: 'header' })
+  assert.equal(sanitizeEvent({ type: 'review.skipped', task: 'a', because: 'adaptive' }).because, 'adaptive')
+  assert.equal('because' in sanitizeEvent({ type: 'review.skipped', task: 'a', because: 'the user said so' }), false)
+  assert.deepEqual(sanitizeEvent({ type: 'path.suggested', mode: 'small', prompt: 'fix the typo in README' }), { type: 'path.suggested', mode: 'small' })
+  assert.equal('mode' in sanitizeEvent({ type: 'path.suggested', mode: 'fix the typo in README' }), false)
+  // The enumeration is for the stage events: a writer mode on another event stays.
+  assert.equal(sanitizeEvent({ type: 'model.selected', task: 'a', mode: 'alternate' }).mode, 'alternate')
+})
+
+test('review.done keeps the invalid count beside blocking, discarded and notes', () => {
+  assert.deepEqual(sanitizeEvent({ type: 'review.done', task: 'a', review: { blocking: 1, discarded: 2, notes: 3, invalid: 4, other: 5 } }).review, { blocking: 1, discarded: 2, notes: 3, invalid: 4 })
+  assert.deepEqual(sanitizeEvent({ type: 'review.done', task: 'a', review: { blocking: 1, invalid: NaN } }).review, { blocking: 1 })
+})
+
+test('the stage events are written to events.jsonl on telemetry on and left out of reduced', (t) => {
+  const file = telemetryPath(tempDir(t))
+  const events = [{ type: 'research.skipped', task: 'a' }, { type: 'review.skipped', task: 'a', because: 'adaptive' }, { type: 'path.suggested', mode: 'light' }]
+  for (const event of events) assert.equal(recordEvent(file, event), true, event.type)
+  assert.deepEqual(readEvents(file).map((event) => event.type), ['research.skipped', 'review.skipped', 'path.suggested'])
+  for (const event of events) assert.equal(recordEvent(file, event, { level: 'reduced' }), false, event.type)
+})
+
+const STAGE_EVENTS = [
+  { type: 'research.done', task: 'a' },
+  { type: 'review.done', task: 'a', review: { blocking: 1, discarded: 1, notes: 2, invalid: 1 } },
+  { type: 'research.skipped', task: 'b' },
+  { type: 'review.skipped', task: 'b', because: 'header' },
+  { type: 'research.skipped', task: 'c' },
+  { type: 'review.skipped', task: 'c', because: 'adaptive' },
+  { type: 'review.done', task: 'd', review: { blocking: 0, discarded: 1, notes: 0, invalid: 0 } },
+  { type: 'path.suggested', mode: 'small' },
+  { type: 'path.suggested', mode: 'small' },
+  { type: 'path.suggested', mode: 'light' },
+]
+
+test('summarize counts the tasks that paid or skipped research and review, the skip reasons and the path notes', () => {
+  const summary = summarize(STAGE_EVENTS)
+  assert.deepEqual(summary.stages.research, { paid: 1, skipped: 2 })
+  assert.deepEqual(summary.stages.review, { paid: 2, skipped: 2, skippedBy: { header: 1, adaptive: 1 } })
+  assert.deepEqual(summary.paths, { small: 2, light: 1 })
+  assert.equal(summary.tasks, 4, 'a path note belongs to no task')
+})
+
+test('a task that paid a review and skipped a later one counts as paid only', () => {
+  const summary = summarize([{ type: 'review.done', task: 'a' }, { type: 'review.skipped', task: 'a', because: 'header' }])
+  assert.deepEqual(summary.stages.review, { paid: 1, skipped: 0, skippedBy: {} })
+})
+
+test('summarize shares the discarded blocker claims and the invalid findings of the reviews', () => {
+  const { findings } = summarize(STAGE_EVENTS)
+  // blocking + discarded: a 1+1, d 0+1; judged: a 5, d 1.
+  assert.deepEqual(findings, { blockers: 3, discarded: 2, judged: 6, invalid: 1 })
+})
+
+test('renderInsights prints the stage table, the skip reasons, the path notes and the finding shares', () => {
+  const text = renderInsights(summarize(STAGE_EVENTS))
+  assert.match(text, /### Stages paid or skipped \(tasks\)\n\n\| stage \| paid \| skipped \|\n\| --- \| --- \| --- \|\n\| research \| 1 \| 2 \|\n\| review \| 2 \| 2 \|/)
+  assert.match(text, /### Reviews skipped, by reason\n[\s\S]*\| adaptive \| 1 \|\n\| header \| 1 \|/)
+  assert.match(text, /### Light and small path notes shown\n[\s\S]*\| small \| 2 \|\n\| light \| 1 \|/)
+  assert.match(text, /\| blocker findings discarded \(their command passed\) \| 2 of 3 \(67%\) \|/)
+  assert.match(text, /\| findings invalid \| 1 of 6 \(17%\) \|/)
+})
+
+test('insights of events from before the stage events still render, with no empty stage tables', () => {
+  const old = [
+    { type: 'model.selected', task: 'a', tier: 'sonnet', risk: 'low' },
+    { type: 'review.done', task: 'a', outcome: 'pass', review: { blocking: 0, discarded: 0, notes: 1 } },
+    { type: 'task.passed', task: 'a', tier: 'sonnet', risk: 'low' },
+  ]
+  const summary = summarize(old)
+  assert.deepEqual(summary.stages.research, { paid: 0, skipped: 0 })
+  assert.deepEqual(summary.stages.review, { paid: 1, skipped: 0, skippedBy: {} })
+  // An event with no invalid count adds to the blocker share only.
+  assert.deepEqual(summary.findings, { blockers: 0, discarded: 0, judged: 0, invalid: 0 })
+  const text = renderInsights(summary)
+  assert.match(text, /\| review \| 1 \| 0 \|/)
+  for (const absent of ['Reviews skipped, by reason', 'Light and small path notes shown', 'Review findings', '| research |']) assert.ok(!text.includes(absent), absent)
+  const bare = renderInsights(summarize([{ type: 'task.passed', task: 'a', tier: 'sonnet' }]))
+  assert.ok(!bare.includes('Stages paid or skipped'))
+})
+
+test('the finding shares skip a review.done with no review counts', () => {
+  const { findings } = summarize([{ type: 'review.done', task: 'a' }, { type: 'review.done', task: 'b', review: { blocking: 2, discarded: 0, notes: 0 } }])
+  assert.deepEqual(findings, { blockers: 2, discarded: 0, judged: 0, invalid: 0 })
+})

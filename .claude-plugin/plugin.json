@@ -1,6 +1,6 @@
 {
   "name": "cc-tiers",
-  "version": "0.13.10",
+  "version": "0.13.11",
   "description": "Criteria Tiers for Claude Code. A plugin for work done right the first time: it researches the installed versions, writes the acceptance criteria, has the work reviewed by Opus in a fresh context, and re-runs the checks before a pass counts. Each task runs on the model it needs.",
   "author": {
     "name": "edsoncantuaria",
@@ -226,6 +226,13 @@
       "type": "string",
       "title": "Review evidence",
       "description": "on (default): a reviewer's blocking finding needs evidence, and cc-tiers re-runs a finding's command; one that passes is discarded. off: a reviewer's fail needs no finding.",
+      "default": "on",
+      "options": ["on", "off"]
+    },
+    "adaptive_review": {
+      "type": "string",
+      "title": "Adaptive review",
+      "description": "on (default): under review_policy risky or cheap, a Haiku or Sonnet pass finishes without review when its risk is low, its gate verified every command, and a verified command proves every spec criterion. Medium risk and up, an Opus writer, a criterion only declared, a flaky or unvalidated gate, or any writer delegation after the task's first (a retry after any failure, counted or not, or a re-ask) still go to review. off: every pass the review policy names is reviewed.",
       "default": "on",
       "options": ["on", "off"]
     },

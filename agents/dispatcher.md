@@ -130,7 +130,7 @@ Split before you delegate. A task that crosses several layers (data, back end, f
 
 After writers that ran with `isolation: "worktree"` pass, integrate each result into the working branch in `CC_TIERS_DEPENDS` order (cherry-pick or merge its commit). Stop at the first conflict and report it. Never resolve one with `-X ours` or `-X theirs`, and never `git stash` or reset the shared tree. Run the verify gate on the integrated tree, not only in each worktree.
 
-When a request had two or more writer tasks, run one more `cc-tiers:reviewer` call on the whole integrated diff before the final report, under the pseudo-task slug `final-gate`: every spec block concatenated, and a `CC_TIERS_VERIFY` line for the project's broad test command. Like any review prompt it carries the diff, never the writers' reports.
+When a request had two or more writer tasks, run one more `cc-tiers:reviewer` call on the whole integrated diff before the final report, under the pseudo-task slug `final-gate`: every spec block concatenated, and a `CC_TIERS_VERIFY` line for the project's broad test command. Like any review prompt it carries the diff, never the writers' reports. Skip it when every writer task of the request finished at low risk with a `cc-tiers completion: <task> verified ...` line (it names the risk, e.g. "verified on sonnet, low risk"); a task at medium risk or above, or any completion that is partial, failed or unverified, keeps final-gate. When skipped, the final report says "final-gate skipped: every writer task was low risk and verified".
 
 ## Attempts and escalation
 

@@ -11,6 +11,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const tiers = await import(pathToFileURL(path.join(ROOT, 'hooks', 'cc_tiers.mjs')).href)
 const memory = await import(pathToFileURL(path.join(ROOT, 'hooks', 'memory.mjs')).href)
 const verify = await import(pathToFileURL(path.join(ROOT, 'hooks', 'verify.mjs')).href)
+const insights = await import(pathToFileURL(path.join(ROOT, 'hooks', 'insights.mjs')).href)
 const DEFAULTS = JSON.parse(readFileSync(path.join(ROOT, 'config', 'routing.default.json'), 'utf8'))
 
 const routingWith = (user = {}, project = null) => tiers.mergeRouting(DEFAULTS, project, user)
@@ -1362,6 +1363,17 @@ test('failure research: a researcher run with CC_TIERS_FAILURE lines queues rese
   tiers.applyEvent(plain, event('r3', 'researcher', researched('high'), header('paging', 'sonnet', 'researcher')), routingWith())
   assert.equal(plain.researched.paging, true)
   assert.deepEqual(plain.events.map((item) => item.type), ['research.done'])
+})
+
+test('a researcher pass records research.done for the task and each CC_TIERS_COVERS slug, so insights counts every covered task as paid', () => {
+  const state = tiers.emptyState('s')
+  const prompt = `${header('api', 'sonnet', 'researcher')}CC_TIERS_COVERS: ui, ui\nResearch it.`
+  tiers.applyEvent(state, event('r1', 'researcher', report('api', 'researcher', 'sonnet', 'pass'), prompt), routingWith())
+  assert.deepEqual(state.events.map(({ type, task }) => ({ type, task })), [{ type: 'research.done', task: 'api' }, { type: 'research.done', task: 'ui' }])
+  const lifecycle = ['api', 'ui'].flatMap((task) => [{ type: 'task.received', task, tier: 'sonnet' }, { type: 'task.passed', task, tier: 'sonnet' }])
+  const { stages, tasks } = insights.summarize([...state.events, ...lifecycle], { minSample: 1 })
+  assert.equal(tasks, 2)
+  assert.deepEqual(stages.research, { paid: 2, skipped: 0 })
 })
 
 test('writer opus: a new worker or implementer call is refused toward an Opus attempt, the other roles are not', () => {

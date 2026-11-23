@@ -21,6 +21,8 @@ async function main(payload) {
     lightHint,
     loadHistory,
     openContext,
+    pathMode,
+    queueEvent,
     countParked,
     dropAwaiting,
     peekAwaiting,
@@ -44,6 +46,8 @@ async function main(payload) {
     const message = withSession(ctx, payload, (state) => {
       const pending = takePending(state)
       const hint = lightHint(payload.prompt, ctx.routing, { history, conserve: ctx.routing.conserve === true, projectDir: ctx.projectDir })
+      const mode = pathMode(hint)
+      if (mode) queueEvent(state, { type: 'path.suggested', mode })
       return [pending, ...redoFromPrompt(state, payload.prompt, payload.origin), hint].filter(Boolean).join('\n\n')
     })
     const title = studyTitle(payload.prompt)

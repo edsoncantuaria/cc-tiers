@@ -18,6 +18,7 @@
   "verifyTimeout": 300,
   "verifyBudget": 600,
   "reviewEvidence": true,
+  "adaptiveReview": true,
   "profile": "balanced",
   "memory": true,
   "telemetry": "on",

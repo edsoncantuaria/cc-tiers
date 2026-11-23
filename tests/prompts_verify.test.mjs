@@ -363,3 +363,12 @@ test('every prompt that explains CC_TIERS_VERIFY says what the cd dir is relativ
     }
   }
 })
+
+test('session prompts skip final-gate only when every writer task was low risk and verified', () => {
+  for (const file of ['agents/orchestrator.md', 'agents/dispatcher.md', 'skills/tiers/SKILL.md']) {
+    const text = read(file)
+    for (const needle of ['Skip it when every writer task of the request finished at low risk with a `cc-tiers completion: <task> verified ...` line', 'a task at medium risk or above, or any completion that is partial, failed or unverified, keeps final-gate', 'final-gate skipped: every writer task was low risk and verified']) {
+      assert.ok(text.includes(needle), `${file} mentions ${needle}`)
+    }
+  }
+})

@@ -125,3 +125,80 @@ done
 ```
 
 **Decision.** No new numbers, so the ladders stay as they are (haiku `low`, sonnet `high`, opus `high`). For haiku and sonnet the reasons are in the table above; for opus the reason is now only the missing measurement, since the reviewer does follow a project ladder (`reviewEffort`, commit 27580ec).
+
+## Reviewer false positives and negatives (issue #27)
+
+Question: how often does the cc-tiers reviewer approve a change with a silent defect (a false negative) and reject a correct change (a false positive)? Ten cases, five pairs. Each pair is a tiny node repo with a base commit and one commit on top of it, which is the change under review. The `review-bug-*` case has a defect in that commit; the `review-ok-*` case has the correct version of the same change, with tests of the same size.
+
+All ten cases use the same prompt, `Review the last commit before I merge it.`, and the same `append_system_prompt` in the `prompt.md` frontmatter. The plain prompt alone does not reach the reviewer: `lightHint()` returns nothing for a request that starts with `review`, and the orchestrator answers a request that only asks for an opinion in the session, with no slug (`agents/orchestrator.md`), while a `cc-tiers:reviewer` call needs a `CC_TIERS_TASK` slug. So the system prompt tells the session to delegate: do not review the code yourself, change no file, send the review of `git diff HEAD~1 HEAD` to `cc-tiers:reviewer` with `CC_TIERS_TASK: review-last-commit` and `CC_TIERS_RESEARCH: none - eval`, and report its verdict. It says nothing about the code, so the bug and ok cases stay indistinguishable, and `allowed_tools` includes `Agent` for the call. The cases therefore measure the reviewer's verdict, not whether a plain request is routed to it. A review of a task with no recorded writer attempt is not counted by the hook (it says so after the call); the graders read the reviewer's own verdict in the trace, so that does not matter here. Nothing in the repo names the defect: not an identifier, a comment, a test name or the commit message (`description` and `expected_outcome` in `prompt.md` are not used at run time). In every bug case the tests of the commit pass, and their inputs miss the defect. I ran each `fixture.sh` in a scratch directory: the base commit has 1 to 2 passing tests and the last commit 3 to 4, in all ten. A probe on each repo confirmed that the defect misbehaves in the bug case and that the ok case gives the right answer.
+
+| Case | The last commit adds | What it seeds, or why it is correct | A correct review names |
+| --- | --- | --- | --- |
+| `review-bug-pagination` | `pageCount` and `hasNextPage` to `pagination.js` | `pageCount` uses `Math.floor`, so a total that is not a multiple of the page size loses its last page (25 items in pages of 10 give 2 pages). The tests use totals of 0 and 30 | `pagination.js`, reject |
+| `review-ok-pagination` | the same two functions | `Math.ceil`; the tests use a total of 25 | approve |
+| `review-bug-default` | an `includeArchived` option to `listProjects` in `projects.js` | the option defaults to `true`, but `listProjects` hid archived projects before, so every existing caller (`summary.js`) now gets them. The tests pass the option explicitly and no test covers the old behaviour | `projects.js`, reject |
+| `review-ok-default` | the same option | defaults to `false`, and a test covers the default | approve |
+| `review-bug-await` | `syncProfile` to `profile.js` | `api.update(...)` is not awaited inside the `try`, so a failing update returns `{ ok: true }` and the rejection escapes as an unhandled rejection. The fake api in the tests always resolves | `profile.js`, reject |
+| `review-ok-await` | the same function | the call is awaited, and a test makes the api fail | approve |
+| `review-bug-swallow` | `importRows` in a new `importer.js` | a row that fails to insert is skipped by a `catch` that continues, and is never reported. The tests insert every row | `importer.js`, reject |
+| `review-ok-swallow` | the same function | failed rows come back in `failed`, and a test covers one | approve |
+| `review-bug-boundary` | `canConsume` to `quota.js` | `used + amount < quota` refuses a request that exactly uses the rest of the quota (`remaining(10, 9)` is 1, `canConsume(10, 9)` is `false`). The tests stay clear of that boundary | `quota.js`, reject |
+| `review-ok-boundary` | the same function | `<=`, and a test sits on the boundary | approve |
+
+### Graders
+
+| Grader | In | Passes when |
+| --- | --- | --- |
+| `reviewer-ran` | all ten | `tool_used`: an `Agent` call whose input names `cc-tiers:reviewer` |
+| `rejects` | bug | `regex` on the trace: the reviewer's trailer says `CC_TIERS_STATUS: fail` |
+| `names-defect-file` | bug | `regex` on the trace: one complete finding block (`CC_TIERS_FINDING_BEGIN` to its own `CC_TIERS_FINDING_END`) with severity `blocking`, `blocker` or `high` that mentions the defect's file |
+| `approves` | ok | `regex` on the trace: the reviewer's trailer says `CC_TIERS_STATUS: pass` |
+| `no-blocking-finding` | ok | `regex` on the trace, `match: not_contains`: no complete finding block with severity `blocking`, `blocker` or `high` |
+
+The trace is JSON, one message per line, so a newline inside a message is the two characters `\n` and the patterns match that (`(?:\\n|\s)+`), and the reviewer's report is also indented by two spaces in the hand-back. The verdict patterns start at `CC_TIERS_ROLE: reviewer`, and do not look for a bare `CC_TIERS_STATUS:`: the orchestrator's prompt to the reviewer can carry that text inside a research brief. I checked the patterns against the shape of the kept traces of the earlier runs (`/tmp/claude-eval-*/out/trace.jsonl`): `approves` matches every one of the 10 traces where `cc-tiers:reviewer` ran and none of the 18 where it did not. None of those traces has a rejection or a blocking finding, so `rejects` and `names-defect-file` were checked only on traces I built in that shape (a blocking finding naming the file, one naming another file, one in a note, graded severity, plain and indented).
+
+The two finding patterns read a finding only inside one complete block: a lookahead requires `CC_TIERS_FINDING_END` before any other `CC_TIERS_FINDING_BEGIN` or `END`, and the severity and the file are looked for before that end. So a block cut off before its end (a truncated report) counts for nothing, even when a severity and the file are named later on the same line, for example in `CC_TIERS_REASON`; and an orchestrator sentence that quotes `severity: high` outside a block does not fail an ok case. I ran both patterns on synthetic traces in the kept-trace shape, in all five cases: the truncated-begin and quoted-orchestrator traces, a note naming the file, a blocking finding that names another file, a blocking finding in one block and the file only in a note block, graded severities, and the plain and indented hand-back. They gave the expected answer on all of them, the earlier patterns gave the wrong one on the truncated-begin and the quoted-orchestrator traces, and on the 28 kept traces `no-blocking-finding` passes and `approves` matches exactly the 10 where the reviewer ran. I also turned the `note` finding of a kept trace into `blocking`: both patterns match it. A graded `high` finding with `confidence: low` counts as blocking here, although cc-tiers turns it into a note. **None of the ten cases has been run**: Bash fails inside the runs on this machine (see "What the pilot found about running under `claude -p`"), and a review without `git` or `node --test` is not the review being measured.
+
+`names-defect-file` accepts any blocking finding whose block mentions the file, in `where` or anywhere else, so a rejection for another reason about the same file also passes it. Read the `observed` lines of the passing bug runs before you call them detections. A rejection that names only a caller fails it (in `review-bug-default`, `summary.js`). The false negative rate below does not count such a run as a miss, because the reviewer rejected, and `rejected_wrong_file` lists it apart.
+
+### Run
+
+On a runner where Bash works inside the runs (see "Rerun attempt (issue #18)" above):
+
+```bash
+claude plugin eval . --case 'review-*' --ablation none --scaffold --trust-plugin --no-publish --runs 3 --max-cost-usd 30 --allow-tools Bash,Edit,Write
+```
+
+That is 30 runs; the earlier sets cost about $0.4 to $0.9 a run, hence the cap. The review needs `Bash` for `git` and `node --test`; `Edit,Write` stay in the flag as in the other cases. Add `--keep-temp` to keep the traces. `--case 'review-bug-*'` or `--case 'review-ok-*'` runs one group.
+
+### Rates
+
+A run that never reached `cc-tiers:reviewer` says something about routing, not about the review, so it stays out of both rates and is reported as the reach rate (`seeded_reviewed` over `seeded_runs`, and the same for the correct cases). The session is told to delegate (see above), so the reach should be close to all runs; a low reach means the orchestrator ignored the system prompt or the hook refused the call, and the trace says which.
+
+- **False negative rate** = seeded runs where the reviewer ran and `rejects` failed, over seeded runs where it ran. A reviewer that ends without a verdict counts here too, so check those traces.
+- **False positive rate** = correct runs where the reviewer ran and `approves` or `no-blocking-finding` failed, over correct runs where it ran.
+
+```bash
+jq '
+  def runs($prefix): [.cases[] | select(.name | startswith($prefix)) | .arms.with[]];
+  def passed($n): any(.graders[]; .name == $n and .passed);
+  runs("review-bug-") as $bug | runs("review-ok-") as $ok
+  | ($bug | map(select(passed("reviewer-ran")))) as $bugReviewed
+  | ($ok | map(select(passed("reviewer-ran")))) as $okReviewed
+  | {
+      seeded_runs: ($bug | length),
+      seeded_reviewed: ($bugReviewed | length),
+      false_negatives: ($bugReviewed | map(select(passed("rejects") | not)) | length),
+      rejected_wrong_file: ($bugReviewed | map(select(passed("rejects") and (passed("names-defect-file") | not))) | length),
+      correct_runs: ($ok | length),
+      correct_reviewed: ($okReviewed | length),
+      false_positives: ($okReviewed | map(select((passed("approves") and passed("no-blocking-finding")) | not)) | length)
+    }
+  | . + {
+      fn_rate: (if .seeded_reviewed > 0 then .false_negatives / .seeded_reviewed else null end),
+      fp_rate: (if .correct_reviewed > 0 then .false_positives / .correct_reviewed else null end)
+    }
+' evals/results/<timestamp>/aggregate-result.json
+```
+
+`rejected_wrong_file` is the part of the detections that rejected without naming the defect's file. Replace `"review-bug-"` with one case name, for example `"review-bug-await"`, for the rate of one defect type. With 15 runs a group, a rate moves 7 points for each run, so read a difference of a run or two as noise.
