@@ -2,8 +2,9 @@
 /**
  * `/cc-tiers:insights` helper. Reads the telemetry events cc-tiers keeps in the
  * plugin data directory and prints what they show: outcomes, failure categories,
- * escalation reasons, estimated cost by risk, unverified gates and how each start
- * tier fared. A "Real use" section does the same for the session state files, as
+ * escalation reasons, estimated cost by risk, unverified gates, how each start
+ * tier fared, which stages tasks paid or skipped and how the review findings
+ * fared. A "Real use" section does the same for the session state files, as
  * aggregates only. It only describes: it never proposes or applies a routing change.
  */
 
@@ -53,7 +54,7 @@ function matchRow() {
 
 /** What happened to one task, folded from its events in order. */
 function journeyOf(journeys, task) {
-  if (!journeys.has(task)) journeys.set(task, { start: '', risk: '', escalated: false, blocking: false, passed: false, stopped: false, finish: '', matches: new Set(), redone: 0, redoTier: '', mode: '', usd: 0, diagnosed: 0 })
+  if (!journeys.has(task)) journeys.set(task, { start: '', risk: '', escalated: false, blocking: false, passed: false, stopped: false, finish: '', matches: new Set(), redone: 0, redoTier: '', mode: '', usd: 0, diagnosed: 0, researched: false, researchSkipped: false, reviewed: false, reviewSkipped: '' })
   return journeys.get(task)
 }
 
@@ -65,6 +66,16 @@ function addStudies(total, outcomes) {
     if (outcome === 'study-pass') total.checked += 1
     if (outcome === 'study-fail') total.rejected += 1
   }
+}
+
+/** A review.done event's counts into the findings totals; an event from before `invalid` existed adds to the blocker share only. */
+function addFindings(findings, review) {
+  const count = (key) => (Number.isFinite(review[key]) ? review[key] : 0)
+  findings.blockers += count('blocking') + count('discarded')
+  findings.discarded += count('discarded')
+  if (!Number.isFinite(review.invalid)) return
+  findings.judged += count('blocking') + count('discarded') + count('notes') + review.invalid
+  findings.invalid += review.invalid
 }
 
 export function summarize(events, { minSample = 10 } = {}) {
@@ -85,6 +96,10 @@ export function summarize(events, { minSample = 10 } = {}) {
     uncounted: 0,
     byMode: {},
     failureResearch: {},
+    stages: { research: { paid: 0, skipped: 0 }, review: { paid: 0, skipped: 0, skippedBy: {} } },
+    paths: {},
+    // blockers: findings that claimed to block (blocking plus discarded); judged: every finding of a review that counted invalid ones.
+    findings: { blockers: 0, discarded: 0, judged: 0, invalid: 0 },
     studies: { tasks: 0, checked: 0, rejected: 0 },
     sample: 'small',
     notes: [],
@@ -112,6 +127,20 @@ export function summarize(events, { minSample = 10 } = {}) {
         break
       case 'review.done':
         if (journey && event.review?.blocking > 0) journey.blocking = true
+        if (journey) journey.reviewed = true
+        if (event.review && typeof event.review === 'object') addFindings(summary.findings, event.review)
+        break
+      case 'research.done':
+        if (journey) journey.researched = true
+        break
+      case 'research.skipped':
+        if (journey) journey.researchSkipped = true
+        break
+      case 'review.skipped':
+        if (journey) journey.reviewSkipped = event.because || 'unknown'
+        break
+      case 'path.suggested':
+        bump(summary.paths, event.mode || 'unknown')
         break
       case 'failure.diagnosed':
         bump(summary.byCategory, event.category || 'unknown')
@@ -179,6 +208,18 @@ export function summarize(events, { minSample = 10 } = {}) {
       if (journey.passed && !journey.escalated) row.passed += 1
     }
   }
+  // A task that paid a stage is not also counted as skipping it, even when a later attempt skipped.
+  for (const journey of journeys.values()) {
+    const { research, review } = summary.stages
+    if (journey.researched) research.paid += 1
+    else if (journey.researchSkipped) research.skipped += 1
+    if (journey.reviewed) {
+      review.paid += 1
+    } else if (journey.reviewSkipped) {
+      review.skipped += 1
+      bump(review.skippedBy, journey.reviewSkipped)
+    }
+  }
   for (const journey of journeys.values()) {
     if (journey.redone <= 0) continue
     summary.redone.tasks += 1
@@ -230,6 +271,10 @@ function dollars(value) {
   return `$${value.toFixed(value >= 1 ? 2 : 4)}`
 }
 
+function share(part, whole) {
+  return `${part} of ${whole} (${Math.round((part / whole) * 100)}%)`
+}
+
 function studiesLine(studies) {
   return `Studies: ${studies.tasks} (claims checked ${studies.checked}, rejected ${studies.rejected}); not counted as tasks.`
 }
@@ -275,6 +320,17 @@ export function renderInsights(summary) {
     .sort((a, b) => b[1].searches - a[1].searches || a[0].localeCompare(b[0]))
     .map(([match, row]) => [match, String(row.searches), String(row.tasks), String(row.passed)])
   lines.push(...table('Failure research by match', ['match', 'searches', 'tasks', 'passed later without escalating'], matchRows))
+  const { research, review } = summary.stages
+  const stageRows = [['research', research], ['review', review]].filter(([, row]) => row.paid || row.skipped).map(([stage, row]) => [stage, String(row.paid), String(row.skipped)])
+  lines.push(...table('Stages paid or skipped (tasks)', ['stage', 'paid', 'skipped'], stageRows))
+  lines.push(...table('Reviews skipped, by reason', ['reason', 'tasks'], counts(review.skippedBy)))
+  lines.push(...table('Light and small path notes shown', ['path', 'notes'], counts(summary.paths)))
+  const { findings } = summary
+  const findingRows = [
+    findings.blockers ? ['blocker findings discarded (their command passed)', share(findings.discarded, findings.blockers)] : null,
+    findings.judged ? ['findings invalid', share(findings.invalid, findings.judged)] : null,
+  ].filter(Boolean)
+  lines.push(...table('Review findings', ['measure', 'share'], findingRows))
   if (summary.hindsight.overRouted > 0) {
     lines.push('', `Possibly over-routed: ${summary.hindsight.overRouted} task(s) started on opus at low or medium risk and passed with no escalation, failure or blocking finding. A hint to look at, not a verdict.`)
   }

@@ -17,12 +17,15 @@ export const EVENT_TYPES = [
   'model.selected',
   'research.done',
   'research.failure',
+  'research.skipped',
   'criteria.defined',
   'implementation.done',
   'verify.done',
   'failure.diagnosed',
   'escalated',
   'review.done',
+  'review.skipped',
+  'path.suggested',
   'task.passed',
   'task.stopped',
   'budget.warning',
@@ -38,8 +41,14 @@ const TEXT_KEYS = ['ts', 'type', 'session', 'task', 'tier', 'role', 'risk', 'bec
 const NUMBER_KEYS = ['attempt', 'costUsd', 'tokens', 'durationMs', 'calls']
 const FLAG_KEYS = ['confirmed', 'costEstimated']
 const GATE_KEYS = ['verified', 'failed', 'unverified', 'flaky']
-const REVIEW_KEYS = ['blocking', 'discarded', 'notes']
+const REVIEW_KEYS = ['blocking', 'discarded', 'notes', 'invalid']
 const MAX_FACTORS = 8
+// A skip or path event names its cause with an enumerated word, never the free text the prompt gave (CC_TIERS_RESEARCH: none - <reason>).
+const STAGE_WORDS = {
+  'research.skipped': {},
+  'review.skipped': { because: ['header', 'adaptive'] },
+  'path.suggested': { mode: ['light', 'small'] },
+}
 
 /** `/config` stores telemetry as on/reduced/off. Project files may say true or false. */
 export function parseTelemetry(value, fallback = 'on') {
@@ -82,6 +91,11 @@ export function sanitizeEvent(event) {
   }
   if (event.gate && typeof event.gate === 'object') out.gate = countsOf(event.gate, GATE_KEYS)
   if (event.review && typeof event.review === 'object') out.review = countsOf(event.review, REVIEW_KEYS)
+  const words = STAGE_WORDS[event.type]
+  if (words) {
+    delete out.reason
+    for (const key of ['because', 'mode']) if (!words[key]?.includes(out[key])) delete out[key]
+  }
   // A cost here is always derived from token counts, never a billed amount.
   if ('costUsd' in out && typeof out.costEstimated !== 'boolean') out.costEstimated = true
   return out

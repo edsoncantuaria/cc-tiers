@@ -4500,14 +4500,14 @@ const ADAPTIVE_GATE = { status: 'pass', verified: ['npm test'], flaky: [], unver
 const ADAPTIVE_PROVEN = 'CC_TIERS_CRITERION: C1 pass - the list is paginated, shown by npm test'
 
 /** One writer pass of `paging` through delegation and report; `spec` and `lines` shape what the criteria can prove. */
-function adaptivePass({ user = {}, role = 'implementer', tier = 'sonnet', spec = ADAPTIVE_SPEC, lines = [ADAPTIVE_PROVEN], gate = ADAPTIVE_GATE, workspace, prepare } = {}) {
+function adaptivePass({ user = {}, role = 'implementer', tier = 'sonnet', spec = ADAPTIVE_SPEC, lines = [ADAPTIVE_PROVEN], gate = ADAPTIVE_GATE, workspace, prepare, apply = tiers.applyEvent } = {}) {
   const routing = defaultRouting(user)
   const state = tiers.emptyState('s')
   const prompt = `CC_TIERS_TASK: paging\nCC_TIERS_TIER: ${tier}\nCC_TIERS_ROLE: ${role}\nCC_TIERS_RESEARCH: none - local change\n${spec}\nAdd pagination to src/users.js`
   assert.equal(tiers.checkDelegation(state, { subagent_type: `cc-tiers:${role}`, prompt }, routing).deny, '')
   prepare?.(state)
   const text = ['CC_TIERS_TASK: paging', `CC_TIERS_TIER: ${tier}`, `CC_TIERS_ROLE: ${role}`, ...lines, 'CC_TIERS_VERIFY: npm test', 'CC_TIERS_STATUS: pass', 'CC_TIERS_REASON: done'].join('\n')
-  return tiers.applyEvent(state, { kind: 'report', id: 'r1', tool_use_id: 'r1', session_id: 's', role, prompt, text, error: '', gate, workspace }, routing)
+  return apply(state, { kind: 'report', id: 'r1', tool_use_id: 'r1', session_id: 's', role, prompt, text, error: '', gate, workspace }, routing)
 }
 
 const ADAPTIVE_MESSAGE = /review skipped: low risk, gate verified and every criterion proven by a command \(adaptive_review\)/
@@ -4666,4 +4666,93 @@ test('adaptive_review is on by default, comes from /config env, and the session 
   const off = tiers.policyLines(defaultRouting({ adaptive_review: 'off' })).join('\n')
   assert.match(off, /Adaptive review: off\./)
   assert.doesNotMatch(off, /finishes without review/)
+})
+
+/** adaptivePass through processReport, which queues the telemetry events; the state comes back in place of the applied result. */
+const emitting = (state, event, routing) => {
+  tiers.processReport({ routing, ccCost: false, projectDir: '', dataDir: '' }, state, event)
+  return state
+}
+const eventTypes = (state) => state.events.map((item) => item.type)
+const SKIP_HEADER = ['CC_TIERS_REVIEW: skip']
+
+test('telemetry: a pass that skipped review on its own header records review.skipped because header, and no prompt text', () => {
+  const state = adaptivePass({ user: { adaptive_review: 'off' }, lines: [ADAPTIVE_PROVEN, ...SKIP_HEADER], apply: emitting })
+  assert.equal(state.log.paging.status, 'done')
+  const skipped = state.events.filter((item) => item.type === 'review.skipped')
+  assert.deepEqual(skipped.map(({ task, tier, because }) => ({ task, tier, because })), [{ task: 'paging', tier: 'sonnet', because: 'header' }])
+  assert.ok(!eventTypes(state).includes('review.done'))
+  assert.ok(!JSON.stringify(state.events).includes('local change'), 'the free text after none - stays out of every event')
+})
+
+test('telemetry: an adaptive skip records review.skipped because adaptive', () => {
+  const state = adaptivePass({ apply: emitting })
+  assert.deepEqual(state.events.filter((item) => item.type === 'review.skipped').map((item) => item.because), ['adaptive'])
+  // Under cheap a low-risk Sonnet pass needs no review either way: that is the policy, not a skip the report or the gate earned.
+  assert.ok(!eventTypes(adaptivePass({ user: { review_policy: 'cheap' }, apply: emitting })).includes('review.skipped'))
+})
+
+test('telemetry: a skip forced back to review by the floor records no review.skipped', () => {
+  const sensitive = { changed: ['.env'], sensitive: [{ file: '.env', why: 'environment file' }], outOfScope: [] }
+  const cases = [
+    ['a critical risk under the header', { user: { adaptive_review: 'off' }, lines: [ADAPTIVE_PROVEN, ...SKIP_HEADER], prepare: (state) => { state.log.paging.risk = 'critical' } }],
+    ['a sensitive file under the header', { lines: [ADAPTIVE_PROVEN, ...SKIP_HEADER], workspace: sensitive }],
+    ['a sensitive file under adaptive', { workspace: sensitive }],
+    ['a medium risk under adaptive', { prepare: (state) => { state.log.paging.risk = 'medium' } }],
+  ]
+  for (const [name, options] of cases) {
+    const state = adaptivePass({ ...options, apply: emitting })
+    assert.ok(!eventTypes(state).includes('review.skipped'), name)
+    assert.ok(state.tasks.paging, `${name}: the task still waits for its review`)
+  }
+})
+
+test('telemetry: research.skipped comes from a CC_TIERS_RESEARCH: none delegation, once per task, with no reason', () => {
+  const routing = defaultRouting()
+  const state = tiers.emptyState('s')
+  const prompt = (research, extra = '') => `${HEADER('paging', 'sonnet', 'implementer')}CC_TIERS_RESEARCH: ${research}
+${ADAPTIVE_SPEC}
+${extra}Add pagination to src/users.js`
+  const call = (research) => tiers.checkDelegation(state, { subagent_type: 'cc-tiers:implementer', prompt: prompt(research) }, routing)
+  assert.equal(call('none - small local change, ghp_secret').deny, '')
+  assert.equal(call('none - small local change, ghp_secret').deny, '', 'a retry delegates again')
+  const skipped = state.events.filter((item) => item.type === 'research.skipped')
+  assert.equal(skipped.length, 1)
+  assert.equal(skipped[0].task, 'paging')
+  assert.ok(!JSON.stringify(skipped).includes('ghp_secret') && !JSON.stringify(skipped).includes('small local change'))
+
+  const done = tiers.emptyState('s')
+  done.researched = { paging: true }
+  tiers.checkDelegation(done, { subagent_type: 'cc-tiers:implementer', prompt: prompt('done') }, routing)
+  assert.ok(!eventTypes(done).includes('research.skipped'), 'finished research is not a skip')
+
+  const refused = tiers.emptyState('s')
+  assert.match(tiers.checkDelegation(refused, { subagent_type: 'cc-tiers:implementer', prompt: prompt('') }, routing).deny, /run cc-tiers:researcher/)
+  assert.ok(!eventTypes(refused).includes('research.skipped'), 'a refused call records nothing')
+
+  const off = tiers.emptyState('s')
+  tiers.checkDelegation(off, { subagent_type: 'cc-tiers:implementer', prompt: prompt('none - local') }, defaultRouting({ research: 'off' }))
+  assert.ok(!eventTypes(off).includes('research.skipped'), 'research off asks for no research to skip')
+})
+
+test('telemetry: pathMode names the note lightHint gave, and the UserPromptSubmit hook records path.suggested with the mode only', async () => {
+  const routing = defaultRouting()
+  assert.equal(tiers.pathMode(tiers.lightHint('fix a typo in README', routing)), 'light')
+  assert.equal(tiers.pathMode(tiers.lightHint('Add pagination to GET /users', routing)), 'small')
+  assert.equal(tiers.pathMode(tiers.lightHint('Rename the login handler', routing)), '')
+  assert.equal(tiers.pathMode(''), '')
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-'))
+  try {
+    const env = hookEnv(dir, { CC_TIERS_CC_COST: '0' })
+    for (const prompt of ['fix a typo in README', 'Add pagination to GET /users', 'Rename the login handler']) {
+      runHook('stop.mjs', { session_id: 'sess-1', hook_event_name: 'UserPromptSubmit', prompt }, env)
+    }
+    const log = readFileSync(path.join(dir, 'data', 'events.jsonl'), 'utf8')
+    const events = log.trim().split('\n').map((line) => JSON.parse(line)).filter((item) => item.type === 'path.suggested')
+    assert.deepEqual(events.map((item) => item.mode), ['light', 'small'])
+    assert.deepEqual(Object.keys(events[0]).sort(), ['mode', 'session', 'ts', 'type'])
+    assert.ok(!log.includes('README') && !log.includes('pagination'), 'no prompt text')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 })

@@ -1850,6 +1850,7 @@ export function applyEvent(state, event, routing) {
     }
   } else if (status === 'pass' && review === 'skip' && !reviewFloor(state, task, routing, flagged)) {
     meta.outcome = 'pass'
+    meta.reviewSkipped = 'header'
     delete tasks[task]
     message = `Task ${task} passed on ${tier} and review was skipped. cc-tiers cleared its attempt counter.`
   } else if (status === 'pass') {
@@ -1861,6 +1862,7 @@ export function applyEvent(state, event, routing) {
     const adaptive = next != null && adaptiveSkip(state, task, routing, { role, tier, risky, floor })
     if (next == null || adaptive) {
       meta.outcome = 'pass'
+      if (adaptive) meta.reviewSkipped = 'adaptive'
       delete tasks[task]
       message = adaptive
         ? `Task ${task} passed on ${tier}: review skipped: low risk, gate verified and every criterion proven by a command (adaptive_review). cc-tiers cleared its attempt counter.`
@@ -2458,7 +2460,8 @@ export function checkDelegation(state, toolInput, routing, { history = null, pro
   const level = effort.level || parseEffort(input.effort) || AGENT_EFFORT[role]
   logEffort(state, task, tier, level)
   held.commit?.(approved)
-  noteDelegation(state, task, { role, tier, risk, effort: level, now, files: scope.files, isolated, projectDir, mode })
+  const researchSkipped = routing.research && writer && RESEARCH_NONE_RE.test((headers.RESEARCH || '').toLowerCase())
+  noteDelegation(state, task, { role, tier, risk, effort: level, now, files: scope.files, isolated, projectDir, mode, researchSkipped })
   if (spent.state === 'near') notes.push(`cc-tiers: ${budgetMessage(task, spent)}`)
   if (spent.state === 'over') notes.push(`cc-tiers: ${task} is over its budget; the user approved more with CC_TIERS_BUDGET (${headers.BUDGET}).`)
   const extra = writerContext(routing, risk, routed, task, projectDir, routing.specify ? criterionIds(own(state.contracts, task)) : '')
@@ -2532,7 +2535,7 @@ function taskBudgetStatus(state, task, routing, now) {
 }
 
 /** Book-keeping of one writer delegation: the log, the running-writer registry, the tree before it, and telemetry. */
-function noteDelegation(state, task, { role, tier, risk, effort, now, files, isolated, projectDir, mode }) {
+function noteDelegation(state, task, { role, tier, risk, effort, now, files, isolated, projectDir, mode, researchSkipped }) {
   const entry = logEntry(state, task)
   const first = !entry.started
   entry.calls = (Number(entry.calls) || 0) + 1
@@ -2549,6 +2552,7 @@ function noteDelegation(state, task, { role, tier, risk, effort, now, files, iso
   // The time tells later edits by you or another session apart from the writer's.
   if (snapshot) state.snapshots[task] = { ...snapshot, at: Number(now) }
   if (first) queueEvent(state, { type: 'task.received', task, role, tier })
+  if (first && researchSkipped) queueEvent(state, { type: 'research.skipped', task })
   queueEvent(state, { type: 'risk.assessed', task, risk: risk.level, factors: risk.factors })
   queueEvent(state, { type: 'model.selected', task, tier, role, effort, risk: risk.level, mode: entry.writer })
 }
@@ -3668,6 +3672,11 @@ export function lightHint(prompt, routing, { history = null, conserve = false, p
   )
 }
 
+/** Which path a lightHint note announces: small, light, or '' for no note. */
+export function pathMode(note) {
+  return /^cc-tiers (small|light) path/.exec(note)?.[1] || ''
+}
+
 export function pluginRoot(env = process.env) {
   if (env.CLAUDE_PLUGIN_ROOT) return env.CLAUDE_PLUGIN_ROOT
   return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -4476,6 +4485,7 @@ function emitEvents(state, meta, task, ctx) {
     })
   }
   if (REVIEW_ROLES.has(meta.role)) queueEvent(state, { ...base, type: 'review.done', outcome: meta.outcome, review: meta.review })
+  if (meta.reviewSkipped) queueEvent(state, { ...base, type: 'review.skipped', because: meta.reviewSkipped })
   if (meta.diagnosis && meta.outcome !== 'pass') {
     queueEvent(state, { ...base, type: 'failure.diagnosed', category: meta.diagnosis.category, confirmed: meta.diagnosis.confirmed, outcome: meta.outcome })
   }
