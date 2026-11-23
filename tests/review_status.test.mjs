@@ -581,10 +581,10 @@ function launchAgent(env, agentId, role, prompt) {
 }
 
 /** One SubagentStop of a background agent: `handback` is what its transcript delivers through SubagentHandback, `last` its last message. */
-function stopAgent(dir, env, agentId, role, name, { handback, last = '', cwd, stopActive = false } = {}) {
+function stopAgent(dir, env, agentId, role, name, { handback, last = '', cwd, stopActive = false, transcript } = {}) {
   const file = path.join(dir, `${name}.jsonl`)
   writeFileSync(file, handback === undefined ? '' : [assistantRow([HANDBACK(handback)], `m-${name}`), HANDBACK_RESULT].join('\n'))
-  const stop = run('subagent_stop.mjs', { ...stopPayload(agentId, file, last, stopActive), agent_type: `cc-tiers:${role}`, cwd }, env)
+  const stop = run('subagent_stop.mjs', { ...stopPayload(agentId, file, last, stopActive), agent_type: `cc-tiers:${role}`, cwd, transcript_path: transcript }, env)
   assert.equal(stop.status, 0, stop.stderr)
   return sessionState(dir)
 }
@@ -608,6 +608,12 @@ function scanMain(env, transcript, cwd) {
 }
 
 const appendRows = (file, ...rows) => appendFileSync(file, `${rows.join('\n')}\n`)
+
+let resumes = 0
+/** The result row of a SendMessage that resumed the agent: the main transcript is the only evidence of a resume the hooks have. */
+function resumeAgent(transcript, agentId) {
+  appendRows(transcript, JSON.stringify({ type: 'user', uuid: `resume-${(resumes += 1)}`, timestamp: new Date().toISOString(), message: { role: 'user', content: [] }, toolUseResult: { success: true, resumedAgentId: agentId } }))
+}
 
 test('an agent of any role that stops with no status stays registered, so its next stop after SendMessage is its report', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-status-'))
@@ -641,12 +647,15 @@ test('a writer resumed after its report was counted counts its next report as a 
   const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-status-'))
   try {
     const env = { ...hookEnv(dir), CLAUDE_PLUGIN_OPTION_VERIFY: 'off' }
+    const transcript = path.join(dir, 'main.jsonl')
+    writeFileSync(transcript, '')
     launchAgent(env, 'agent-w', 'implementer', WRITER_PROMPT)
-    const first = stopAgent(dir, env, 'agent-w', 'implementer', 'w1', { handback: trailer('implementer', 'fail') })
+    const first = stopAgent(dir, env, 'agent-w', 'implementer', 'w1', { handback: trailer('implementer', 'fail'), transcript })
     assert.equal(first.tasks['users-pagination'].failures.length, 1)
     assert.equal(first.background['agent-w'], undefined)
-    // The same agent is asked to retry and reports the same way: that is the second attempt.
-    const second = stopAgent(dir, env, 'agent-w', 'implementer', 'w2', { handback: trailer('implementer', 'fail') })
+    // The same agent is asked to retry with SendMessage and reports the same way: that is the second attempt.
+    resumeAgent(transcript, 'agent-w')
+    const second = stopAgent(dir, env, 'agent-w', 'implementer', 'w2', { handback: trailer('implementer', 'fail'), transcript })
     assert.equal(second.tasks['users-pagination'].tier, 'opus', 'two failures on Sonnet escalate')
     assert.equal(second.log['users-pagination'].attempts, 2)
     assert.ok(second.seen.includes('agent:agent-w:1'))
@@ -659,14 +668,17 @@ test('a writer retried by SendMessage after a review rejected it is a new attemp
   const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-status-'))
   try {
     const env = { ...hookEnv(dir), CLAUDE_PLUGIN_OPTION_VERIFY: 'off', CLAUDE_PLUGIN_OPTION_REVIEW_POLICY: 'always' }
+    const transcript = path.join(dir, 'main.jsonl')
+    writeFileSync(transcript, '')
     launchAgent(env, 'agent-w', 'implementer', WRITER_PROMPT)
-    const passed = stopAgent(dir, env, 'agent-w', 'implementer', 'w1', { handback: trailer('implementer', 'pass') })
+    const passed = stopAgent(dir, env, 'agent-w', 'implementer', 'w1', { handback: trailer('implementer', 'pass'), transcript })
     assert.equal(passed.log['users-pagination'].status, 'in review')
     launchAgent(env, 'agent-v', 'reviewer', REVIEW_PROMPT)
     const rejected = stopAgent(dir, env, 'agent-v', 'reviewer', 'v1', { handback: `${finding()}\n${trailer('reviewer', 'fail')}` })
     assert.equal(rejected.tasks['users-pagination'].rejected, true)
     assert.equal(rejected.tasks['users-pagination'].failures.length, 1)
-    const retried = stopAgent(dir, env, 'agent-w', 'implementer', 'w2', { handback: trailer('implementer', 'pass') })
+    resumeAgent(transcript, 'agent-w')
+    const retried = stopAgent(dir, env, 'agent-w', 'implementer', 'w2', { handback: trailer('implementer', 'pass'), transcript })
     assert.equal(retried.tasks['users-pagination'].rejected, undefined, 'the retry is judged on its own')
     assert.equal(retried.log['users-pagination'].attempts, 2, 'the writer and its retry')
     assert.match(retried.pending.at(-1), /passed on sonnet/)
@@ -929,8 +941,10 @@ test('the same report from SubagentStop and from the main transcript is counted 
     assert.equal(sessionState(dir).tasks['report-export'].failures.length, 1)
     assert.equal(stopAgent(dir, env, 'agent-c', 'implementer', 'c1', { handback: third }).tasks['report-export'].failures.length, 1)
 
-    // A resumed run that reports the same text is a new attempt: the pair was already matched.
-    assert.equal(stopAgent(dir, env, 'agent-c', 'implementer', 'c2', { handback: third }).tasks['report-export'].tier, 'opus')
+    // The same text again with no resume between is the same report; one the orchestrator resumed with SendMessage is a new attempt.
+    assert.equal(stopAgent(dir, env, 'agent-c', 'implementer', 'c2', { handback: third, transcript }).tasks['report-export'].tier, 'sonnet')
+    resumeAgent(transcript, 'agent-c')
+    assert.equal(stopAgent(dir, env, 'agent-c', 'implementer', 'c3', { handback: third, transcript }).tasks['report-export'].tier, 'opus')
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

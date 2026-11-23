@@ -80,7 +80,7 @@ function gateProject(dir) {
   return { project, env, ran, report }
 }
 
-const run = (script, payload, env) => spawnSync(process.execPath, [path.join(ROOT, 'hooks', script)], { input: JSON.stringify(payload), encoding: 'utf8', env })
+const run = (script, payload, env, timeout) => spawnSync(process.execPath, [path.join(ROOT, 'hooks', script)], { input: JSON.stringify(payload), encoding: 'utf8', env, timeout })
 
 function ok(proc) {
   assert.equal(proc.status, 0, proc.stderr)
@@ -102,27 +102,35 @@ const events = (dir) => {
   return existsSync(file) ? readFileSync(file, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line)) : []
 }
 
-/** One session: each method fires the hook Claude Code would, and the rows it would write reach the main transcript. */
-function session(dir, env, { id = SESSION, project = '' } = {}) {
+/** One session: each method fires the hook Claude Code would, and the rows it would write reach the main transcript. `timeout` (ms) kills a hook that hangs, so the test fails instead of the suite. */
+function session(dir, env, { id = SESSION, project = '', timeout } = {}) {
+  const exec = (script, payload) => run(script, payload, env, timeout)
   const transcript = path.join(dir, `${id}.jsonl`)
   writeFileSync(transcript, '')
   mkdirSync(path.join(dir, 'agents'), { recursive: true })
   const base = { session_id: id, transcript_path: transcript, cwd: project }
   const stopPayload = { ...base, hook_event_name: 'Stop', stop_hook_active: false }
+  function subagentStopPayload(agentId, role, { handback, last = '', stopActive = false, name = `${agentId}-stop` } = {}) {
+    // Neither a hand-back nor a status in the last message would make the hook wait 2 s for one.
+    assert.ok(handback !== undefined || tiers.parseHeaders(last).STATUS, 'a SubagentStop with nothing to read would wait 2 s')
+    const file = path.join(dir, 'agents', `${name}.jsonl`)
+    writeFileSync(file, handback === undefined ? '' : [assistantRow([HANDBACK(handback)], `m-${name}`), HANDBACK_RESULT].join('\n'))
+    return { ...base, hook_event_name: 'SubagentStop', agent_id: agentId, agent_type: `cc-tiers:${role}`, agent_transcript_path: file, last_assistant_message: last, stop_hook_active: stopActive }
+  }
   const api = {
     transcript,
     state: () => stateOf(dir, id),
     start(source = 'startup') {
-      const proc = ok(run('session_start.mjs', { ...base, hook_event_name: 'SessionStart', source }, env))
+      const proc = ok(exec('session_start.mjs', { ...base, hook_event_name: 'SessionStart', source }))
       appendRows(transcript, JSON.stringify({ type: 'attachment', uuid: uuid(), attachment: { hookName: `SessionStart:${source}`, stdout: proc.stdout } }))
       return proc
     },
     before(role, prompt, toolUseId = uuid()) {
       appendRows(transcript, assistantRow([{ type: 'tool_use', id: toolUseId, name: 'Agent', input: { subagent_type: `cc-tiers:${role}`, prompt } }], `m-${toolUseId}`))
-      return ok(run('before_agent.mjs', { ...base, hook_event_name: 'PreToolUse', tool_name: 'Agent', tool_use_id: toolUseId, tool_input: { subagent_type: `cc-tiers:${role}`, prompt } }, env))
+      return ok(exec('before_agent.mjs', { ...base, hook_event_name: 'PreToolUse', tool_name: 'Agent', tool_use_id: toolUseId, tool_input: { subagent_type: `cc-tiers:${role}`, prompt } }))
     },
     after(role, prompt, response, toolUseId) {
-      const proc = ok(run('after_agent.mjs', { ...base, hook_event_name: 'PostToolUse', tool_name: 'Agent', tool_use_id: toolUseId, tool_input: { subagent_type: `cc-tiers:${role}`, prompt }, tool_response: response }, env))
+      const proc = ok(exec('after_agent.mjs', { ...base, hook_event_name: 'PostToolUse', tool_name: 'Agent', tool_use_id: toolUseId, tool_input: { subagent_type: `cc-tiers:${role}`, prompt }, tool_response: response }))
       const text = response.content?.map((block) => block.text).join('\n') || response.status
       appendRows(transcript, JSON.stringify({ type: 'user', uuid: uuid(), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: toolUseId, content: text }] } }))
       return proc
@@ -132,18 +140,20 @@ function session(dir, env, { id = SESSION, project = '' } = {}) {
     /** An Agent call that ran in the background: cc-tiers registers its agent id. */
     launch: (role, prompt, agentId) => api.after(role, prompt, { status: 'async_launched', agentId, prompt }, `bg-${agentId}`),
     /** One SubagentStop; `handback` is what the agent's own transcript delivers through SubagentHandback. */
-    subagentStop(agentId, role, { handback, last = '', stopActive = false, name = `${agentId}-stop` } = {}) {
-      // Neither a hand-back nor a status in the last message would make the hook wait 2 s for one.
-      assert.ok(handback !== undefined || tiers.parseHeaders(last).STATUS, 'a SubagentStop with nothing to read would wait 2 s')
-      const file = path.join(dir, 'agents', `${name}.jsonl`)
-      writeFileSync(file, handback === undefined ? '' : [assistantRow([HANDBACK(handback)], `m-${name}`), HANDBACK_RESULT].join('\n'))
-      return ok(run('subagent_stop.mjs', { ...base, hook_event_name: 'SubagentStop', agent_id: agentId, agent_type: `cc-tiers:${role}`, agent_transcript_path: file, last_assistant_message: last, stop_hook_active: stopActive }, env))
+    subagentStop: (agentId, role, options) => ok(exec('subagent_stop.mjs', subagentStopPayload(agentId, role, options))),
+    /** A SubagentStop that has not ended yet, like startStop. */
+    startSubagentStop(agentId, role, options) {
+      const child = spawn(process.execPath, [path.join(ROOT, 'hooks', 'subagent_stop.mjs')], { env, stdio: ['pipe', 'ignore', 'ignore'] })
+      child.stdin.end(JSON.stringify(subagentStopPayload(agentId, role, options)))
+      return child
     },
+    /** The result row of a SendMessage that resumed the agent. */
+    resume: (agentId) => appendRows(transcript, JSON.stringify({ type: 'user', uuid: uuid(), timestamp: new Date().toISOString(), message: { role: 'user', content: [] }, toolUseResult: { success: true, resumedAgentId: agentId } })),
     /** The main transcript gets the hand-back row of a background agent. */
     handBack: (agentId, text) => appendRows(transcript, handbackRow(agentId, text)),
     /** A hook that scans the main transcript and gates nothing: UserPromptSubmit. */
-    prompt: () => ok(run('stop.mjs', { ...base, hook_event_name: 'UserPromptSubmit', prompt: 'go on' }, env)),
-    stop: () => ok(run('stop.mjs', stopPayload, env)),
+    prompt: () => ok(exec('stop.mjs', { ...base, hook_event_name: 'UserPromptSubmit', prompt: 'go on' })),
+    stop: () => ok(exec('stop.mjs', stopPayload)),
     /** A Stop that has not ended yet: the caller can kill it while its gate runs. */
     startStop() {
       const child = spawn(process.execPath, [path.join(ROOT, 'hooks', 'stop.mjs')], { env, stdio: ['pipe', 'ignore', 'ignore'] })
@@ -337,22 +347,26 @@ const HANG = [
   'while (!existsSync(process.argv[3]) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25))',
 ].join('\n')
 
+// A hook that hangs fails its test instead of the whole suite.
+const HOOK_TIMEOUT_MS = 10000
+
 test('a Stop killed in the middle of its gate leaves the parked pass for the next Stop', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-life-'))
   const release = path.join(dir, 'gate-release')
+  let stop
   try {
     const { project, env } = gateProject(dir)
     writeFileSync(path.join(project, 'hang.mjs'), HANG)
     env.CLAUDE_PLUGIN_OPTION_VERIFY_ALLOW = 'node hang.mjs'
     const started = path.join(dir, 'gate-started')
-    const s = session(dir, env, { project })
+    const s = session(dir, env, { project, timeout: HOOK_TIMEOUT_MS })
     s.start()
     s.launch('implementer', WRITER_PROMPT, 'agent-w')
     s.handBack('agent-w', trailer('implementer', 'pass', ['CC_TIERS_REVIEW: skip', `CC_TIERS_VERIFY: node hang.mjs ${started} ${release}`]))
     s.prompt()
     assert.equal(s.state().awaiting.length, 1)
 
-    const stop = s.startStop()
+    stop = s.startStop()
     const closed = new Promise((resolve) => stop.on('close', resolve))
     const deadline = Date.now() + 15000
     while (!existsSync(started) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25))
@@ -373,6 +387,7 @@ test('a Stop killed in the middle of its gate leaves the parked pass for the nex
     assert.deepEqual(s.state().awaiting, [])
     assert.equal(s.state().log[TASK].attempts, 1)
   } finally {
+    stop?.kill('SIGKILL')
     writeFileSync(release, '')
     await rm(dir, { recursive: true, force: true })
   }
@@ -398,9 +413,9 @@ test('a writer fail read from its SubagentStop and from its hand-back row is one
   }
 })
 
-// Task dup-report: today a second SubagentStop with the very text already counted reads as a retried attempt (a resumed run that
-// failed the same way is a failure of its own, so the text alone cannot tell them apart), and the second failure escalates the task.
-test('a second SubagentStop after the background work of the same writer ends is not a second failure', { todo: 'issue #28: duplicate report counted twice (task dup-report)' }, async () => {
+// Task dup-report: a stop with the text already counted and no SendMessage resume since is the same report, not a retried attempt
+// (a resumed run that fails the same way is a failure of its own, so the text alone cannot tell them apart).
+test('a second SubagentStop after the background work of the same writer ends is not a second failure', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-life-'))
   try {
     const { project, env } = gateProject(dir)
@@ -420,6 +435,68 @@ test('a second SubagentStop after the background work of the same writer ends is
     assert.equal(state.log[TASK].failures, 1, 'the second stop is not a second failure')
     assert.equal(state.tasks[TASK].tier, 'sonnet', 'one failure does not escalate the task')
   } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a hand-back row counted at Stop, then the SubagentStop of the same report, is one failure', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-life-'))
+  try {
+    const { project, env } = gateProject(dir)
+    const s = session(dir, env, { project })
+    const incomplete = trailer('implementer', 'fail')
+    s.start()
+    s.before('implementer', WRITER_PROMPT)
+    s.launch('implementer', WRITER_PROMPT, 'agent-w')
+
+    s.handBack('agent-w', incomplete)
+    s.prompt()
+    assert.equal(s.state().awaiting.length, 1, 'the row is parked')
+    s.stop()
+    assert.equal(s.state().log[TASK].failures, 1, 'Stop counted the row')
+    s.subagentStop('agent-w', 'implementer', { handback: incomplete, last: incomplete })
+    s.stop()
+    const state = s.state()
+    assert.equal(state.log[TASK].failures, 1, 'the stop is the twin of the counted row')
+    assert.equal(state.tasks[TASK].failures.length, 1)
+    assert.equal(state.tasks[TASK].tier, 'sonnet')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a resume stamped while the SubagentStop gate runs makes the next same-text stop a new attempt', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'cc-tiers-life-'))
+  const release = path.join(dir, 'gate-release')
+  let stop
+  try {
+    const { project, env } = gateProject(dir)
+    writeFileSync(path.join(project, 'hang.mjs'), HANG)
+    env.CLAUDE_PLUGIN_OPTION_VERIFY_ALLOW = 'node hang.mjs'
+    const started = path.join(dir, 'gate-started')
+    const s = session(dir, env, { project, timeout: HOOK_TIMEOUT_MS })
+    const passed = trailer('implementer', 'pass', ['CC_TIERS_REVIEW: skip', `CC_TIERS_VERIFY: node hang.mjs ${started} ${release}`])
+    s.start()
+    s.before('implementer', WRITER_PROMPT)
+    s.launch('implementer', WRITER_PROMPT, 'agent-w')
+
+    stop = s.startSubagentStop('agent-w', 'implementer', { handback: passed, last: passed })
+    const closed = new Promise((resolve) => stop.on('close', resolve))
+    const deadline = Date.now() + 15000
+    while (!existsSync(started) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25))
+    assert.ok(existsSync(started), 'the gate command started')
+    // The orchestrator resumes the agent with SendMessage while the first stop's gate still runs.
+    s.resume('agent-w')
+    writeFileSync(release, '')
+    await closed
+    assert.equal(s.state().log[TASK].attempts, 1, 'the first stop is counted')
+
+    // The resumed run stops with the same text: a new attempt, not the report already counted.
+    s.subagentStop('agent-w', 'implementer', { handback: passed, last: passed, name: 'agent-w-resumed' })
+    assert.equal(s.state().log[TASK].attempts, 2, 'the stop after the resume is its own attempt')
+  } finally {
+    stop?.kill('SIGKILL')
+    writeFileSync(release, '')
     await rm(dir, { recursive: true, force: true })
   }
 })

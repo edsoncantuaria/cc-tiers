@@ -4190,9 +4190,9 @@ export function stopOrphanedAgents(state) {
   }
 }
 
-/** The agent's counted report is remembered, so its next stop after SendMessage is a new attempt; the token pairs the same report arriving by its other path. A hand-back row stopped the agent when it was written, not when it is counted. */
+/** The agent's counted report is remembered, so its next stop after SendMessage is a new attempt; `reported` pairs the same report arriving by its other path, `counted` outlives that claim to tell a repeat with no resume between. `reportedAt` is when the agent stopped (a hand-back row's time, a SubagentStop's start), not when its report is counted after a gate. */
 function rememberFinished(state, event, via) {
-  registerAgent(state, event.agent_id, { role: event.role, prompt: event.prompt || '', at: launchTime(event), stops: (Number(event.stops) || 0) + 1, stoppedAt: Number(event.reportedAt) || Date.now(), reported: reportToken(via, event.text) }, 'finished')
+  registerAgent(state, event.agent_id, { role: event.role, prompt: event.prompt || '', at: launchTime(event), stops: (Number(event.stops) || 0) + 1, stoppedAt: Number(event.reportedAt) || Date.now(), reported: reportToken(via, event.text), counted: reportToken('counted', event.text) }, 'finished')
 }
 
 /**
@@ -4204,9 +4204,12 @@ export function claimTwin(state, agentId, via, text) {
   if (silent && (state.awaiting || []).some((item) => item.agent_id === agentId)) return true
   const entry = own(state.finished, agentId)
   const other = via === 'row' ? 'stop' : 'row'
-  if (!entry?.reported || !(entry.reported === reportToken(other, text) || (silent && entry.reported.startsWith('row:')))) return false
-  delete entry.reported
-  return true
+  if (entry?.reported && (entry.reported === reportToken(other, text) || (silent && entry.reported.startsWith('row:')))) {
+    delete entry.reported
+    return true
+  }
+  // The same text again from an agent no SendMessage resumed since that count is the same report, not another attempt.
+  return Boolean(entry?.counted) && entry.counted === reportToken('counted', text) && !agentRuns(entry)
 }
 
 /** Counts a background agent's report, whichever path brought it, and remembers the agent unless it still owes a report. */

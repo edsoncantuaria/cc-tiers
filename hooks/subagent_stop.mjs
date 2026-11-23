@@ -18,6 +18,8 @@ const HANDBACK_TRIES = 10
 const HANDBACK_WAIT_MS = 200
 
 async function main(payload) {
+  // The agent stopped now, not when the report is counted after its gate: a SendMessage resume stamped meanwhile is newer than this stop.
+  const stoppedAt = Date.now()
   const {
     agentEntry,
     agentHandbackReport,
@@ -68,7 +70,7 @@ async function main(payload) {
   if (!launched) return
   const role = launched.role || matchRole(payload.agent_type)
   // The main-transcript row already brought this report: it is not judged or counted again.
-  const event = role && !twin ? prepareReport(ctx, agentReport(agentId, { ...launched, role }, text), payload, { peek, agentTranscript: payload.agent_transcript_path }) : null
+  const event = role && !twin ? prepareReport(ctx, { ...agentReport(agentId, { ...launched, role }, text), reportedAt: stoppedAt }, payload, { peek, agentTranscript: payload.agent_transcript_path }) : null
 
   // A blocking finding that holds up already counts a review that has no verdict line.
   const counted = REVIEW_ROLES.has(role) && ctx.routing.reviewEvidence && Boolean(event?.judged?.blocking.length)
