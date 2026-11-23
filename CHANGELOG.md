@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.13.11 - 2026-11-23
+
+### Changed
+
+- New option `adaptive_review` (`on` by default). Under `review_policy` `risky` or `cheap`, a pass from a delegated Haiku or Sonnet writer finishes with no review when its risk is `low` (no review keyword, no sensitive file, no review floor), its gate verified every command (none flaky or not validated), and a verified command proves every spec criterion. The completion note says the review was skipped and why. These still go to review: medium risk and up, an Opus writer, a criterion that is only declared, a flaky or not validated gate, a hook failure on the task, and a retry after any failure (a rejection, a failed gate, an escalation or a finding carried over), which the skip never covers. `always` reviews every pass as before, and `off` brings back the old behaviour for `risky` and `cheap` too.
+- The `final-gate` review is skipped when every writer task of the request finished at low risk with a `cc-tiers completion: <task> verified ...` line. A task at medium risk or above, or a completion that is partial, failed or unverified, keeps it, and the final report says `final-gate skipped: every writer task was low risk and verified`. It is a rule in the orchestrator, the dispatcher and the tiers skill, not a check in the hook.
+- Three telemetry events: `research.skipped` (the first writer delegation of a task with `CC_TIERS_RESEARCH: none` while `research` is on), `review.skipped` (`because` is `header` for a writer that closed with `CC_TIERS_REVIEW: skip`, `adaptive` for the skip above) and `path.suggested` (`mode` is `light` or `small`, when a prompt gets that path note). They carry only those enumerated words, never the free text of the reason, and `review.done` now keeps `invalid` in its counts. `/cc-tiers:insights` prints the stages tasks paid or skipped, the reviews skipped by reason, the path notes shown, and two shares of the review findings.
+- `tests/lifecycle.test.mjs` and `tests/concurrency.test.mjs` run the hooks as real processes. The first drives a whole session (SessionStart, delegation, report, rejection, retry, approval, Stop) over a real transcript, plus resume, compact, fork, a missing or corrupt state file and a Stop killed in the middle of its gate. The second covers parallel writers and the session, gate, memory and history locks, with the order set by the test (lock files, a barrier file), not by sleeping.
+- `evals/` has ten reviewer cases, five pairs of a tiny repo whose last commit has a silent defect (`review-bug-*`: `Math.floor` in a page count, a default that changes every caller, a missing `await`, a swallowed error, `<` for `<=`) or the correct version (`review-ok-*`). Their graders check that the reviewer rejects with a blocking finding on the defect's file, or approves with none, and `evals/README.md` has the rates (false negative, false positive) and the `jq` that computes them.
+
+### Fixed
+
+- A background agent that stopped again with the same text after its own background work, with no `SendMessage` resume, counted a second failure and escalated the task (seen on 19/11). The hook now keeps a permanent mark of the report it counted (`rememberFinished`), and `claimTwin` takes a stop with the same text and no resume since that count as the same report. A resumed agent still counts. SubagentStop stamps the stop time first, before its gate, so a resume that arrives during the gate counts as a new attempt.
+- A researcher pass now records `research.done` for the task and for every slug it covers through `CC_TIERS_COVERS`, not only for the first. `/cc-tiers:insights` did not count a covered task as having paid research, although it shared the paid pass.
+- Open notes: the order between the resume row and the next SubagentStop was not confirmed in a real Claude Code, and `awaitReport` still stamps the stop after its gate.
+- Known limits of the new telemetry and the adaptive skip:
+  - The insights share of discarded findings is of blocker findings (blocking plus discarded), not of command findings only: `review.done` does not count command findings apart.
+  - `research.skipped` is recorded only on the first writer delegation of a task.
+  - `review.skipped` with `because: header` can include a task for which the policy would not have asked for a review.
+  - The reviewer eval cases were not run here: Bash fails inside eval runs on this machine (the AppArmor profile `bwrap-userns-restrict`, see `evals/README.md`). They are built to run on a CI runner or a VM.
+  - The before and after measurement of adaptive review depends on the metrics work (#24) and is not done.
+- Why: a low-risk pass with every criterion proven by a command paid for an Opus review, and a request of low-risk tasks paid for a `final-gate` on top (#26); nothing measured how often the reviewer misses a defect or rejects correct work, nor which stages a task paid (#26, #27); and the hooks had no test that runs them as processes across a session, so a duplicate report that escalated a task and the races on the locks showed only in real use (#28).
+
 ## 0.13.10 - 2026-11-19
 
 ### Changed
